@@ -92,4 +92,8 @@ pub enum ParametersBuilderError {
     #[error("the Crosslink bootstrap activation height must exceed the roster height by more than the reorg limit")]
     #[non_exhaustive]
     InvalidCrosslinkBootstrap,
+
+    #[error("the staking calendar needs 0 < day window <= period and an action delay longer than the day window")]
+    #[non_exhaustive]
+    InvalidStakingParameters,
 }

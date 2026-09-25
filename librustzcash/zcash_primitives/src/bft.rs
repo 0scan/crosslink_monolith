@@ -452,7 +452,62 @@ pub struct ZcashCrosslinkParameters {
 
     /// How BFT comes into existence on this network.
     pub bootstrap: BftBootstrap,
+
+    /// When staking actions may land, and how far apart.
+    pub staking: StakingParameters,
 }
+
+/// The staking calendar of a network.
+///
+/// Real networks use [`PROTOTYPE_STAKING`]; a test network shrinks it so a bond lifecycle, which
+/// crosses several staking days, takes tens of blocks rather than hundreds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StakingParameters {
+    /// Blocks between the start of one staking day and the start of the next.
+    pub period: u32,
+
+    /// Staking actions other than retarget and conversion are valid only when
+    /// `height % period < day_window`.
+    pub day_window: u32,
+
+    /// Blocks a bond must wait after its last action before it can be unbonded (counted from its
+    /// creation) or withdrawn (counted from its unbonding).
+    pub action_delay: u32,
+}
+
+impl StakingParameters {
+    /// Blocks before a slashing hardfork's activation whose staking actions decide its burns.
+    ///
+    /// Derived rather than set, because the slash's guarantee that no burned bond was already
+    /// withdrawn depends on this exact size; see `SLASH_ANALYSIS_WINDOW`.
+    pub const fn slash_analysis_window(&self) -> u32 {
+        2 * self.period - self.day_window
+    }
+
+    /// Whether consensus can run on this calendar: a non-empty day window no longer than the
+    /// period (which also keeps the `height % period` checks off zero), and an action delay longer
+    /// than the day window.
+    ///
+    /// The delay rule is what the slash burn relies on: it puts a withdrawal in a later staking
+    /// day than its unbond, so a bond still delegated at the start of the slash window cannot
+    /// withdraw before the activation block. Without it the burn can meet a withdrawn bond, which
+    /// `burn_delegation_bonds` treats as a broken invariant.
+    pub const fn is_valid(&self) -> bool {
+        self.day_window > 0 && self.day_window <= self.period && self.action_delay > self.day_window
+    }
+}
+
+/// The staking calendar every real network uses.
+pub const PROTOTYPE_STAKING: StakingParameters = StakingParameters {
+    period: crate::transaction::STAKING_PERIOD,
+    day_window: crate::transaction::STAKING_DAY_WINDOW,
+    action_delay: crate::transaction::STAKING_ACTION_DELAY,
+};
+const _: () = assert!(PROTOTYPE_STAKING.is_valid(), "the prototype staking calendar must be valid");
+const _: () = assert!(
+    PROTOTYPE_STAKING.slash_analysis_window() == crate::transaction::SLASH_ANALYSIS_WINDOW,
+    "the derived slash window must match the constant the slash guarantee was argued for"
+);
 
 impl ZcashCrosslinkParameters {
     /// Whether a chain-built bootstrap puts `h1` beyond reorg reach before any `h2` block can be
@@ -481,6 +536,7 @@ pub const PROTOTYPE_PARAMETERS: ZcashCrosslinkParameters = ZcashCrosslinkParamet
         roster_height: crate::transaction::STAKING_PERIOD / 2,
         activation_height: crate::transaction::STAKING_PERIOD / 2 + 200,
     },
+    staking: PROTOTYPE_STAKING,
 };
 const _: () = assert!(
     PROTOTYPE_PARAMETERS.bootstrap_is_valid(),

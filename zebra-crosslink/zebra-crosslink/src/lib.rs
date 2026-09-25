@@ -421,7 +421,8 @@ async fn total_issuance_from_key(
     PROF.reset();
 
     let hardfork_schedule = zebra_chain::parameters::HardForkSchedule::from_canonical(internal_handle.config.hardforks.clone());
-    let mut staking = zebra_state::StakingReplay::new(&hardfork_schedule);
+    let slash_analysis_window = internal_handle.params.staking.slash_analysis_window();
+    let mut staking = zebra_state::StakingReplay::new(&hardfork_schedule, slash_analysis_window);
     // The certificate carried by the previously scanned block, to tell whether the next one
     // advances it. `None` until the first block of the range, whose parent is outside it.
     // let mut prev_fat_pointer: Option<FatPointerToBftBlock> = None; // variable reward disabled
@@ -479,7 +480,7 @@ async fn total_issuance_from_key(
         // The live path burns before the activation block's staking actions.
         if height != 0 && staking.slash_activates_at(ZebBlockHeight(height)) {
             let mut window_blocks = Vec::new();
-            for window_height in zebra_state::slash_window(ZebBlockHeight(height)) {
+            for window_height in zebra_state::slash_window(ZebBlockHeight(height), slash_analysis_window) {
                 match (call.read_state)(StateReadRequest::Block(window_height.into())).await {
                     Ok(StateReadResponse::Block(Some(window_block))) => window_blocks.push(window_block),
                     _ => return Err(format!("failed to get block at height {} in the slash window", window_height.0)),

@@ -124,6 +124,19 @@ impl NonFinalizedState {
     /// Returns a new non-finalized state for `network`.
     // @Todo: move hardfork_schedule into Network?
     pub fn new(network: &Network, hardfork_schedule: std::sync::Arc<zebra_chain::parameters::hardfork::HardForkSchedule>) -> NonFinalizedState {
+        // A slash's guarantee that no burned bond was already withdrawn needs its activation at
+        // the start of one of this network's staking days (see `slash_burn_set`). Config parsing
+        // only checks that against the prototype calendar, so a network with its own calendar is
+        // checked here, before any slash can meet a withdrawn bond.
+        let period = u64::from(network.crosslink_parameters().staking.period);
+        for rule in hardfork_schedule.rules() {
+            assert!(
+                rule.terminated_finalizers.is_empty() || rule.pow_activation_height % period == 0,
+                "the slashing hardfork at height {} does not start a staking day on this network (staking period {period})",
+                rule.pow_activation_height,
+            );
+        }
+
         NonFinalizedState {
             chain_set: Default::default(),
             network: network.clone(),

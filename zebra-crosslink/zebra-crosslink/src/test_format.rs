@@ -211,11 +211,12 @@ impl TF {
         let ZcashCrosslinkParameters {
             bc_confirmation_depth_sigma,
             bootstrap,
+            staking,
         } = *params;
         tf.push_instr_ex(
             TFInstr::SET_PARAMS,
             0,
-            &bootstrap_to_bytes(bootstrap),
+            &params_to_bytes(bootstrap, staking),
             [bc_confirmation_depth_sigma, 0],
         );
 
@@ -468,15 +469,23 @@ pub const HARNESS_PARAMETERS: ZcashCrosslinkParameters = ZcashCrosslinkParameter
     // parameter should mean. The rules under test do not depend on sigma's value; the live
     // network's value is exercised on a testnet, not here.
     bc_confirmation_depth_sigma: 3,
+    // Pinned for the same reason as sigma: the staking scenes are built at heights chosen for
+    // this calendar. A scenario that wants a short one sets its own with `..HARNESS_PARAMETERS`.
+    staking: PROTOTYPE_STAKING,
 };
 
-// `SET_PARAMS` carries sigma in `val[0]`, and the bootstrap in its data. `val[1]` is written as
-// zero and never read: it used to carry the Book's `L`, which Zebra Crosslink does not have.
+// `SET_PARAMS` carries sigma in `val[0]`, and in its data the bootstrap followed by the staking
+// calendar (period, day window, action delay, each a little-endian u32). The calendar is written
+// only when it isn't the prototype's, and data that ends after the bootstrap is read as the
+// prototype calendar, so files from before the calendar was a parameter, and every file that
+// keeps the prototype calendar, stay byte-identical.
+// `val[1]` is written as zero and never read: it used to carry the Book's `L`, which Zebra
+// Crosslink does not have.
 const TF_BOOTSTRAP_SUPPLIED: u8 = 0;
 const TF_BOOTSTRAP_FROM_CHAIN: u8 = 1;
 
-fn bootstrap_to_bytes(bootstrap: BftBootstrap) -> Vec<u8> {
-    match bootstrap {
+fn params_to_bytes(bootstrap: BftBootstrap, staking: StakingParameters) -> Vec<u8> {
+    let mut bytes = match bootstrap {
         BftBootstrap::Supplied => vec![TF_BOOTSTRAP_SUPPLIED],
         BftBootstrap::FromChain { roster_height, activation_height } => {
             let mut bytes = vec![TF_BOOTSTRAP_FROM_CHAIN];
@@ -484,18 +493,34 @@ fn bootstrap_to_bytes(bootstrap: BftBootstrap) -> Vec<u8> {
             bytes.extend_from_slice(&activation_height.to_le_bytes());
             bytes
         }
+    };
+    if staking != PROTOTYPE_STAKING {
+        for value in [staking.period, staking.day_window, staking.action_delay] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
     }
+    bytes
 }
 
-fn bootstrap_from_bytes(bytes: &[u8]) -> Option<BftBootstrap> {
-    match bytes {
-        [TF_BOOTSTRAP_SUPPLIED] => Some(BftBootstrap::Supplied),
-        [TF_BOOTSTRAP_FROM_CHAIN, r0, r1, r2, r3, a0, a1, a2, a3] => Some(BftBootstrap::FromChain {
-            roster_height: u32::from_le_bytes([*r0, *r1, *r2, *r3]),
-            activation_height: u32::from_le_bytes([*a0, *a1, *a2, *a3]),
-        }),
-        _ => None,
-    }
+fn params_from_bytes(bytes: &[u8]) -> Option<(BftBootstrap, StakingParameters)> {
+    let (bootstrap, rest) = match bytes {
+        [TF_BOOTSTRAP_SUPPLIED, rest @ ..] => (BftBootstrap::Supplied, rest),
+        [TF_BOOTSTRAP_FROM_CHAIN, r0, r1, r2, r3, a0, a1, a2, a3, rest @ ..] => (
+            BftBootstrap::FromChain {
+                roster_height: u32::from_le_bytes([*r0, *r1, *r2, *r3]),
+                activation_height: u32::from_le_bytes([*a0, *a1, *a2, *a3]),
+            },
+            rest,
+        ),
+        _ => return None,
+    };
+    let word = |i: usize| u32::from_le_bytes(rest[4 * i..4 * i + 4].try_into().expect("four bytes"));
+    let staking = match rest.len() {
+        0 => PROTOTYPE_STAKING,
+        12 => StakingParameters { period: word(0), day_window: word(1), action_delay: word(2) },
+        _ => return None,
+    };
+    Some((bootstrap, staking))
 }
 
 /// The Crosslink parameters a test file's node must run with: its leading `SET_PARAMS`, or
@@ -536,10 +561,14 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             )))
         }
 
-        TFInstr::SET_PARAMS => Some(TestInstr::SetParams(ZcashCrosslinkParameters {
-            bc_confirmation_depth_sigma: instr.val[0],
-            bootstrap: bootstrap_from_bytes(instr.data_slice(bytes))?,
-        })),
+        TFInstr::SET_PARAMS => {
+            let (bootstrap, staking) = params_from_bytes(instr.data_slice(bytes))?;
+            Some(TestInstr::SetParams(ZcashCrosslinkParameters {
+                bc_confirmation_depth_sigma: instr.val[0],
+                bootstrap,
+                staking,
+            }))
+        }
 
         TFInstr::EXPECT_POW_CHAIN_LENGTH => {
             Some(TestInstr::ExpectPoWChainLength(instr.val[0] as u32))
@@ -819,4 +848,36 @@ pub(crate) async fn instr_reader(internal_handle: TFLServiceHandle) {
     // tokio::time::sleep(Duration::from_secs(120)).await;
 
     TEST_SHUTDOWN_FN.lock().unwrap()();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHORT: StakingParameters = StakingParameters { period: 10, day_window: 5, action_delay: 6 };
+
+    #[test]
+    fn set_params_round_trips_the_staking_calendar() {
+        for bootstrap in [BftBootstrap::Supplied, BftBootstrap::FromChain { roster_height: 5, activation_height: 300 }] {
+            for staking in [PROTOTYPE_STAKING, SHORT] {
+                assert_eq!(params_from_bytes(&params_to_bytes(bootstrap, staking)), Some((bootstrap, staking)));
+            }
+        }
+    }
+
+    /// Files written before the calendar was a parameter end after the bootstrap, and must keep
+    /// meaning what they meant: the prototype calendar. Writing the prototype calendar produces
+    /// those same bytes, so tracked scene files don't change.
+    #[test]
+    fn set_params_without_a_calendar_is_the_prototype_calendar() {
+        assert_eq!(params_from_bytes(&[TF_BOOTSTRAP_SUPPLIED]), Some((BftBootstrap::Supplied, PROTOTYPE_STAKING)));
+        assert_eq!(params_to_bytes(BftBootstrap::Supplied, PROTOTYPE_STAKING), vec![TF_BOOTSTRAP_SUPPLIED]);
+    }
+
+    #[test]
+    fn set_params_with_a_partial_calendar_is_rejected() {
+        let mut bytes = params_to_bytes(BftBootstrap::Supplied, SHORT);
+        bytes.pop();
+        assert_eq!(params_from_bytes(&bytes), None);
+    }
 }

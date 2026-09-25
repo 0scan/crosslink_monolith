@@ -16,9 +16,9 @@ use crate::{
 /// This function:
 /// - Validates that CreateNewDelegationBond doesn't create duplicate bonds
 /// - Validates that BeginDelegationUnbonding references existing active bonds created at least
-///   `STAKING_ACTION_DELAY` blocks earlier
+///   the network's staking action delay earlier
 /// - Validates that WithdrawDelegationBond references existing unbonding bonds unbonded at least
-///   `STAKING_ACTION_DELAY` blocks earlier
+///   the network's staking action delay earlier
 /// - Validates that RetargetDelegationBond references existing active bonds
 pub fn validate_delegation_bonds(
     semantically_verified: &SemanticallyVerifiedBlock,
@@ -299,25 +299,26 @@ fn validate_create_new_bond(
 }
 
 /// Rejects an action on a bond at `height` when the bond's previous action, at `last_action`, is
-/// less than `STAKING_ACTION_DELAY` blocks earlier.
+/// less than the network's staking action delay earlier.
 fn validate_staking_action_delay(
     bond_key: [u8; 32],
     height: zebra_chain::block::Height,
     last_action: zebra_chain::block::Height,
+    non_finalized_chain: &Chain,
 ) -> Result<(), ValidateContextError> {
-    use zcash_primitives::transaction::STAKING_ACTION_DELAY;
+    let action_delay = non_finalized_chain.network().crosslink_parameters().staking.action_delay;
 
-    if height.0 < last_action.0.saturating_add(STAKING_ACTION_DELAY) {
+    if height.0 < last_action.0.saturating_add(action_delay) {
         return Err(ValidateContextError::InvalidDelegationBond(format!(
             "staking action delay not met: last action at height {}, this one at {}, {} blocks required: {:?}",
-            last_action.0, height.0, STAKING_ACTION_DELAY, bond_key
+            last_action.0, height.0, action_delay, bond_key
         )));
     }
     Ok(())
 }
 
 /// Validates BeginDelegationUnbonding: ensures the bond exists, is active, and was created at least
-/// `STAKING_ACTION_DELAY` blocks before `height`.
+/// the network's staking action delay before `height`.
 fn validate_bond_for_unbonding(
     bond_key: [u8; 32],
     height: zebra_chain::block::Height,
@@ -326,7 +327,7 @@ fn validate_bond_for_unbonding(
     finalized_state: &ZebraDb,
 ) -> Result<(), ValidateContextError> {
     if block_new_bonds.contains_key(&bond_key) {
-        return validate_staking_action_delay(bond_key, height, height);
+        return validate_staking_action_delay(bond_key, height, height, non_finalized_chain);
     }
 
     // Check if bond exists in non-finalized state
@@ -335,7 +336,7 @@ fn validate_bond_for_unbonding(
 
         match status {
             BondStatusInChain::Active => {
-                return validate_staking_action_delay(bond_key, height, bond.created_at.height);
+                return validate_staking_action_delay(bond_key, height, bond.created_at.height, non_finalized_chain);
             }
             BondStatusInChain::Unbonding { .. } => {
                 return Err(ValidateContextError::InvalidDelegationBond(format!(
@@ -361,7 +362,7 @@ fn validate_bond_for_unbonding(
     // Check finalized state - bond must exist and be active
     if let Some(bond) = finalized_state.delegation_bond(&bond_key) {
         if finalized_state.is_bond_active(&bond_key) {
-            return validate_staking_action_delay(bond_key, height, bond.created_at.height);
+            return validate_staking_action_delay(bond_key, height, bond.created_at.height, non_finalized_chain);
         } else {
             return Err(ValidateContextError::InvalidDelegationBond(format!(
                 "delegation bond is not active: {:?}",
@@ -378,7 +379,7 @@ fn validate_bond_for_unbonding(
 }
 
 /// Validates WithdrawDelegationBond: ensures the bond exists, is unbonding, was unbonded at least
-/// `STAKING_ACTION_DELAY` blocks before `height`, and the amount matches.
+/// the network's staking action delay before `height`, and the amount matches.
 fn validate_bond_for_withdrawal(
     bond_key: [u8; 32],
     height: zebra_chain::block::Height,
@@ -399,7 +400,7 @@ fn validate_bond_for_withdrawal(
                         withdrawal_amount, bond_amount, bond_key
                     )));
                 }
-                return validate_staking_action_delay(bond_key, height, unbonded_at.height);
+                return validate_staking_action_delay(bond_key, height, unbonded_at.height, non_finalized_chain);
             }
             BondStatusInChain::Active => {
                 return Err(ValidateContextError::InvalidDelegationBond(format!(

@@ -14,7 +14,7 @@ use tokio::fs;
 
 use tracing::Span;
 use zebra_chain::{
-    block::{BftBootstrap, ZcashCrosslinkParameters, PROTOTYPE_PARAMETERS},
+    block::{BftBootstrap, StakingParameters, ZcashCrosslinkParameters, PROTOTYPE_PARAMETERS},
     common::atomic_write,
     parameters::{
         testnet::{
@@ -632,6 +632,9 @@ struct DCrosslinkParameters {
     bc_confirmation_depth_sigma: Option<u64>,
     bootstrap_roster_height: Option<u32>,
     bootstrap_activation_height: Option<u32>,
+    staking_period: Option<u32>,
+    staking_day_window: Option<u32>,
+    staking_action_delay: Option<u32>,
 }
 
 impl DCrosslinkParameters {
@@ -653,16 +656,27 @@ impl DCrosslinkParameters {
                     .bootstrap_activation_height
                     .unwrap_or(prototype_activation_height),
             },
+            staking: StakingParameters {
+                period: self.staking_period.unwrap_or(prototype.staking.period),
+                day_window: self.staking_day_window.unwrap_or(prototype.staking.day_window),
+                action_delay: self.staking_action_delay.unwrap_or(prototype.staking.action_delay),
+            },
         }
     }
 }
 
 impl From<ZcashCrosslinkParameters> for DCrosslinkParameters {
     fn from(params: ZcashCrosslinkParameters) -> Self {
+        // Written out only when shrunk, so configs saved before the calendar was configurable
+        // serialize exactly as they did.
+        let staking = (params.staking != PROTOTYPE_PARAMETERS.staking).then_some(params.staking);
         Self {
             bc_confirmation_depth_sigma: Some(params.bc_confirmation_depth_sigma),
             bootstrap_roster_height: params.bootstrap.roster_height(),
             bootstrap_activation_height: params.bootstrap.activation_height(),
+            staking_period: staking.map(|s| s.period),
+            staking_day_window: staking.map(|s| s.day_window),
+            staking_action_delay: staking.map(|s| s.action_delay),
         }
     }
 }

@@ -25,23 +25,22 @@ use std::sync::Arc;
 
 use zebra_chain::block::{Block, Height};
 
-pub use zcash_primitives::transaction::SLASH_ANALYSIS_WINDOW;
-
 use crate::service::{
     finalized_state::disk_format::{BondKey, DelegationBond},
     non_finalized_state::BondStatusInChain,
 };
 
 /// The heights of the blocks whose staking actions decide the burns of a slash
-/// activating at `activation`: `(activation - W, activation)`. An action there can move
-/// a bond off a finalizer it was on at the end of a block in the window. The activation
-/// block is not among them, because the burn lands before its staking actions.
-pub fn slash_window(activation: Height) -> impl Iterator<Item = Height> {
-    slash_window_heights(activation).map(Height)
+/// activating at `activation`: `(activation - W, activation)`, where `W` is the network's
+/// `slash_analysis_window`. An action there can move a bond off a finalizer it was on at the
+/// end of a block in the window. The activation block is not among them, because the burn
+/// lands before its staking actions.
+pub fn slash_window(activation: Height, slash_analysis_window: u32) -> impl Iterator<Item = Height> {
+    slash_window_heights(activation, slash_analysis_window).map(Height)
 }
 
-fn slash_window_heights(activation: Height) -> std::ops::Range<u32> {
-    activation.0.saturating_sub(SLASH_ANALYSIS_WINDOW) + 1..activation.0
+fn slash_window_heights(activation: Height, slash_analysis_window: u32) -> std::ops::Range<u32> {
+    activation.0.saturating_sub(slash_analysis_window) + 1..activation.0
 }
 
 /// The burn set for a hardfork activating at `activation`: every bond delegated
@@ -65,19 +64,21 @@ fn slash_window_heights(activation: Height) -> std::ops::Range<u32> {
 /// still stands (first case) or ended by retarget (second) or by unbonding
 /// (first, via the kept target).
 ///
-/// Withdrawn bonds are skipped, and none of them escapes: `SLASH_ANALYSIS_WINDOW` is
+/// Withdrawn bonds are skipped, and none of them escapes: the slash analysis window is
 /// sized so that a bond still delegated at the end of the window's first block can't
 /// withdraw before the activation block, and the activation block's actions see it
-/// already burned.
+/// already burned. That holds on any calendar `StakingParameters::is_valid` accepts, with
+/// `activation` at the start of a staking day.
 pub fn slash_burn_set(
     bonds: &HashMap<BondKey, (DelegationBond, BondStatusInChain)>,
     window_blocks: impl IntoIterator<Item = Arc<Block>>,
     slashed: &BTreeSet<[u8; 32]>,
     activation: Height,
+    slash_analysis_window: u32,
 ) -> BTreeSet<BondKey> {
     use zcash_primitives::transaction::StakingAction;
 
-    let window_heights = slash_window_heights(activation);
+    let window_heights = slash_window_heights(activation, slash_analysis_window);
     let mut burned = BTreeSet::new();
 
     for (bond_key, (bond, status)) in bonds {
@@ -146,12 +147,14 @@ mod tests {
     }
 
     fn burn_set(bonds: &HashMap<BondKey, (DelegationBond, BondStatusInChain)>) -> BTreeSet<BondKey> {
-        slash_burn_set(bonds, std::iter::empty(), &BTreeSet::from([SLASHED]), Height(ACTIVATION))
+        slash_burn_set(bonds, std::iter::empty(), &BTreeSet::from([SLASHED]), Height(ACTIVATION), WINDOW)
     }
+
+    const WINDOW: u32 = zcash_primitives::bft::PROTOTYPE_STAKING.slash_analysis_window();
 
     #[test]
     fn slash_window_is_the_blocks_after_the_window_start_and_below_activation() {
-        let heights: Vec<u32> = super::slash_window(Height(ACTIVATION)).map(|h| h.0).collect();
+        let heights: Vec<u32> = super::slash_window(Height(ACTIVATION), WINDOW).map(|h| h.0).collect();
         assert_eq!((heights[0], *heights.last().unwrap()), (821, 1049));
     }
     #[test]
@@ -227,22 +230,55 @@ mod tests {
         assert_eq!(burn_set(&bonds), BTreeSet::from([active, unbonded_just_inside]));
     }
 
-    #[test]
-    fn no_bond_delegated_inside_window_can_withdraw_before_activation() {
-        use zcash_primitives::transaction::{STAKING_ACTION_DELAY, STAKING_DAY_WINDOW, STAKING_PERIOD};
-        use super::SLASH_ANALYSIS_WINDOW;
-
-        let is_staking_day = |h: u32| h % STAKING_PERIOD < STAKING_DAY_WINDOW;
-        let earliest_withdrawal = |unbonded: u32| (unbonded + STAKING_ACTION_DELAY..).find(|&h| is_staking_day(h)).unwrap();
-        for activation in (2..10).map(|k| k * STAKING_PERIOD) {
-            let window_start = activation - SLASH_ANALYSIS_WINDOW;
+    /// The first bond on `staking` that unbonds inside a slash window and could still withdraw
+    /// before the activation, as `(unbonded, withdrawn, activation)`. `slash_burn_set` relies on
+    /// there being none, with every activation at the start of a staking day.
+    fn early_withdrawal(staking: zcash_primitives::bft::StakingParameters) -> Option<(u32, u32, u32)> {
+        let is_staking_day = |h: u32| h % staking.period < staking.day_window;
+        let earliest_withdrawal = |unbonded: u32| (unbonded + staking.action_delay..).find(|&h| is_staking_day(h)).unwrap();
+        for activation in (2..10).map(|k| k * staking.period) {
+            let window_start = activation - staking.slash_analysis_window();
             for unbonded in (window_start + 1..activation).filter(|&h| is_staking_day(h)) {
                 let withdrawn = earliest_withdrawal(unbonded);
-                assert!(withdrawn >= activation, "unbonded at {unbonded}, withdrawn at {withdrawn}, activation {activation}");
+                if withdrawn < activation {
+                    return Some((unbonded, withdrawn, activation));
+                }
             }
-            // The earlier staking day ends just below the window, and it had to stay out.
+        }
+        None
+    }
+
+    #[test]
+    fn no_bond_delegated_inside_window_can_withdraw_before_activation() {
+        use zcash_primitives::bft::PROTOTYPE_STAKING as P;
+
+        assert_eq!(early_withdrawal(P), None);
+
+        // On the prototype the window is also no wider than it has to be: the earlier staking day
+        // ends just below it, and it had to stay out.
+        let is_staking_day = |h: u32| h % P.period < P.day_window;
+        let earliest_withdrawal = |unbonded: u32| (unbonded + P.action_delay..).find(|&h| is_staking_day(h)).unwrap();
+        for activation in (2..10).map(|k| k * P.period) {
+            let window_start = activation - P.slash_analysis_window();
             assert!(!is_staking_day(window_start) && is_staking_day(window_start - 1));
             assert!(earliest_withdrawal(window_start - 1) < activation);
         }
+    }
+
+    /// A test network's shrunk calendar keeps the guarantee whenever `is_valid` accepts it, and
+    /// the delay rule `is_valid` enforces is what keeps it.
+    #[test]
+    fn shrunk_calendars_keep_the_withdrawal_guarantee() {
+        use zcash_primitives::bft::StakingParameters;
+
+        for (period, day_window, action_delay) in [(10, 5, 6), (10, 5, 20), (10, 10, 11), (7, 3, 4), (2, 1, 2)] {
+            let staking = StakingParameters { period, day_window, action_delay };
+            assert!(staking.is_valid(), "{staking:?}");
+            assert_eq!(early_withdrawal(staking), None, "{staking:?}");
+        }
+
+        let short_delay = StakingParameters { period: 10, day_window: 5, action_delay: 2 };
+        assert!(!short_delay.is_valid());
+        assert!(early_withdrawal(short_delay).is_some(), "a delay shorter than the day window lets a bond withdraw before activation");
     }
 }

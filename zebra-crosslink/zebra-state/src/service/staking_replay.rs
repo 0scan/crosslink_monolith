@@ -43,7 +43,8 @@ use crate::{
 
 /// Bonds and finalizer reward banks advanced one block at a time from genesis, with the
 /// hardfork slash rules they are subject to.
-#[derive(Clone, Debug, Default)]
+// No `Default`: a defaulted `slash_analysis_window` of 0 would silently empty every slash window.
+#[derive(Clone, Debug)]
 pub struct StakingReplay {
     /// Every bond ever created, with its current amount and status.
     pub delegation_bonds: HashMap<BondKey, (DelegationBond, BondStatusInChain)>,
@@ -51,6 +52,8 @@ pub struct StakingReplay {
     pub finalizer_rewards: HashMap<[u8; 32], u64>,
     /// `(activation, terminated finalizers)` for every hardfork rule that slashes.
     slash_rules: Vec<(Height, BTreeSet<[u8; 32]>)>,
+    /// The network's slash analysis window, in blocks.
+    slash_analysis_window: u32,
 }
 
 /// A hardfork slash applied by the replay.
@@ -64,8 +67,8 @@ pub struct SlashBurns {
 
 impl StakingReplay {
     /// An empty replay subject to the slash rules of `hardfork_schedule`, which must be the
-    /// node's canonical schedule.
-    pub fn new(hardfork_schedule: &HardForkSchedule) -> Self {
+    /// node's canonical schedule, and the network's `slash_analysis_window`.
+    pub fn new(hardfork_schedule: &HardForkSchedule, slash_analysis_window: u32) -> Self {
         let slash_rules = hardfork_schedule
             .rules()
             .iter()
@@ -75,7 +78,7 @@ impl StakingReplay {
                 (Height(activation), rule.terminated_finalizers.iter().map(|finalizer| finalizer.0).collect())
             })
             .collect();
-        Self { delegation_bonds: HashMap::new(), finalizer_rewards: HashMap::new(), slash_rules }
+        Self { delegation_bonds: HashMap::new(), finalizer_rewards: HashMap::new(), slash_rules, slash_analysis_window }
     }
 
     /// Applies one block: any hardfork slash burns activating at `height`, then its staking
@@ -96,7 +99,7 @@ impl StakingReplay {
         }
 
         let slash = if self.slash_activates_at(height) {
-            self.apply_slash_burns(height, slash_window(height).map(block_at))
+            self.apply_slash_burns(height, slash_window(height, self.slash_analysis_window).map(block_at))
         } else {
             None
         };
@@ -173,7 +176,7 @@ impl StakingReplay {
         if finalizers.is_empty() {
             return None;
         }
-        let burned = slash_burn_set(&self.delegation_bonds, window_blocks, &finalizers, height);
+        let burned = slash_burn_set(&self.delegation_bonds, window_blocks, &finalizers, height, self.slash_analysis_window);
         burn_delegation_bonds(&mut self.delegation_bonds, &burned);
         Some(SlashBurns { finalizers, burned })
     }

@@ -2246,13 +2246,14 @@ impl Chain {
         use crate::service::finalized_state::slashing::{slash_burn_set, slash_window};
 
         let slashed_finalizers: std::collections::BTreeSet<[u8; 32]> = finalizers.iter().copied().collect();
-        let window_blocks = slash_window(activation).map(|height| {
+        let slash_analysis_window = self.network().crosslink_parameters().staking.slash_analysis_window();
+        let window_blocks = slash_window(activation, slash_analysis_window).map(|height| {
             self.block(crate::HashOrHeight::Height(height)).map(|cvb| cvb.block.clone())
                 .or_else(|| db.block(crate::HashOrHeight::Height(height)))
                 .expect("every height below activation is finalized or in this chain")
         });
 
-        slash_burn_set(&self.inner.delegation_bonds, window_blocks, &slashed_finalizers, activation)
+        slash_burn_set(&self.inner.delegation_bonds, window_blocks, &slashed_finalizers, activation, slash_analysis_window)
     }
 
     // Burns before the activation block is pushed, and returns the pre-burn statuses for

@@ -866,6 +866,9 @@ impl ParametersBuilder {
         if !crosslink.bootstrap_is_valid() {
             return Err(ParametersBuilderError::InvalidCrosslinkBootstrap);
         }
+        if !crosslink.staking.is_valid() {
+            return Err(ParametersBuilderError::InvalidStakingParameters);
+        }
         self.crosslink = crosslink;
         Ok(self)
     }

@@ -1480,6 +1480,10 @@ impl RosterMember {
 }
 
 
+// These four are the prototype staking calendar, `crate::bft::PROTOTYPE_STAKING`. Consensus checks
+// must read the network's `ZcashCrosslinkParameters::staking` instead, or a test network that
+// shrinks the calendar is checked against these values.
+
 /// The number of blocks between the start of one staking day and the start of the next.
 /// A new staking day starts every N blocks.
 pub const STAKING_PERIOD: u32 = 150;

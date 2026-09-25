@@ -130,7 +130,10 @@ pub fn fixup_aggregated_stakes(
         "replaying staking history from genesis to height {}",
         tip_height.0,
     );
-    let mut replay = StakingReplay::new(&config.hardfork_schedule);
+    let mut replay = StakingReplay::new(
+        &config.hardfork_schedule,
+        network.crosslink_parameters().staking.slash_analysis_window(),
+    );
     // The previous block's certificate, to decide whether the next block advances it. Genesis
     // carries none, which is exactly the null pointer every pre-activation block also carries.
     // let mut prev_fat_pointer = zebra_chain::block::FatPointerToBftBlock::null(); // variable reward disabled

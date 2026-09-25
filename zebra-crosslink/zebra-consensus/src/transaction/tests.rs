@@ -4890,7 +4890,7 @@ mod staking_signature {
     /// keeps a second unbonding of the same bond out of the mempool and out of block templates.
     #[test]
     fn mempool_staking_action_bond_state_rules() {
-        use zcash_primitives::transaction::{StakingActionKind::*, STAKING_ACTION_DELAY};
+        use zcash_primitives::{bft::PROTOTYPE_STAKING as STAKING, transaction::StakingActionKind::*};
         use zebra_chain::{amount::Amount, block::Height};
         use zebra_state::BondInfoResponse;
 
@@ -4908,14 +4908,14 @@ mod staking_signature {
                 target_finalizer: TARGET,
             })
         };
-        let ready = Height(LAST_ACTION + STAKING_ACTION_DELAY);
-        let early = Height(LAST_ACTION + STAKING_ACTION_DELAY - 1);
-        let check = |kind, amount, bond_info, height| check_staking_action_bond_state(kind, KEY, amount, None, 0, bond_info, height);
+        let ready = Height(LAST_ACTION + STAKING.action_delay);
+        let early = Height(LAST_ACTION + STAKING.action_delay - 1);
+        let check = |kind, amount, bond_info, height| check_staking_action_bond_state(kind, KEY, amount, None, 0, bond_info, height, STAKING);
         let retarget = |from, bond_info, height| {
-            check_staking_action_bond_state(RetargetDelegationBond, KEY, 0, from, 0, bond_info, height)
+            check_staking_action_bond_state(RetargetDelegationBond, KEY, 0, from, 0, bond_info, height, STAKING)
         };
         let convert = |amount, bank, bond_info| {
-            check_staking_action_bond_state(ConvertFinalizerRewardToDelegationBond, KEY, amount, None, bank, bond_info, ready)
+            check_staking_action_bond_state(ConvertFinalizerRewardToDelegationBond, KEY, amount, None, bank, bond_info, ready, STAKING)
         };
 
         assert!(check(CreateNewDelegationBond, 500, None, ready).is_ok());

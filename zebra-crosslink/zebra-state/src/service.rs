@@ -2018,9 +2018,10 @@ pub fn burn_delegation_bonds(delegation_bonds: &mut HashMap<BondKey, (Delegation
     let mut reverts = Vec::new();
     for bond_key in burn_set {
         if let Some((_, status)) = delegation_bonds.get_mut(bond_key) {
-            // `SLASH_ANALYSIS_WINDOW` is sized so that no bond in a burn set can withdraw
-            // before the activation block, so a withdrawn one means the window or the
-            // staking delays changed without it.
+            // The slash analysis window is sized so that no bond in a burn set can withdraw
+            // before the activation block, on any calendar `StakingParameters::is_valid`
+            // accepts, so a withdrawn one means the window or the staking delays changed
+            // without it.
             if matches!(status, non_finalized_state::BondStatusInChain::Withdrawn { .. }) {
                 tracing::error!("burning a withdrawn bond: {}", hex::encode(bond_key));
                 debug_assert!(false, "burning a withdrawn bond: {}", hex::encode(bond_key));

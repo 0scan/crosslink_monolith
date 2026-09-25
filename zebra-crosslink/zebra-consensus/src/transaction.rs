@@ -24,7 +24,7 @@ use tower::{
 use tracing::Instrument;
 
 use zcash_protocol::value::ZatBalance;
-use zcash_primitives::transaction::{STAKING_ACTION_DELAY, STAKING_PERIOD, STAKING_DAY_WINDOW};
+use zcash_primitives::bft::StakingParameters;
 
 use zebra_chain::{
     amount::{Amount, NonNegative},
@@ -488,12 +488,13 @@ where
             // These are pure consensus rules over the transaction structure and must always hold.
             check_transaction_invariants(tx.as_ref(), height, &network)?;
 
-            check_staking_day_window(&tx, height)?;
+            let staking = network.crosslink_parameters().staking;
+            check_staking_day_window(&tx, height, staking)?;
             check_staking_target_capability(&tx)?;
 
             tracing::trace!(?tx_id, "passed quick checks");
 
-            Self::check_mempool_staking_action_bond_state(&tx, height, state.clone()).await?;
+            Self::check_mempool_staking_action_bond_state(&tx, height, staking, state.clone()).await?;
 
             // Mempool transactions are checked against the next median-time-past from state.
             Self::verify_mempool_lock_time(tx.as_ref(), height, state.clone()).await?;
@@ -616,6 +617,7 @@ where
     async fn check_mempool_staking_action_bond_state(
         tx: &Transaction,
         height: block::Height,
+        staking: StakingParameters,
         state: Timeout<ZS>,
     ) -> Result<(), TransactionError> {
         use zcash_primitives::transaction::StakingActionKind;
@@ -658,6 +660,7 @@ where
             finalizer_bank,
             bond_info,
             height,
+            staking,
         )
     }
 
@@ -825,6 +828,7 @@ fn check_staking_action_bond_state(
     finalizer_bank: u64,
     bond_info: Option<zs::BondInfoResponse>,
     height: block::Height,
+    staking: StakingParameters,
 ) -> Result<(), TransactionError> {
     use zcash_primitives::transaction::StakingActionKind;
 
@@ -853,7 +857,7 @@ fn check_staking_action_bond_state(
             if info.status != ACTIVE {
                 return invalid("the bond is not active");
             }
-            check_staking_action_delay(bond_key, height, info.last_action_height)
+            check_staking_action_delay(bond_key, height, info.last_action_height, staking.action_delay)
         }
         (StakingActionKind::WithdrawDelegationBond, Some(info)) => {
             if info.status != UNBONDING {
@@ -862,7 +866,7 @@ fn check_staking_action_bond_state(
             if u64::from(info.amount) != amount_zats {
                 return invalid("the withdrawal amount does not match the bond");
             }
-            check_staking_action_delay(bond_key, height, info.last_action_height)
+            check_staking_action_delay(bond_key, height, info.last_action_height, staking.action_delay)
         }
         (StakingActionKind::RetargetDelegationBond, Some(info)) => {
             if info.status != ACTIVE {
@@ -877,18 +881,19 @@ fn check_staking_action_bond_state(
 }
 
 /// Rejects an action on a bond at `height` when the bond's previous action, at
-/// `last_action_height`, is less than `STAKING_ACTION_DELAY` blocks earlier.
+/// `last_action_height`, is less than `action_delay` blocks earlier.
 fn check_staking_action_delay(
     bond_key: [u8; 32],
     height: block::Height,
     last_action_height: u32,
+    action_delay: u32,
 ) -> Result<(), TransactionError> {
-    if height.0 < last_action_height.saturating_add(STAKING_ACTION_DELAY) {
+    if height.0 < last_action_height.saturating_add(action_delay) {
         return Err(TransactionError::StakingActionDelayNotMet {
             bond_key,
             last_action_height,
             current_height: height.0,
-            required_delay: STAKING_ACTION_DELAY,
+            required_delay: action_delay,
         });
     }
     Ok(())
@@ -934,8 +939,9 @@ fn check_staking_target_capability(tx: &Transaction) -> Result<(), TransactionEr
 
 /// Checks that staking actions are only performed within the allowed staking window.
 ///
-/// Staking actions are only valid when `block_height % STAKING_PERIOD < STAKING_DAY_WINDOW`.
-/// For example, with PERIOD=100 and WINDOW=10, staking is allowed on blocks 0-9, 100-109, 200-209, etc.
+/// Staking actions are only valid when `block_height % staking.period < staking.day_window`, using
+/// the network's staking calendar. For example, with period 100 and day window 10, staking is
+/// allowed on blocks 0-9, 100-109, 200-209, etc.
 ///
 /// RetargetDelegationBond is exempt from this rule and can be submitted at any time.
 ///
@@ -943,6 +949,7 @@ fn check_staking_target_capability(tx: &Transaction) -> Result<(), TransactionEr
 fn check_staking_day_window(
     tx: &Transaction,
     height: block::Height,
+    staking: StakingParameters,
 ) -> Result<(), TransactionError> {
     use zcash_primitives::transaction::StakingActionKind;
 
@@ -960,20 +967,22 @@ fn check_staking_day_window(
 
     let block_height = height.0;
 
+    // These heights are on the prototype calendar's chain. On a shrunk calendar they fall at
+    // arbitrary positions in the cycle, so they must not exempt anything there.
     let excepted_heights = [ 1120, 2320, 2620, 2621, 3224 ];
-    if excepted_heights.contains(&block_height) {
+    if staking == zcash_primitives::bft::PROTOTYPE_STAKING && excepted_heights.contains(&block_height) {
         // TODO: @Prod @Season2 remove this temporary cruft
         return Ok(());
     }
 
 
-    let position_in_period = block_height % STAKING_PERIOD;
+    let position_in_period = block_height % staking.period;
 
-    if position_in_period >= STAKING_DAY_WINDOW {
+    if position_in_period >= staking.day_window {
         return Err(TransactionError::StakingActionOutsideWindow {
             block_height,
-            period: STAKING_PERIOD,
-            window: STAKING_DAY_WINDOW,
+            period: staking.period,
+            window: staking.day_window,
         });
     }
 
@@ -989,7 +998,7 @@ pub fn check_block_transaction(
     network: &Network,
 ) -> Result<(), TransactionError> {
     // Staking actions are only allowed during specific block ranges.
-    check_staking_day_window(tx, height)?;
+    check_staking_day_window(tx, height, network.crosslink_parameters().staking)?;
 
     // The target finalizer address must be a valid capability (its embedded
     // signature verifies); the state contextual check enforces the same rule on blocks.
