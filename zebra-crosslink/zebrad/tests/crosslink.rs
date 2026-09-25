@@ -2098,10 +2098,10 @@ fn crosslink_reject_pow_block_with_oversized_staking_amount() {
 fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block() {
     set_test_name(function_name!());
 
-    // A short calendar keeps the lifecycle to about 20 blocks rather than 300. BFT is supplied
-    // and nothing here depends on finality, so the period need not exceed the finality depth.
-    let staking = zcash_primitives::bft::StakingParameters { period: 10, day_window: 5, action_delay: 6 };
-    let mut tf = TF::new(&zcash_primitives::bft::ZcashCrosslinkParameters { staking, ..HARNESS_PARAMETERS });
+    // The shortest realistic calendar keeps the lifecycle to a few dozen blocks rather than 300.
+    let params = HARNESS_PARAMETERS;
+    let staking = short_staking(&params);
+    let mut tf = TF::new(&zcash_primitives::bft::ZcashCrosslinkParameters { staking, ..params });
 
     let network = Network::new_regtest(Default::default());
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
