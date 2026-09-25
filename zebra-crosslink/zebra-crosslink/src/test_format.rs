@@ -67,7 +67,15 @@ pub struct TFInstr {
     pub val: [u64; 2],
 }
 
+/// A value an EXPECT_* instruction should not check.
 pub const TEST_STAKE_IGNORED: u64 = u64::MAX;
+
+/// Bond status codes for EXPECT_BOND, as the state reports them, plus one for "no such bond".
+pub const TF_BOND_ACTIVE: u64 = 0;
+pub const TF_BOND_UNBONDING: u64 = 1;
+pub const TF_BOND_WITHDRAWN: u64 = 2;
+pub const TF_BOND_BURNED: u64 = 3;
+pub const TF_BOND_ABSENT: u64 = 255;
 
 static TF_INSTR_KIND_STRS: [&str; TFInstr::COUNT as usize] = {
     let mut strs = [""; TFInstr::COUNT as usize];
@@ -86,8 +94,11 @@ static TF_INSTR_KIND_STRS: [&str; TFInstr::COUNT as usize] = {
     strs[TFInstr::EXPECT_MEMPOOL_CONTAINS as usize] = "EXPECT_MEMPOOL_CONTAINS";
     strs[TFInstr::EXPECT_MEMPOOL_ABSENT as usize] = "EXPECT_MEMPOOL_ABSENT";
     strs[TFInstr::EXPECT_MEMPOOL_REJECTED as usize] = "EXPECT_MEMPOOL_REJECTED";
+    strs[TFInstr::EXPECT_BOND as usize] = "EXPECT_BOND";
+    strs[TFInstr::EXPECT_FINALIZER_BANK as usize] = "EXPECT_FINALIZER_BANK";
+    strs[TFInstr::EXPECT_POOL_TOTALS as usize] = "EXPECT_POOL_TOTALS";
 
-    const_assert!(TFInstr::COUNT == 15);
+    const_assert!(TFInstr::COUNT == 18);
     strs
 };
 
@@ -128,7 +139,16 @@ impl TFInstr {
     pub const EXPECT_MEMPOOL_ABSENT: TFInstrKind = 13;
     /// The transaction (the data) is in the mempool's rejected set within a bound.
     pub const EXPECT_MEMPOOL_REJECTED: TFInstrKind = 14;
-    pub const COUNT: TFInstrKind = 15;
+    /// The bond whose key is the data has status `val[1]` (a `TF_BOND_*` code, `TF_BOND_ABSENT`
+    /// for none) and amount `val[0]` in zatoshis, at the best chain tip. `TEST_STAKE_IGNORED`
+    /// skips either.
+    pub const EXPECT_BOND: TFInstrKind = 15;
+    /// The reward bank of the finalizer whose public key is the data holds `val[0]` zatoshis.
+    pub const EXPECT_FINALIZER_BANK: TFInstrKind = 16;
+    /// The best chain tip's staking pools: the data is bonded, unbonded and finalizer rewards,
+    /// three little-endian u64 zatoshi amounts, each skipped when `TEST_STAKE_IGNORED`.
+    pub const EXPECT_POOL_TOTALS: TFInstrKind = 17;
+    pub const COUNT: TFInstrKind = 18;
 
     pub fn str_from_kind(kind: TFInstrKind) -> &'static str {
         let kind = kind as usize;
@@ -187,6 +207,13 @@ impl TFInstr {
             | Some(TestInstr::ExpectMempoolContains(tx))
             | Some(TestInstr::ExpectMempoolAbsent(tx))
             | Some(TestInstr::ExpectMempoolRejected(tx)) => str += &tx.hash().to_string(),
+            Some(TestInstr::ExpectBond(key, status, amount)) => {
+                str += &format!("{} status {status} amount {amount}", hex32(&key))
+            }
+            Some(TestInstr::ExpectFinalizerBank(pub_key, amount)) => {
+                str += &format!("{} => {amount}", PubKeyID(pub_key))
+            }
+            Some(TestInstr::ExpectPoolTotals(pools)) => str += &format!("{pools:?}"),
             None => {}
         }
 
@@ -405,6 +432,24 @@ impl TF {
 
     pub fn push_instr_expect_mempool_rejected(&mut self, tx: &Transaction, flags: u32) {
         self.push_instr_serialize_ex(TFInstr::EXPECT_MEMPOOL_REJECTED, flags, tx, [0; 2])
+    }
+
+    /// `status` is a `TF_BOND_*` code; either argument may be `TEST_STAKE_IGNORED`.
+    pub fn push_instr_expect_bond(&mut self, bond_key: [u8; 32], status: u64, amount: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::EXPECT_BOND, flags, &bond_key, [amount, status])
+    }
+
+    pub fn push_instr_expect_finalizer_bank(&mut self, pub_key: [u8; 32], amount: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::EXPECT_FINALIZER_BANK, flags, &pub_key, [amount, 0])
+    }
+
+    /// Bonded, unbonded and finalizer-reward pool totals; any may be `TEST_STAKE_IGNORED`.
+    pub fn push_instr_expect_pool_totals(&mut self, bonded: u64, unbonded: u64, finalizer_rewards: u64, flags: u32) {
+        let mut data = Vec::with_capacity(24);
+        for amount in [bonded, unbonded, finalizer_rewards] {
+            data.extend_from_slice(&amount.to_le_bytes());
+        }
+        self.push_instr_ex(TFInstr::EXPECT_POOL_TOTALS, flags, &data, [0; 2])
     }
 
     /// A block the node must reject for `reason`, and must survive rejecting: the load, the
@@ -671,7 +716,7 @@ pub fn crosslink_parameters_for_test(bytes: &[u8]) -> ZcashCrosslinkParameters {
 }
 
 pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> {
-    const_assert!(TFInstr::COUNT == 15);
+    const_assert!(TFInstr::COUNT == 18);
     match instr.kind {
         TFInstr::LOAD_POW => {
             let block = Block::zcash_deserialize(instr.data_slice(bytes)).ok()?;
@@ -740,6 +785,20 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
         TFInstr::EXPECT_MEMPOOL_REJECTED => Some(TestInstr::ExpectMempoolRejected(
             Transaction::zcash_deserialize(instr.data_slice(bytes)).ok()?,
         )),
+        TFInstr::EXPECT_BOND => Some(TestInstr::ExpectBond(
+            instr.data_slice(bytes).try_into().ok()?,
+            instr.val[1],
+            instr.val[0],
+        )),
+        TFInstr::EXPECT_FINALIZER_BANK => Some(TestInstr::ExpectFinalizerBank(
+            instr.data_slice(bytes).try_into().ok()?,
+            instr.val[0],
+        )),
+        TFInstr::EXPECT_POOL_TOTALS => {
+            let data: [u8; 24] = instr.data_slice(bytes).try_into().ok()?;
+            let amount = |i: usize| u64::from_le_bytes(data[8 * i..8 * i + 8].try_into().expect("eight bytes"));
+            Some(TestInstr::ExpectPoolTotals([amount(0), amount(1), amount(2)]))
+        }
 
         _ => {
             panic!("Unrecognized instruction {}", instr.kind);
@@ -763,6 +822,11 @@ pub(crate) enum TestInstr {
     ExpectMempoolContains(Transaction),
     ExpectMempoolAbsent(Transaction),
     ExpectMempoolRejected(Transaction),
+    /// (bond key, expected status, expected amount)
+    ExpectBond([u8; 32], u64, u64),
+    ExpectFinalizerBank([u8; 32], u64),
+    /// [bonded, unbonded, finalizer rewards]
+    ExpectPoolTotals([u64; 3]),
     RosterForceInclude([u8; 32], u64),   // public address
     ExpectRosterIncludes([u8; 32], u64), // public address
 }
@@ -897,6 +961,88 @@ pub(crate) async fn handle_instr(
             test_check(flags, holds, &message);
         }
 
+        TestInstr::ExpectBond(key, status, amount) => {
+            let answer = tokio::time::timeout(
+                NODE_ANSWER_WAIT,
+                (internal_handle.call.state)(StateRequest::BondInfo(key)),
+            )
+            .await;
+            let (holds, message) = match answer {
+                Ok(Ok(StateResponse::BondInfo(info))) => {
+                    let actual_status = info.as_ref().map_or(TF_BOND_ABSENT, |info| u64::from(info.status));
+                    let actual_amount = info.as_ref().map(|info| u64::from(info.amount));
+                    let status_holds = status == TEST_STAKE_IGNORED || status == actual_status;
+                    let amount_holds = amount == TEST_STAKE_IGNORED || actual_amount == Some(amount);
+                    let actual = match &info {
+                        Some(info) => format!(
+                            "status {} amount {} (last action at {}, target {})",
+                            info.status,
+                            u64::from(info.amount),
+                            info.last_action_height,
+                            PubKeyID(info.target_finalizer),
+                        ),
+                        None => "no such bond".to_string(),
+                    };
+                    (
+                        status_holds && amount_holds,
+                        format!("bond {}: expected status {} amount {}, actually {actual}", hex32(&key), stake_expectation(status), stake_expectation(amount)),
+                    )
+                }
+                Ok(Ok(other)) => (false, format!("bond {}: the bond request answered {other:?}", hex32(&key))),
+                Ok(Err(err)) => (false, format!("bond {}: the bond request failed: {err}", hex32(&key))),
+                Err(_) => (false, format!("bond {}: no answer within {NODE_ANSWER_WAIT:?}", hex32(&key))),
+            };
+            test_check(flags, holds, &message);
+        }
+
+        TestInstr::ExpectFinalizerBank(pub_key, amount) => {
+            let answer = tokio::time::timeout(
+                NODE_ANSWER_WAIT,
+                (internal_handle.call.state)(StateRequest::FinalizerRewardBalance(pub_key)),
+            )
+            .await;
+            let finalizer = PubKeyID(pub_key);
+            let (holds, message) = match answer {
+                Ok(Ok(StateResponse::FinalizerRewardBalance(bank))) => {
+                    (bank == amount, format!("finalizer {finalizer} bank: expected {amount}, actually {bank}"))
+                }
+                Ok(Ok(other)) => (false, format!("finalizer {finalizer} bank: the request answered {other:?}")),
+                Ok(Err(err)) => (false, format!("finalizer {finalizer} bank: the request failed: {err}")),
+                Err(_) => (false, format!("finalizer {finalizer} bank: no answer within {NODE_ANSWER_WAIT:?}")),
+            };
+            test_check(flags, holds, &message);
+        }
+
+        TestInstr::ExpectPoolTotals(expected) => {
+            let answer = tokio::time::timeout(
+                NODE_ANSWER_WAIT,
+                (internal_handle.call.read_state)(zebra_state::ReadRequest::TipPoolValues),
+            )
+            .await;
+            let (holds, message) = match answer {
+                Ok(Ok(zebra_state::ReadResponse::TipPoolValues { tip_height, value_balance, .. })) => {
+                    let actual = [
+                        u64::from(value_balance.staking_bonded_amount()),
+                        u64::from(value_balance.staking_unbonded_amount()),
+                        u64::from(value_balance.finalizer_rewards_amount()),
+                    ];
+                    let holds = expected.iter().zip(actual).all(|(&e, a)| e == TEST_STAKE_IGNORED || e == a);
+                    (
+                        holds,
+                        format!(
+                            "pool totals at height {} [bonded, unbonded, finalizer rewards]: expected [{}], actually {actual:?}",
+                            tip_height.0,
+                            expected.map(stake_expectation).join(", ")
+                        ),
+                    )
+                }
+                Ok(Ok(other)) => (false, format!("pool totals: the request answered {other:?}")),
+                Ok(Err(err)) => (false, format!("pool totals: the request failed: {err}")),
+                Err(_) => (false, format!("pool totals: no answer within {NODE_ANSWER_WAIT:?}")),
+            };
+            test_check(flags, holds, &message);
+        }
+
         TestInstr::ExpectPoSChainLength(h) => {
             let expect = h as usize;
             let actual = zebra_state::new_network::bft::bft_chain().read().unwrap().blocks.len();
@@ -998,6 +1144,14 @@ async fn node_alive(internal_handle: &TFLServiceHandle) -> (bool, String) {
         Ok(other) => (false, format!("node alive: re-submitting the tip answered {other:?}, not Known")),
         Err(err) => (false, format!("node alive: the ingest loop did not answer re-submitting the tip: {err}")),
     }
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn stake_expectation(value: u64) -> String {
+    if value == TEST_STAKE_IGNORED { "*".to_string() } else { value.to_string() }
 }
 
 /// The address synthetic peer `index` sends from. Distinct peers get distinct addresses, so each
