@@ -63,6 +63,21 @@ serial-live-mainnet = { max-threads = 1 }
 # bind-probed-then-released ports, so they must never run concurrently, even
 # under a parallel profile invoked with --run-ignored=all.
 serial-zcashd-compat = { max-threads = 1 }
+# Crosslink test-format tests each boot a node on the fixed port 8233, so a second one running at
+# the same time fails with AddrInUse.
+serial-crosslink = { max-threads = 1 }
+
+# Crosslink test-format tests: serial (see the group), and killed if a node wedges rather than
+# left to hang the run. The slowest passing test takes ~230 s; this allows 360 s.
+[[profile.default.overrides]]
+filter = 'package(zebrad) and binary(crosslink)'
+test-group = 'serial-crosslink'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
+[[profile.ci.overrides]]
+filter = 'package(zebrad) and binary(crosslink)'
+test-group = 'serial-crosslink'
+slow-timeout = { period = "60s", terminate-after = 6 }
 
 # Force tests that start fresh live Mainnet nodes to run serially in local
 # parallel test runs. The CI overrides above assign the same test group while

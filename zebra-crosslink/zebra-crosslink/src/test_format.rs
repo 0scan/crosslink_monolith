@@ -515,8 +515,25 @@ pub const HARNESS_PARAMETERS: ZcashCrosslinkParameters = ZcashCrosslinkParameter
 ///   changes turn over slower than finality can reflect them, as they do at 150 blocks.
 ///
 /// A scenario that needs more, such as an edge further into the window, sets its own calendar.
-/// Conformance runs on the prototype calendar remain the check on anything this misses.
+///
+/// With `CROSSLINK_TEST_MODE=conformance` this returns the prototype calendar instead, so every
+/// scenario written against it also runs at real-network values. That run is the check on
+/// anything the short calendar's margins miss, which is why scenarios derive their heights from
+/// the calendar rather than hard-coding them.
 pub fn short_staking(params: &ZcashCrosslinkParameters) -> StakingParameters {
+    if conformance_mode() {
+        return PROTOTYPE_STAKING;
+    }
+    short_calendar(params)
+}
+
+/// Whether this run is a conformance run (`CROSSLINK_TEST_MODE=conformance`): real-network
+/// calendar values, generated fresh.
+pub fn conformance_mode() -> bool {
+    std::env::var("CROSSLINK_TEST_MODE").is_ok_and(|mode| mode == "conformance")
+}
+
+fn short_calendar(params: &ZcashCrosslinkParameters) -> StakingParameters {
     let day_window = 3;
     let action_delay = day_window + 1;
     let finality_gap = params.bc_confirmation_depth_sigma + FINALITY_LIVENESS_ALLOWANCE;
@@ -1022,11 +1039,11 @@ mod tests {
     #[test]
     fn short_staking_follows_sigma_and_keeps_its_margins() {
         // Harness sigma 3 and liveness allowance 3 give a period of 2 * (3 + 3 + 1) = 14.
-        assert_eq!(short_staking(&HARNESS_PARAMETERS), StakingParameters { period: 14, day_window: 3, action_delay: 4 });
+        assert_eq!(short_calendar(&HARNESS_PARAMETERS), StakingParameters { period: 14, day_window: 3, action_delay: 4 });
         // The prototype's sigma of 4 gives 16.
-        assert_eq!(short_staking(&PROTOTYPE_PARAMETERS).period, 16);
+        assert_eq!(short_calendar(&PROTOTYPE_PARAMETERS).period, 16);
 
-        let staking = short_staking(&HARNESS_PARAMETERS);
+        let staking = short_calendar(&HARNESS_PARAMETERS);
         // Room for a withdrawal late in a later window: the delay leaves the rest of the period.
         assert!(staking.action_delay <= staking.period - staking.day_window);
     }
