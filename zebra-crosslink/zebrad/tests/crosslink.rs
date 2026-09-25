@@ -1409,6 +1409,25 @@ fn staking_tx_create_bond(
     amount_zats: u64,
 ) -> Arc<Transaction> {
     use zcash_primitives::transaction::StakingAction;
+
+    signed_staking_tx(bond_seed, 0, |unique_pubkey, signature| StakingAction::CreateNewDelegationBond {
+        amount_zats,
+        unique_pubkey,
+        bond_salt: [0; 32],
+        target_finalizer,
+        signature,
+    })
+}
+
+/// A staking-only transaction whose action is signed by the bond key `bond_seed` names. `action`
+/// builds the action from the bond's public key and a signature: it is called once with a blank
+/// signature to find the sighash, then again with the real one. `expiry_height` only tells apart
+/// transactions that would otherwise be identical; 0 means none.
+fn signed_staking_tx(
+    bond_seed: &[u8],
+    expiry_height: u32,
+    action: impl Fn([u8; 32], [u8; 64]) -> zcash_primitives::transaction::StakingAction,
+) -> Arc<Transaction> {
     use zebra_chain::transaction::HashType;
 
     let (_, bond_signing_key, bond_pub_key) =
@@ -1422,19 +1441,13 @@ fn staking_tx_create_bond(
         Arc::new(Transaction::VCrosslink {
             network_upgrade,
             lock_time: LockTime::unlocked(),
-            expiry_height: BlockHeight(0),
+            expiry_height: BlockHeight(expiry_height),
             inputs: Vec::new(),
             outputs: Vec::new(),
             sapling_shielded_data: None,
             orchard_shielded_data: None,
             ironwood_shielded_data: None,
-            staking_action: Some(StakingAction::CreateNewDelegationBond {
-                amount_zats,
-                unique_pubkey: bond_pub_key.0,
-                bond_salt: [0; 32],
-                target_finalizer,
-                signature,
-            }),
+            staking_action: Some(action(bond_pub_key.0, signature)),
         })
     };
 
@@ -1444,6 +1457,40 @@ fn staking_tx_create_bond(
         .sighash(network_upgrade, HashType::ALL, Arc::new(Vec::new()), None)
         .expect("a staking-only VCrosslink transaction has a sighash");
     tx_with_signature(bond_signing_key.sign(sighash.as_ref()).into())
+}
+
+fn staking_tx_unbond(bond_seed: &[u8]) -> Arc<Transaction> {
+    use zcash_primitives::transaction::StakingAction;
+
+    signed_staking_tx(bond_seed, 0, |unique_pubkey, signature| StakingAction::BeginDelegationUnbonding {
+        unique_pubkey,
+        signature,
+    })
+}
+
+fn staking_tx_withdraw(bond_seed: &[u8], amount_zats: u64, expiry_height: u32) -> Arc<Transaction> {
+    use zcash_primitives::transaction::StakingAction;
+
+    signed_staking_tx(bond_seed, expiry_height, |unique_pubkey, signature| StakingAction::WithdrawDelegationBond {
+        amount_zats,
+        unique_pubkey,
+        signature,
+    })
+}
+
+fn staking_tx_retarget(
+    bond_seed: &[u8],
+    from_finalizer: zcash_primitives::bft::FinalizerAddress,
+    to_finalizer: zcash_primitives::bft::FinalizerAddress,
+) -> Arc<Transaction> {
+    use zcash_primitives::transaction::StakingAction;
+
+    signed_staking_tx(bond_seed, 0, |unique_pubkey, signature| StakingAction::RetargetDelegationBond {
+        unique_pubkey,
+        signature,
+        from_finalizer,
+        to_finalizer,
+    })
 }
 
 #[test]
@@ -2034,6 +2081,86 @@ fn crosslink_reject_pow_block_with_oversized_staking_amount() {
 
     // Answering this needs the node still running, with its chain unchanged.
     tf.push_instr_expect_pow_chain_length(2, 0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
+/// Takes three bonds through a lifecycle in real blocks, and at each stage offers a block with a
+/// pair of actions that each apply alone but not together: unbond then retarget (STAKING_AUDIT
+/// S3), and one bond withdrawn twice, which also panicked the commit. Both were accepted before
+/// 65c7e1b4. Each bad block is built on a copy of the generator, so the good block at the same
+/// height follows it; the node must reject the bad one and still accept the good one.
+#[test]
+fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block() {
+    use zcash_primitives::transaction::{STAKING_ACTION_DELAY, STAKING_DAY_WINDOW, STAKING_PERIOD};
+
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = Network::new_regtest(Default::default());
+    let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
+    let finalizer = |seed: &[u8]| {
+        zcash_primitives::bft::FinalizerAddress::create(&zebra_crosslink::rng_private_public_key_from_address(seed).1)
+    };
+    let (target, other) = (finalizer(b"finalizer-a"), finalizer(b"finalizer-b"));
+
+    let mut gen =
+        BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    let height = |gen: &BlockGen| gen.tip.coinbase_height().expect("generated blocks have a height").0;
+    let mine_empty_until = |gen: &mut BlockGen, tf: &mut TF, next_height: u32| {
+        while height(gen) + 1 < next_height {
+            tf.push_instr_load_pow(&gen.next_block(&miner_addr), 0);
+        }
+    };
+
+    // Unbonding needs STAKING_ACTION_DELAY blocks after creation, withdrawal the same after
+    // unbonding, and both must land in a staking day window: the start of the next two periods.
+    const CREATED: u32 = 2;
+    const UNBOND: u32 = STAKING_PERIOD;
+    const WITHDRAW: u32 = 2 * STAKING_PERIOD;
+    for (at, after) in [(UNBOND, CREATED), (WITHDRAW, UNBOND)] {
+        assert!(at >= after + STAKING_ACTION_DELAY && at % STAKING_PERIOD < STAKING_DAY_WINDOW);
+    }
+
+    let block = gen.next_block_with_txs(
+        &miner_addr,
+        &[
+            staking_tx_create_bond(b"bond-a", target, 0),
+            staking_tx_create_bond(b"bond-b", target, 0),
+            staking_tx_create_bond(b"bond-c", target, 0),
+        ],
+    );
+    assert_eq!(height(&gen), CREATED);
+    tf.push_instr_load_pow(&block, 0);
+
+    mine_empty_until(&mut gen, &mut tf, UNBOND);
+    let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_unbond(b"bond-a"), staking_tx_unbond(b"bond-b")]);
+    tf.push_instr_load_pow(&block, 0);
+
+    // Bond C unbonds, then retargets in the same block. Each is valid on its own here.
+    let bad = gen
+        .clone()
+        .next_block_with_txs(&miner_addr, &[staking_tx_unbond(b"bond-c"), staking_tx_retarget(b"bond-c", target, other)]);
+    tf.push_instr_load_pow(&bad, SHOULD_FAIL);
+    tf.push_instr_expect_pow_chain_length(UNBOND as usize + 1, 0);
+    let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_retarget(b"bond-c", target, other)]);
+    tf.push_instr_load_pow(&block, 0);
+
+    mine_empty_until(&mut gen, &mut tf, WITHDRAW);
+    let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_withdraw(b"bond-b", 0, 0)]);
+    tf.push_instr_load_pow(&block, 0);
+
+    // Bond A withdrawn twice in one block: two transactions, told apart by their expiry.
+    let bad = gen.clone().next_block_with_txs(
+        &miner_addr,
+        &[staking_tx_withdraw(b"bond-a", 0, 0), staking_tx_withdraw(b"bond-a", 0, 10_000)],
+    );
+    tf.push_instr_load_pow(&bad, SHOULD_FAIL);
+    tf.push_instr_expect_pow_chain_length(WITHDRAW as usize + 1, 0);
+    let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_withdraw(b"bond-a", 0, 0)]);
+    tf.push_instr_load_pow(&block, 0);
+    tf.push_instr_expect_pow_chain_length(WITHDRAW as usize + 2, 0);
 
     test_bytes(tf.write_to_bytes());
 }
