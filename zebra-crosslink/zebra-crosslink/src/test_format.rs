@@ -471,9 +471,37 @@ pub const HARNESS_PARAMETERS: ZcashCrosslinkParameters = ZcashCrosslinkParameter
     // network's value is exercised on a testnet, not here.
     bc_confirmation_depth_sigma: 3,
     // Pinned for the same reason as sigma: the staking scenes are built at heights chosen for
-    // this calendar. A scenario that wants a short one sets its own with `..HARNESS_PARAMETERS`.
+    // this calendar. A scenario that wants a short one uses `short_staking`.
     staking: PROTOTYPE_STAKING,
 };
+
+/// The shortest staking calendar a scenario on `params` can use and still mean what it would on
+/// a real network, for
+/// `ZcashCrosslinkParameters { staking: short_staking(&params), ..params }`.
+///
+/// `StakingParameters::is_valid` is only what consensus needs to run. This adds what a scenario
+/// needs to stay realistic:
+/// - a day window of 3, so a test can act first inside, last inside and first outside it;
+/// - an action delay one past the window, with room left in the period, so a withdrawal can
+///   land early or late in a later window;
+/// - a period at least `2 * (sigma + FINALITY_LIVENESS_ALLOWANCE + 1)`, so roster and stake
+///   changes turn over slower than finality can reflect them, as they do at 150 blocks.
+///
+/// A scenario that needs more, such as an edge further into the window, sets its own calendar.
+/// Conformance runs on the prototype calendar remain the check on anything this misses.
+pub fn short_staking(params: &ZcashCrosslinkParameters) -> StakingParameters {
+    let day_window = 3;
+    let action_delay = day_window + 1;
+    let finality_gap = params.bc_confirmation_depth_sigma + FINALITY_LIVENESS_ALLOWANCE;
+    let finality_floor = u32::try_from(2 * (finality_gap + 1)).expect("sigma is a small test value");
+    let staking = StakingParameters {
+        period: finality_floor.max(day_window + action_delay),
+        day_window,
+        action_delay,
+    };
+    assert!(staking.is_valid(), "short_staking built an invalid calendar: {staking:?}");
+    staking
+}
 
 // `SET_PARAMS` carries sigma in `val[0]`, and in its data the bootstrap followed by the staking
 // calendar (period, day window, action delay, each a little-endian u32). The calendar is written
@@ -903,6 +931,18 @@ mod tests {
     fn set_params_without_a_calendar_is_the_prototype_calendar() {
         assert_eq!(params_from_bytes(&[TF_BOOTSTRAP_SUPPLIED]), Some((BftBootstrap::Supplied, PROTOTYPE_STAKING)));
         assert_eq!(params_to_bytes(BftBootstrap::Supplied, PROTOTYPE_STAKING), vec![TF_BOOTSTRAP_SUPPLIED]);
+    }
+
+    #[test]
+    fn short_staking_follows_sigma_and_keeps_its_margins() {
+        // Harness sigma 3 and liveness allowance 3 give a period of 2 * (3 + 3 + 1) = 14.
+        assert_eq!(short_staking(&HARNESS_PARAMETERS), StakingParameters { period: 14, day_window: 3, action_delay: 4 });
+        // The prototype's sigma of 4 gives 16.
+        assert_eq!(short_staking(&PROTOTYPE_PARAMETERS).period, 16);
+
+        let staking = short_staking(&HARNESS_PARAMETERS);
+        // Room for a withdrawal late in a later window: the delay leaves the rest of the period.
+        assert!(staking.action_delay <= staking.period - staking.day_window);
     }
 
     #[test]
