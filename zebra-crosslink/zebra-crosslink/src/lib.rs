@@ -35,6 +35,9 @@ pub static TEST_INSTR_BYTES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 pub static TEST_INSTRS: Mutex<Vec<test_format::TFInstr>> = Mutex::new(Vec::new());
 pub static TEST_SHUTDOWN_FN: Mutex<fn()> = Mutex::new(|| ());
 pub static TEST_NAME: Mutex<&'static str> = Mutex::new("‰‰TEST_NAME_NOT_SET‰‰");
+/// The last check the running instruction made: (condition, message). Read after each
+/// instruction for its timing row and outcome.
+pub static TEST_LAST_CHECK: Mutex<Option<(bool, String)>> = Mutex::new(None);
 
 /// Runtime-configurable failure handling, ported from reece_smith_merchant. A wrapped
 /// `Result`/`Option` panics only when `on_fail` carries `PANIC`, otherwise it is logged
@@ -173,6 +176,7 @@ pub mod config {
 }
 
 pub mod test_format;
+pub mod test_timing;
 
 #[cfg(feature = "viz_gui")]
 pub mod viz2;

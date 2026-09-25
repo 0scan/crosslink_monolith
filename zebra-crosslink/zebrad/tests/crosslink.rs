@@ -44,11 +44,15 @@ macro_rules! function_name {
 
 /// Set the global state TEST_NAME
 pub fn set_test_name(name: &'static str) {
+    // Every test body calls this first, before building any blocks, so the time from here to
+    // `test_start` is the scenario's setup.
+    zebra_crosslink::test_timing::mark_setup_begin();
     *zebra_crosslink::TEST_NAME.lock().unwrap() = name;
 }
 
 /// Crosslink Test entrypoint
 pub fn test_start() {
+    zebra_crosslink::test_timing::mark_boot_begin();
     // init globals
     {
         // Consensus parameters are fixed when the network is built, so they are read from the test

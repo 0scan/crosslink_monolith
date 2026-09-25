@@ -429,6 +429,7 @@ impl TF {
 
 // TODO: macro for a stringified condition
 fn test_check(flags: u32, condition: bool, message: &str) {
+    *TEST_LAST_CHECK.lock().unwrap() = Some((condition, message.to_string()));
     let should_succeed = (flags & SHOULD_FAIL) == 0;
     const SUCCESS_STRS: [&str; 2] = ["fail", "succeed"];
 
@@ -765,6 +766,14 @@ pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs
         // );
 
         if let Some(instr) = uhh_option(tf_read_instr(bytes, &instrs[instr_i]), on_fail) {
+            let height = match &instr {
+                TestInstr::LoadPoW(block) => block.coinbase_height().map(|height| height.0),
+                _ => None,
+            };
+            let failed_before = TEST_FAILED_INSTR_IDXS.lock().unwrap().len();
+            *TEST_LAST_CHECK.lock().unwrap() = None;
+            let start = std::time::Instant::now();
+
             handle_instr(
                 &internal_handle,
                 bytes,
@@ -773,6 +782,21 @@ pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs
                 instr_i,
             )
             .await;
+
+            let outcome = TEST_LAST_CHECK.lock().unwrap().take();
+            let failed = TEST_FAILED_INSTR_IDXS.lock().unwrap().len() > failed_before;
+            let test = *TEST_NAME.lock().unwrap();
+            crate::test_timing::record_instr(
+                test,
+                instr_i,
+                TFInstr::str_from_kind(instrs[instr_i].kind),
+                instrs[instr_i].flags & SHOULD_FAIL != 0,
+                start,
+                outcome,
+                failed,
+                height,
+                instrs[instr_i].data_slice(bytes).len(),
+            );
         }
 
         *TEST_INSTR_C.lock().unwrap() = instr_i + 1; // accounts for end
@@ -815,7 +839,14 @@ pub(crate) async fn instr_reader(internal_handle: TFLServiceHandle) {
 
     *TEST_INSTRS.lock().unwrap() = tf.instrs.clone();
 
+    let params = internal_handle.params;
     read_instrs(internal_handle, &bytes, &tf.instrs).await;
+
+    // Before the asserts below, so a failing test still gets its timing row.
+    let passed = TEST_FAILED_INSTR_IDXS.lock().unwrap().is_empty();
+    let completed = *TEST_INSTR_C.lock().unwrap() == tf.instrs.len();
+    let test = *TEST_NAME.lock().unwrap();
+    crate::test_timing::record_test_end(test, &params, passed && completed);
 
     // make sure tests completed
     assert_eq!(
