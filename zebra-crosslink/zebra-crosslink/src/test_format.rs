@@ -78,8 +78,10 @@ static TF_INSTR_KIND_STRS: [&str; TFInstr::COUNT as usize] = {
     strs[TFInstr::EXPECT_POW_BLOCK_FINALITY as usize] = "EXPECT_POW_BLOCK_FINALITY";
     strs[TFInstr::ROSTER_FORCE_INCLUDE as usize] = "ROSTER_FORCE_INCLUDE";
     strs[TFInstr::EXPECT_ROSTER_INCLUDES as usize] = "EXPECT_ROSTER_INCLUDES";
+    strs[TFInstr::EXPECT_REJECTION_REASON as usize] = "EXPECT_REJECTION_REASON";
+    strs[TFInstr::EXPECT_NODE_ALIVE as usize] = "EXPECT_NODE_ALIVE";
 
-    const_assert!(TFInstr::COUNT == 8);
+    const_assert!(TFInstr::COUNT == 10);
     strs
 };
 
@@ -95,7 +97,14 @@ impl TFInstr {
     pub const EXPECT_POW_BLOCK_FINALITY: TFInstrKind = 5;
     pub const ROSTER_FORCE_INCLUDE: TFInstrKind = 6;
     pub const EXPECT_ROSTER_INCLUDES: TFInstrKind = 7;
-    pub const COUNT: TFInstrKind = 8;
+    /// The previous instruction was rejected, and its reason contains this instruction's data
+    /// (UTF-8). `SHOULD_FAIL` alone passes on any rejection, which is how a test passes for the
+    /// wrong reason; this pins which rejection it was.
+    pub const EXPECT_REJECTION_REASON: TFInstrKind = 8;
+    /// The node still answers: the state service returns its tip within a bound, and
+    /// re-submitting the tip block through the ingest path answers `Known`.
+    pub const EXPECT_NODE_ALIVE: TFInstrKind = 9;
+    pub const COUNT: TFInstrKind = 10;
 
     pub fn str_from_kind(kind: TFInstrKind) -> &'static str {
         let kind = kind as usize;
@@ -145,6 +154,8 @@ impl TFInstr {
             Some(TestInstr::RosterForceInclude(pub_key, stake)) => {
                 str += &format!("{} => {}", PubKeyID(pub_key), stake)
             }
+            Some(TestInstr::ExpectRejectionReason(reason)) => str += &format!("{reason:?}"),
+            Some(TestInstr::ExpectNodeAlive) => {}
             None => {}
         }
 
@@ -333,6 +344,22 @@ impl TF {
 
     pub fn push_instr_expect_roster_includes(&mut self, pub_key: [u8; 32], stake: u64, flags: u32) {
         self.push_instr_ex(TFInstr::EXPECT_ROSTER_INCLUDES, flags, &pub_key, [stake, 0])
+    }
+
+    pub fn push_instr_expect_rejection_reason(&mut self, reason: &str, flags: u32) {
+        self.push_instr_ex(TFInstr::EXPECT_REJECTION_REASON, flags, reason.as_bytes(), [0; 2])
+    }
+
+    pub fn push_instr_expect_node_alive(&mut self, flags: u32) {
+        self.push_instr_ex(TFInstr::EXPECT_NODE_ALIVE, flags, &[0; 0], [0; 2])
+    }
+
+    /// A block the node must reject for `reason`, and must survive rejecting: the load, the
+    /// reason check, and the liveness check, as three instructions.
+    pub fn push_instr_load_pow_rejected(&mut self, block: &Block, reason: &str) {
+        self.push_instr_load_pow(block, SHOULD_FAIL);
+        self.push_instr_expect_rejection_reason(reason, 0);
+        self.push_instr_expect_node_alive(0);
     }
 
     fn is_a_power_of_2(v: usize) -> bool {
@@ -574,7 +601,7 @@ pub fn crosslink_parameters_for_test(bytes: &[u8]) -> ZcashCrosslinkParameters {
 }
 
 pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> {
-    const_assert!(TFInstr::COUNT == 8);
+    const_assert!(TFInstr::COUNT == 10);
     match instr.kind {
         TFInstr::LOAD_POW => {
             let block = Block::zcash_deserialize(instr.data_slice(bytes)).ok()?;
@@ -623,6 +650,11 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             instr.val[0],
         )),
 
+        TFInstr::EXPECT_REJECTION_REASON => Some(TestInstr::ExpectRejectionReason(
+            String::from_utf8(instr.data_slice(bytes).to_vec()).ok()?,
+        )),
+        TFInstr::EXPECT_NODE_ALIVE => Some(TestInstr::ExpectNodeAlive),
+
         _ => {
             panic!("Unrecognized instruction {}", instr.kind);
             None
@@ -638,6 +670,8 @@ pub(crate) enum TestInstr {
     ExpectPoWChainLength(u32),
     ExpectPoSChainLength(u64),
     ExpectPoWBlockFinality(ZebBlockHash, Option<TFLBlockFinality>),
+    ExpectRejectionReason(String),
+    ExpectNodeAlive,
     RosterForceInclude([u8; 32], u64),   // public address
     ExpectRosterIncludes([u8; 32], u64), // public address
 }
@@ -695,19 +729,50 @@ pub(crate) async fn handle_instr(
         }
 
         TestInstr::ExpectPoWChainLength(h) => {
-            if let StateResponse::Tip(Some((height, hash))) =
-                (internal_handle.call.state)(StateRequest::Tip)
-                    .await
-                    .expect("can read tip")
+            // Bounded, and every answer is recorded: an unbounded wait hangs the test if the state
+            // service stops answering, and skipping the check on a missing tip passed silently.
+            let (holds, message) = match tokio::time::timeout(
+                NODE_ANSWER_WAIT,
+                (internal_handle.call.state)(StateRequest::Tip),
+            )
+            .await
             {
-                let expect = h;
-                let actual = height.0 + 1;
-                test_check(
-                    flags,
-                    expect == actual,
-                    &format!("PoW chain length: expected {}, actually {}", expect, actual),
-                ); // TODO: maybe assert in test but recoverable error in-GUI
-            }
+                Ok(Ok(StateResponse::Tip(Some((height, _))))) => {
+                    let actual = height.0 + 1;
+                    (h == actual, format!("PoW chain length: expected {h}, actually {actual}"))
+                }
+                Ok(Ok(StateResponse::Tip(None))) => {
+                    (false, format!("PoW chain length: expected {h}, but the node has no tip"))
+                }
+                Ok(Ok(other)) => (false, format!("PoW chain length: the tip request answered {other:?}")),
+                Ok(Err(err)) => (false, format!("PoW chain length: the tip request failed: {err}")),
+                Err(_) => (false, format!("PoW chain length: no answer to the tip request within {NODE_ANSWER_WAIT:?}")),
+            };
+            test_check(flags, holds, &message);
+        }
+
+        TestInstr::ExpectRejectionReason(reason) => {
+            let previous = TEST_PREV_OUTCOME.lock().unwrap().clone();
+            let (holds, message) = match previous {
+                Some((false, rejection)) => (
+                    rejection.contains(&reason),
+                    format!("rejection reason: expected it to contain {reason:?}, actually {rejection:?}"),
+                ),
+                Some((true, accepted)) => (
+                    false,
+                    format!("rejection reason: expected a rejection containing {reason:?}, but the previous instruction was accepted: {accepted:?}"),
+                ),
+                None => (
+                    false,
+                    format!("rejection reason: expected a rejection containing {reason:?}, but the previous instruction made no check"),
+                ),
+            };
+            test_check(flags, holds, &message);
+        }
+
+        TestInstr::ExpectNodeAlive => {
+            let (alive, message) = node_alive(internal_handle).await;
+            test_check(flags, alive, &message);
         }
 
         TestInstr::ExpectPoSChainLength(h) => {
@@ -781,6 +846,38 @@ pub(crate) async fn handle_instr(
     }
 }
 
+/// How long an instruction waits for the node to answer before recording that it didn't.
+const NODE_ANSWER_WAIT: Duration = Duration::from_secs(30);
+
+/// Whether the node still answers: its state service returns the tip within a bound, and
+/// re-submitting the tip block through the ingest path -- the doorway every LOAD_POW uses --
+/// answers `Known`, which only a live sync loop can do.
+async fn node_alive(internal_handle: &TFLServiceHandle) -> (bool, String) {
+    let tip = tokio::time::timeout(NODE_ANSWER_WAIT, (internal_handle.call.state)(StateRequest::Tip)).await;
+    let (height, hash) = match tip {
+        Ok(Ok(StateResponse::Tip(Some(tip)))) => tip,
+        Ok(Ok(other)) => return (false, format!("node alive: the tip request answered {other:?}")),
+        Ok(Err(err)) => return (false, format!("node alive: the tip request failed: {err}")),
+        Err(_) => return (false, format!("node alive: no answer to the tip request within {NODE_ANSWER_WAIT:?}")),
+    };
+    let block = tokio::time::timeout(
+        NODE_ANSWER_WAIT,
+        (internal_handle.call.state)(StateRequest::Block(hash.into())),
+    )
+    .await;
+    let block = match block {
+        Ok(Ok(StateResponse::Block(Some(block)))) => block,
+        other => return (false, format!("node alive: could not read the tip block {hash} at height {}: {other:?}", height.0)),
+    };
+    match zebra_state::new_network::submit_block_to_new_network(block, NODE_ANSWER_WAIT).await {
+        Ok(zebra_state::new_network::IngestOutcome::Known { .. }) => {
+            (true, format!("node alive: re-submitting tip {hash} at height {} answered Known", height.0))
+        }
+        Ok(other) => (false, format!("node alive: re-submitting the tip answered {other:?}, not Known")),
+        Err(err) => (false, format!("node alive: the ingest loop did not answer re-submitting the tip: {err}")),
+    }
+}
+
 pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs: &[TFInstr]) {
     // A failed deserialize is a hard error for a normal test but an expected input rejection
     // for the fuzzer; `uhh_option` decides which via TEST_ON_FAIL (PANIC vs recover).
@@ -812,6 +909,7 @@ pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs
             .await;
 
             let outcome = TEST_LAST_CHECK.lock().unwrap().take();
+            *TEST_PREV_OUTCOME.lock().unwrap() = outcome.clone();
             let failed = TEST_FAILED_INSTR_IDXS.lock().unwrap().len() > failed_before;
             let test = *TEST_NAME.lock().unwrap();
             crate::test_timing::record_instr(
@@ -825,6 +923,10 @@ pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs
                 height,
                 instrs[instr_i].data_slice(bytes).len(),
             );
+        } else {
+            // An instruction that didn't parse (only reachable when the fuzzer recovers) made
+            // no check, so an instruction about it must not see the one before it.
+            *TEST_PREV_OUTCOME.lock().unwrap() = None;
         }
 
         *TEST_INSTR_C.lock().unwrap() = instr_i + 1; // accounts for end
@@ -870,38 +972,22 @@ pub(crate) async fn instr_reader(internal_handle: TFLServiceHandle) {
     let params = internal_handle.params;
     read_instrs(internal_handle, &bytes, &tf.instrs).await;
 
-    // Before the asserts below, so a failing test still gets its timing row.
-    let passed = TEST_FAILED_INSTR_IDXS.lock().unwrap().is_empty();
-    let completed = *TEST_INSTR_C.lock().unwrap() == tf.instrs.len();
+    // Copy everything out and release every lock BEFORE asserting. The panic hook runs before
+    // unwinding, while anything the failing statement holds is still held, and it calls
+    // dump_test_instrs, which locks TEST_FAILED_INSTR_IDXS and TEST_INSTR_C; the shutdown path
+    // below does the same. std Mutex is not reentrant, so a guard alive at either point deadlocks
+    // this thread: a failing test hangs in the hook instead of aborting, a passing one at exit.
+    let failed_instrs = TEST_FAILED_INSTR_IDXS.lock().unwrap().clone();
+    let completed_instrs = *TEST_INSTR_C.lock().unwrap();
     let test = *TEST_NAME.lock().unwrap();
-    crate::test_timing::record_test_end(test, &params, passed && completed);
 
-    // make sure tests completed
-    assert_eq!(
-        *TEST_INSTR_C.lock().unwrap(),
-        tf.instrs.len(),
-        "didn't complete test {}",
-        TEST_NAME.lock().unwrap()
-    );
-    // make sure the test as a whole actually fails for failed instructions.
-    // Include the recorded (instruction index, message) pairs in the message so a red test is
-    // self-describing: otherwise these are collected but discarded here, and diagnosing which
-    // instruction failed needs TEST_CHECK_ASSERT raised and a rebuild.
-    //
-    // The lock MUST be released before TEST_SHUTDOWN_FN below: the shutdown path
-    // (crosslink shutdown fn -> dump_test_instrs) re-locks this same std Mutex on this thread,
-    // and std Mutex is not reentrant, so holding the guard across the shutdown call deadlocks
-    // every PASSING test at exit. (A failing test unwinds on the assert and drops the guard, so
-    // only green tests hang.) Hence the explicit scope -- do not lift the binding out of it.
-    {
-        let failed_instrs = TEST_FAILED_INSTR_IDXS.lock().unwrap();
-        assert!(
-            failed_instrs.is_empty(),
-            "failed test {}: {:?}",
-            TEST_NAME.lock().unwrap(),
-            *failed_instrs
-        );
-    }
+    // Before the asserts, so a failing test still gets its timing row.
+    let passed = failed_instrs.is_empty() && completed_instrs == tf.instrs.len();
+    crate::test_timing::record_test_end(test, &params, passed);
+
+    assert_eq!(completed_instrs, tf.instrs.len(), "didn't complete test {test}");
+    // The (instruction index, message) pairs make a red test self-describing.
+    assert!(failed_instrs.is_empty(), "failed test {test}: {failed_instrs:?}");
     println!("Test done, shutting down");
     // #[cfg(feature = "viz_gui")]
     // tokio::time::sleep(Duration::from_secs(120)).await;

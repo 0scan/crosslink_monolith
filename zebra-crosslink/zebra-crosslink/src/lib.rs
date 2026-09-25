@@ -38,6 +38,8 @@ pub static TEST_NAME: Mutex<&'static str> = Mutex::new("‰‰TEST_NAME_NOT_SET�
 /// The last check the running instruction made: (condition, message). Read after each
 /// instruction for its timing row and outcome.
 pub static TEST_LAST_CHECK: Mutex<Option<(bool, String)>> = Mutex::new(None);
+/// The previous instruction's last check, for instructions about it (EXPECT_REJECTION_REASON).
+pub static TEST_PREV_OUTCOME: Mutex<Option<(bool, String)>> = Mutex::new(None);
 
 /// Runtime-configurable failure handling, ported from reece_smith_merchant. A wrapped
 /// `Result`/`Option` panics only when `on_fail` carries `PANIC`, otherwise it is logged
