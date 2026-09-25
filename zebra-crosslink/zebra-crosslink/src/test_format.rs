@@ -97,8 +97,10 @@ static TF_INSTR_KIND_STRS: [&str; TFInstr::COUNT as usize] = {
     strs[TFInstr::EXPECT_BOND as usize] = "EXPECT_BOND";
     strs[TFInstr::EXPECT_FINALIZER_BANK as usize] = "EXPECT_FINALIZER_BANK";
     strs[TFInstr::EXPECT_POOL_TOTALS as usize] = "EXPECT_POOL_TOTALS";
+    strs[TFInstr::RECV_POW as usize] = "RECV_POW";
+    strs[TFInstr::RECV_STP_PACKET as usize] = "RECV_STP_PACKET";
 
-    const_assert!(TFInstr::COUNT == 18);
+    const_assert!(TFInstr::COUNT == 20);
     strs
 };
 
@@ -148,7 +150,15 @@ impl TFInstr {
     /// The best chain tip's staking pools: the data is bonded, unbonded and finalizer rewards,
     /// three little-endian u64 zatoshi amounts, each skipped when `TEST_STAKE_IGNORED`.
     pub const EXPECT_POOL_TOTALS: TFInstrKind = 17;
-    pub const COUNT: TFInstrKind = 18;
+    /// A PoW block (the data, serialized) served by synthetic STP peer `val[0]` the way a real
+    /// peer serves one: the peer advertises it in a STATUS, waits for the node's BLOCK_REQ, and
+    /// answers with BLOCK_CHUNK packets from the requested offset. Accepted and rejected as
+    /// LOAD_POW is, and rejected too when the node kills the peer or never asks for the block.
+    pub const RECV_POW: TFInstrKind = 18;
+    /// An STP application packet (the data, type byte first) arriving from synthetic peer
+    /// `val[0]`. Fails when the node kills the peer for it; any other handling passes.
+    pub const RECV_STP_PACKET: TFInstrKind = 19;
+    pub const COUNT: TFInstrKind = 20;
 
     pub fn str_from_kind(kind: TFInstrKind) -> &'static str {
         let kind = kind as usize;
@@ -214,6 +224,15 @@ impl TFInstr {
                 str += &format!("{} => {amount}", PubKeyID(pub_key))
             }
             Some(TestInstr::ExpectPoolTotals(pools)) => str += &format!("{pools:?}"),
+            Some(TestInstr::RecvPoW { block, peer }) => {
+                str += &match Block::zcash_deserialize(&block[..]) {
+                    Ok(parsed) => format!("{} from peer {peer}", parsed.hash()),
+                    Err(_) => format!("{} unparseable bytes from peer {peer}", block.len()),
+                }
+            }
+            Some(TestInstr::RecvStpPacket { packet, peer }) => {
+                str += &format!("type {:?}, {} bytes from peer {peer}", packet.first(), packet.len())
+            }
             None => {}
         }
 
@@ -450,6 +469,20 @@ impl TF {
             data.extend_from_slice(&amount.to_le_bytes());
         }
         self.push_instr_ex(TFInstr::EXPECT_POOL_TOTALS, flags, &data, [0; 2])
+    }
+
+    /// A block served over the STP block-sync exchange by synthetic peer `peer`.
+    pub fn push_instr_recv_pow(&mut self, block: &Block, peer: u64, flags: u32) {
+        self.push_instr_serialize_ex(TFInstr::RECV_POW, flags, block, [peer, 0])
+    }
+
+    /// Block bytes served as-is, for encodings `Block` would not produce.
+    pub fn push_instr_recv_pow_bytes(&mut self, block: &[u8], peer: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::RECV_POW, flags, block, [peer, 0])
+    }
+
+    pub fn push_instr_recv_stp_packet(&mut self, packet: &[u8], peer: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::RECV_STP_PACKET, flags, packet, [peer, 0])
     }
 
     /// A block the node must reject for `reason`, and must survive rejecting: the load, the
@@ -716,7 +749,7 @@ pub fn crosslink_parameters_for_test(bytes: &[u8]) -> ZcashCrosslinkParameters {
 }
 
 pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> {
-    const_assert!(TFInstr::COUNT == 18);
+    const_assert!(TFInstr::COUNT == 20);
     match instr.kind {
         TFInstr::LOAD_POW => {
             let block = Block::zcash_deserialize(instr.data_slice(bytes)).ok()?;
@@ -799,6 +832,14 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             let amount = |i: usize| u64::from_le_bytes(data[8 * i..8 * i + 8].try_into().expect("eight bytes"));
             Some(TestInstr::ExpectPoolTotals([amount(0), amount(1), amount(2)]))
         }
+        TFInstr::RECV_POW => Some(TestInstr::RecvPoW {
+            block: instr.data_slice(bytes).to_vec(),
+            peer: instr.val[0],
+        }),
+        TFInstr::RECV_STP_PACKET => Some(TestInstr::RecvStpPacket {
+            packet: instr.data_slice(bytes).to_vec(),
+            peer: instr.val[0],
+        }),
 
         _ => {
             panic!("Unrecognized instruction {}", instr.kind);
@@ -827,6 +868,9 @@ pub(crate) enum TestInstr {
     ExpectFinalizerBank([u8; 32], u64),
     /// [bonded, unbonded, finalizer rewards]
     ExpectPoolTotals([u64; 3]),
+    /// Raw bytes: the peer serves exactly what the file holds, parseable or not.
+    RecvPoW { block: Vec<u8>, peer: u64 },
+    RecvStpPacket { packet: Vec<u8>, peer: u64 },
     RosterForceInclude([u8; 32], u64),   // public address
     ExpectRosterIncludes([u8; 32], u64), // public address
 }
@@ -944,6 +988,20 @@ pub(crate) async fn handle_instr(
         TestInstr::SubmitTx(transaction) => {
             let (accepted, message) = submit_tx(internal_handle, transaction).await;
             test_check(flags, accepted, &message);
+        }
+
+        TestInstr::RecvPoW { block, peer } => {
+            let mut stp = take_stp_peer(peer);
+            let (accepted, message) = serve_block(internal_handle, &mut stp, &block).await;
+            put_stp_peer(stp);
+            test_check(flags, accepted, &message);
+        }
+
+        TestInstr::RecvStpPacket { packet, peer } => {
+            let mut stp = take_stp_peer(peer);
+            let (survived, message) = deliver_stp_packet(&mut stp, packet).await;
+            put_stp_peer(stp);
+            test_check(flags, survived, &message);
         }
 
         TestInstr::ExpectMempoolContains(transaction) => {
@@ -1150,6 +1208,155 @@ fn hex32(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// A synthetic STP peer and what the harness knows about it. A killed peer stays killed for the
+/// rest of the test, as a real one would.
+struct HarnessStpPeer {
+    index: u64,
+    link: zebra_state::new_network::SyntheticPeer,
+    killed: Option<String>,
+}
+
+/// Peers wait here between instructions; an instruction takes its peer out, so no lock is held
+/// across an await.
+static TEST_STP_PEERS: Mutex<Vec<HarnessStpPeer>> = Mutex::new(Vec::new());
+
+/// How long a packet gets to provoke a kill. The sync loop ticks every 100 ms, and nothing
+/// acknowledges a packet, so this is a bound rather than a handshake.
+const STP_PACKET_SETTLE: Duration = Duration::from_secs(1);
+
+/// How long to watch a peer advertise a block the node already has. The node never requests it,
+/// so there is no verdict to wait for, only a kill to rule out.
+const KNOWN_BLOCK_SETTLE: Duration = Duration::from_secs(2);
+
+fn take_stp_peer(index: u64) -> HarnessStpPeer {
+    let mut peers = TEST_STP_PEERS.lock().unwrap();
+    if let Some(i) = peers.iter().position(|p| p.index == index) {
+        return peers.swap_remove(i);
+    }
+    let link_index = u16::try_from(index).expect("synthetic peer indices fit in 16 bits");
+    HarnessStpPeer { index, link: zebra_state::new_network::attach_synthetic_peer(link_index), killed: None }
+}
+
+fn put_stp_peer(peer: HarnessStpPeer) {
+    TEST_STP_PEERS.lock().unwrap().push(peer);
+}
+
+/// Forgets whatever the peer received since its last instruction, keeping only a kill.
+fn drain_stp_peer(stp: &mut HarnessStpPeer) {
+    while stp.link.outbound.try_recv().is_ok() {}
+    while let Ok(event) = stp.link.events.try_recv() {
+        if let zebra_state::new_network::SyntheticPeerEvent::Killed(reason) = event {
+            stp.killed = Some(reason);
+        }
+    }
+}
+
+async fn deliver_stp_packet(stp: &mut HarnessStpPeer, packet: Vec<u8>) -> (bool, String) {
+    use zebra_state::new_network::SyntheticPeerEvent;
+    let index = stp.index;
+    drain_stp_peer(stp);
+    if let Some(reason) = &stp.killed {
+        return (false, format!("RECV_STP_PACKET: peer {index} was already killed: {reason}"));
+    }
+    let _ = stp.link.inbound.send(packet);
+
+    let deadline = tokio::time::Instant::now() + STP_PACKET_SETTLE;
+    loop {
+        tokio::select! {
+            event = stp.link.events.recv() => match event {
+                Some(SyntheticPeerEvent::Killed(reason)) => {
+                    stp.killed = Some(reason.clone());
+                    return (false, format!("RECV_STP_PACKET: the node killed peer {index}: {reason}"));
+                }
+                Some(_) => {}
+                None => return (false, "RECV_STP_PACKET: the sync loop is gone".to_string()),
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                return (true, format!("RECV_STP_PACKET: peer {index} still connected after {STP_PACKET_SETTLE:?}"));
+            }
+        }
+    }
+}
+
+/// Plays a peer that has `wire_block`: advertises it, then answers the node's requests for it.
+async fn serve_block(internal_handle: &TFLServiceHandle, stp: &mut HarnessStpPeer, wire_block: &[u8]) -> (bool, String) {
+    use zebra_state::new_network::{
+        block_chunk_packets, parse_block_request, status_packet, IngestOutcome, NearTipChains, ShadowBlock,
+        SyntheticPeerEvent,
+    };
+    let index = stp.index;
+    let Ok(block) = Block::zcash_deserialize(wire_block) else {
+        return (false, "RECV_POW: the block does not parse, so no STATUS can advertise it; send its packets with RECV_STP_PACKET".to_string());
+    };
+    let hash = block.hash();
+    let Some(height) = block.coinbase_height().map(|height| height.0) else {
+        return (false, format!("RECV_POW: block {hash} has no coinbase height, so no STATUS can advertise it"));
+    };
+
+    drain_stp_peer(stp);
+    if let Some(reason) = &stp.killed {
+        return (false, format!("RECV_POW: peer {index} was already killed: {reason}"));
+    }
+
+    let already_known = matches!(
+        tokio::time::timeout(NODE_ANSWER_WAIT, (internal_handle.call.state)(StateRequest::KnownBlock(hash))).await,
+        Ok(Ok(StateResponse::KnownBlock(Some(_))))
+    );
+
+    let mut chains = NearTipChains::default();
+    chains.push_chain_unchecked(vec![ShadowBlock { this_hash: hash, parent_hash: block.header.previous_block_hash, this_height: height }]);
+    let _ = stp.link.inbound.send(status_packet(&[], &chains, None));
+
+    let deadline = tokio::time::Instant::now() + if already_known { KNOWN_BLOCK_SETTLE } else { NODE_ANSWER_WAIT };
+    let (mut requests, mut chunks) = (0usize, 0usize);
+    loop {
+        tokio::select! {
+            packet = stp.link.outbound.recv() => {
+                let Some(packet) = packet else {
+                    return (false, "RECV_POW: the sync loop is gone".to_string());
+                };
+                let Some((req_height, req_hash, offset)) = parse_block_request(&packet) else {
+                    continue; // STATUS, address gossip, hole punching: a real peer would handle these, but they don't bear on this block
+                };
+                let asks_for_this = req_hash == hash || (req_hash == ZebBlockHash([0; 32]) && req_height == height);
+                if asks_for_this && (offset as usize) < wire_block.len() {
+                    requests += 1;
+                    for chunk in block_chunk_packets(wire_block, height, hash, offset as usize) {
+                        chunks += 1;
+                        let _ = stp.link.inbound.send(chunk);
+                    }
+                }
+            }
+            event = stp.link.events.recv() => match event {
+                Some(SyntheticPeerEvent::Killed(reason)) => {
+                    stp.killed = Some(reason.clone());
+                    return (false, format!("RECV_POW: the node killed peer {index}: {reason}"));
+                }
+                // As LOAD_POW reports it: a deferral is a failed ingest whose block stays queued.
+                Some(SyntheticPeerEvent::Deferred { hash: deferred, reason }) if deferred == hash => return (false, reason),
+                Some(SyntheticPeerEvent::Outcome { hash: decided, outcome }) if decided == hash => {
+                    return match outcome {
+                        IngestOutcome::Committed(_) => (true, "PoW ingest ok".to_string()),
+                        IngestOutcome::Known { .. } => (true, "PoW already known".to_string()),
+                        IngestOutcome::Failed { reason, .. } => (false, reason),
+                    };
+                }
+                Some(_) => {}
+                None => return (false, "RECV_POW: the sync loop is gone".to_string()),
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                if already_known && requests == 0 {
+                    return (true, "PoW already known".to_string());
+                }
+                return (
+                    false,
+                    format!("RECV_POW: no verdict on {hash} @ {height} within {NODE_ANSWER_WAIT:?}; the node sent {requests} request(s) for it, answered with {chunks} chunk(s)"),
+                );
+            }
+        }
+    }
+}
+
 fn stake_expectation(value: u64) -> String {
     if value == TEST_STAKE_IGNORED { "*".to_string() } else { value.to_string() }
 }
@@ -1261,6 +1468,10 @@ pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs
         if let Some(instr) = uhh_option(tf_read_instr(bytes, &instrs[instr_i]), on_fail) {
             let height = match &instr {
                 TestInstr::LoadPoW(block) => block.coinbase_height().map(|height| height.0),
+                TestInstr::RecvPoW { block, .. } => Block::zcash_deserialize(&block[..])
+                    .ok()
+                    .and_then(|block| block.coinbase_height())
+                    .map(|height| height.0),
                 _ => None,
             };
             let failed_before = TEST_FAILED_INSTR_IDXS.lock().unwrap().len();

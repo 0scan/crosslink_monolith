@@ -1217,6 +1217,133 @@ const BLOCK_SUBMISSION_QUEUE_LEN: usize = 256;
 static BLOCK_SUBMISSION_SENDER: std::sync::OnceLock<tokio::sync::mpsc::Sender<BlockSubmission>> =
     std::sync::OnceLock::new();
 
+/// A stand-in for one STP peer, for tests. Packets sent on `inbound` reach the sync loop exactly
+/// as if the network thread had just decrypted and reassembled them from this peer, and every
+/// packet the node addresses to the peer comes out of `outbound` instead of a socket. Only the
+/// transport is simulated: packet parsing, kill rules, download slots and the commit pipeline are
+/// the real ones.
+pub struct SyntheticPeer {
+    pub address: STPAddress,
+    pub inbound: std::sync::mpsc::Sender<Vec<u8>>,
+    pub outbound: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    pub events: tokio::sync::mpsc::UnboundedReceiver<SyntheticPeerEvent>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SyntheticPeerEvent {
+    /// The node disconnected the peer for misbehaving. The peer stays disconnected.
+    Killed(String),
+    /// A block the peer delivered is waiting on something outside it (a BFT decision).
+    Deferred { hash: Hash, reason: String },
+    /// A block the peer delivered left the commit queue with this verdict.
+    Outcome { hash: Hash, outcome: IngestOutcome },
+}
+
+/// The sync loop's end of a `SyntheticPeer`.
+struct SyntheticPeerLink {
+    address: STPAddress,
+    inbound: std::sync::mpsc::Receiver<Vec<u8>>,
+    outbound: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    events: tokio::sync::mpsc::UnboundedSender<SyntheticPeerEvent>,
+    alive: bool,
+}
+
+/// Picked up by the sync loop at the top of its next tick.
+static SYNTHETIC_PEERS_TO_ATTACH: std::sync::Mutex<Vec<SyntheticPeerLink>> = std::sync::Mutex::new(Vec::new());
+
+/// Connects synthetic peer `index` to the running node. Distinct indices are distinct peers.
+///
+/// Turns the debug-build traps off for the process: a node killing a peer that sent it bad data
+/// is behaviour tests assert on, and in debug builds the kill path would otherwise stop the
+/// process.
+pub fn attach_synthetic_peer(index: u16) -> SyntheticPeer {
+    tenderlink::DBG_TRAPS.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // 127.2.x.y is loopback nobody listens on, so if the address is ever gossiped or dialled,
+    // nothing answers. The key's first two bytes make the ConnectionKey unique per index.
+    let [hi, lo] = index.to_be_bytes();
+    let mut key = vec![0x5e; 32];
+    key[..2].copy_from_slice(&index.to_le_bytes());
+    let address = STPAddress {
+        ip: std::net::Ipv4Addr::new(127, 2, hi, lo).to_ipv6_mapped(),
+        port: 8233,
+        magic1: CRYPTO_MAGIC,
+        key,
+    };
+
+    let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    SYNTHETIC_PEERS_TO_ATTACH.lock().unwrap().push(SyntheticPeerLink {
+        address: address.clone(),
+        inbound: inbound_rx,
+        outbound: outbound_tx,
+        events: events_tx,
+        alive: true,
+    });
+    SyntheticPeer { address, inbound: inbound_tx, outbound: outbound_rx, events: events_rx }
+}
+
+/// A STATUS packet: the queued hashes, then `chains` as a hash tree. The sync loop sends its own
+/// status with this, so a synthetic peer's status is encoded identically.
+pub fn status_packet(queued: &[Hash], chains: &NearTipChains, tip_height_override: Option<u32>) -> Vec<u8> {
+    let queue_len = queued.len().min(MAX_BLOCKS_TO_QUEUE_TO_COMMIT);
+    let (mut buf, mut o) = ([0u8; 1 + 1 + MAX_BLOCKS_TO_QUEUE_TO_COMMIT * 32 + PACKET_STATUS_MAX_SIZE], 0);
+    o += PACKET_TYPE_STATUS.write_to(&mut buf[o..]);
+    o += (queue_len as u8)  .write_to(&mut buf[o..]);
+    for queued_hash in &queued[..queue_len] {
+        o += queued_hash.0.write_to(&mut buf[o..]);
+    }
+    o += chains.write_to(&mut buf[o..], tip_height_override);
+    Vec::from(&buf[..o])
+}
+
+/// The BLOCK_CHUNK packets that answer a request for `serialized` from `offset` on.
+pub fn block_chunk_packets(serialized: &[u8], height: u32, hash: Hash, offset: usize) -> Vec<Vec<u8>> {
+    let total_size: u32 = serialized.len().try_into().unwrap();
+    let height_hash = HeightAndHashOr0 { height: block::Height(height), hash_or_0: hash };
+
+    // Poor-man's fragmentation: split the block into single-packet chunks, each an
+    // independently deliverable & re-requestable message. STP delivery is unreliable,
+    // so the receiver reassembles and re-requests from its highest contiguous prefix.
+    let mut pkt_buf = [0u8; JUMBO_FRAG_SIZE];
+
+    // payload bytes available per packet after the chunk header
+    let chunk_size = JUMBO_FRAG_SIZE - {
+        let hdr = PeerPowBlockResponseChunkHdr { offset: 0, size: total_size, height_hash };
+        let mut o = 0;
+        o += PACKET_TYPE_BLOCK_CHUNK.write_to(&mut pkt_buf[o..]);
+        o += hdr.write_to(&mut pkt_buf[o..]);
+        o
+    };
+
+    let mut packets = Vec::new();
+    for (chunk_i, chunk) in serialized[offset..].chunks(chunk_size).enumerate() {
+        let hdr = PeerPowBlockResponseChunkHdr {
+            offset: offset as u32 + (chunk_i * chunk_size) as u32,
+            size: total_size,
+            height_hash,
+        };
+
+        let mut o = 0;
+        o += PACKET_TYPE_BLOCK_CHUNK.write_to(&mut pkt_buf[o..]);
+        o += hdr.write_to(&mut pkt_buf[o..]);
+        o += chunk.write_to(&mut pkt_buf[o..]);
+        packets.push(Vec::from(&pkt_buf[..o]));
+    }
+    packets
+}
+
+/// `(height, hash, offset)` if `packet` is a BLOCK_REQ. A zero hash asks by height alone.
+pub fn parse_block_request(packet: &[u8]) -> Option<(u32, Hash, u32)> {
+    let mut msg = packet;
+    if u8::read_from(&mut msg)? != PACKET_TYPE_BLOCK_REQ {
+        return None;
+    }
+    let request = PeerPowBlockRequest::read_from(&mut msg)?;
+    Some((request.height_hash.height.0, request.height_hash.hash_or_0, request.offset))
+}
+
 /// Blocks that peers claim to have (from the near-tip trees they send in STATUS
 /// packets) but that are absent from our own near-tip chains. Deduplicated across
 /// peers. Refreshed by the sync loop on the status cadence; readers (e.g. the
@@ -1357,6 +1484,9 @@ pub fn sync(
     let mut current_connections = Vec::<(STPAddress, [u8; 64])>::new();
     let mut initiate_connections = Vec::<STPAddress>::new();
     let mut packets_to_send: Vec<(ConnectionKey, Vec<u8>)> = Vec::new();
+    let mut synthetic_peers: Vec<SyntheticPeerLink> = Vec::new();
+    // Which synthetic peer delivered each queued block, so its verdict can be reported back.
+    let mut synthetic_delivered: HashMap<Hash, ConnectionKey> = HashMap::new();
 
     // Parse and connect to initial peers
     let mut initial_peer_addresses: Vec<STPAddress> = Vec::new();
@@ -1747,44 +1877,10 @@ pub fn sync(
                 continue;
             }
 
-            let total_size: u32 = serialized_block.len().try_into().unwrap();
-
             if TRACE { tracing::info!("Sending BLOCK (Height: {height}, Hash: {hash}, {offset}-{})", serialized_block.len()); }
 
-            // Poor-man's fragmentation: split the block into single-packet chunks, each an
-            // independently deliverable & re-requestable message. STP delivery is unreliable,
-            // so the receiver reassembles and re-requests from its highest contiguous prefix.
-            let mut pkt_buf = [0u8; JUMBO_FRAG_SIZE];
-
-            // payload bytes available per packet after the chunk header
-            let chunk_size = JUMBO_FRAG_SIZE - {
-                let hdr = PeerPowBlockResponseChunkHdr {
-                    offset: 0,
-                    size: total_size,
-                    height_hash: HeightAndHashOr0 { height: block::Height(*height), hash_or_0: hash },
-                };
-                let mut o = 0;
-                o += PACKET_TYPE_BLOCK_CHUNK.write_to(&mut pkt_buf[o..]);
-                o += hdr.write_to(&mut pkt_buf[o..]);
-                o
-            };
-
-            for (chunk_i, chunk) in serialized_block[*offset..].chunks(chunk_size).enumerate() {
-                let hdr = PeerPowBlockResponseChunkHdr {
-                    offset: *offset as u32 + (chunk_i * chunk_size) as u32,
-                    size: total_size,
-                    height_hash: HeightAndHashOr0 {
-                        height: block::Height(*height),
-                        hash_or_0: hash,
-                    }
-                };
-
-                let mut o = 0;
-                o += PACKET_TYPE_BLOCK_CHUNK.write_to(&mut pkt_buf[o..]);
-                o += hdr.write_to(&mut pkt_buf[o..]);
-                o += chunk.write_to(&mut pkt_buf[o..]);
-
-                packets_to_send.push((*connection_key, Vec::from(&pkt_buf[..o])));
+            for packet in block_chunk_packets(serialized_block, *height, hash, *offset) {
+                packets_to_send.push((*connection_key, packet));
             }
         }
         blocks_to_send.clear();
@@ -1809,15 +1905,8 @@ pub fn sync(
                 break 'send_status;
             };
 
-            let queue_len = blocks_to_commit.len().min(MAX_BLOCKS_TO_QUEUE_TO_COMMIT) as u8;
-
-            let (mut buf, mut o) = ([0u8; 1 + 1 + MAX_BLOCKS_TO_QUEUE_TO_COMMIT * 32 + PACKET_STATUS_MAX_SIZE], 0);
-            o += PACKET_TYPE_STATUS.write_to(&mut buf[o..]);
-            o += queue_len         .write_to(&mut buf[o..]);
-            for (queued_hash, _) in blocks_to_commit.iter().take(queue_len as usize) {
-                o += queued_hash.0.write_to(&mut buf[o..]);
-            }
-            o += near_tip_chains   .write_to(&mut buf[o..], None);
+            let queued: Vec<Hash> = blocks_to_commit.iter().take(MAX_BLOCKS_TO_QUEUE_TO_COMMIT).map(|(hash, _)| *hash).collect();
+            let status = status_packet(&queued, &near_tip_chains, None);
 
             for (address, _) in &current_connections {
                 let key = address.connection_key();
@@ -1908,23 +1997,16 @@ pub fn sync(
                         historical_chains.finalized_height = near_tip_chains.finalized_height;
                         historical_chains.push_chain_unchecked(historical_chain);
 
-                        let (mut buf, mut o) = ([0u8; 1 + 1 + MAX_BLOCKS_TO_QUEUE_TO_COMMIT * 32 + PACKET_STATUS_MAX_SIZE], 0);
-                        o += PACKET_TYPE_STATUS.write_to(&mut buf[o..]);
-                        o += queue_len         .write_to(&mut buf[o..]);
-                        for (queued_hash, _) in blocks_to_commit.iter().take(queue_len as usize) {
-                            o += queued_hash.0 .write_to(&mut buf[o..]);
-                        }
-                        o += historical_chains .write_to(&mut buf[o..], Some(near_tip_chains.tip_height().expect("near_tip_chains_from_state() always produces at least one chain")));
-
+                        let historical_status = status_packet(&queued, &historical_chains, Some(near_tip_chains.tip_height().expect("near_tip_chains_from_state() always produces at least one chain")));
 
                         // if TRACE { tracing::info!("Send a historical STATUS to {:?} @ {}", address, their_final_parent_parent_height + 1); }
-                        packets_to_send.push((key, Vec::from(&buf[..o])));
+                        packets_to_send.push((key, historical_status));
                         false
                     };
                 }
 
                 if send_tip_chains {
-                    packets_to_send.push((key, Vec::from(&buf[..o])));
+                    packets_to_send.push((key, status.clone()));
                 }
             }
         }}
@@ -2324,15 +2406,32 @@ pub fn sync(
         // @@@ @Todo @@@: We need speculative queueing ASAP!
         // packets_to_send.shuffle(&mut rand::thread_rng());
 
+        // Synthetic peers are served here instead of by the network thread, which never hears of
+        // them: their packets leave and arrive around it, and they are re-added to the connection
+        // list it hands back each tick until the node kills them.
+        synthetic_peers.extend(SYNTHETIC_PEERS_TO_ATTACH.lock().unwrap().drain(..));
+        packets_to_send.retain(|(key, packet)| {
+            let Some(synthetic) = synthetic_peers.iter().find(|p| p.address.connection_key() == *key) else {
+                return true;
+            };
+            let _ = synthetic.outbound.send(packet.clone());
+            false
+        });
+
         // Service STP connections (send/recv).
         let resp = service_connections(&network_thread_handle, NetworkThreadPush {
             initiate_connections,
-            wanted_connections: current_connections.clone(),
+            wanted_connections: current_connections.iter().filter(|(addr, _)| !synthetic_peers.iter().any(|p| p.address == *addr)).cloned().collect(),
             send_unreliable: packets_to_send,
         });
         current_connections = resp.current_connections;
-        POW_PEER_COUNT.store(current_connections.len(), std::sync::atomic::Ordering::Relaxed);
         let mut packets_received = resp.received_unreliable_messages;
+        for synthetic in synthetic_peers.iter().filter(|p| p.alive) {
+            let key = synthetic.address.connection_key();
+            current_connections.push((synthetic.address.clone(), [0; 64]));
+            packets_received.extend(synthetic.inbound.try_iter().map(|packet| (key, packet)));
+        }
+        POW_PEER_COUNT.store(current_connections.len(), std::sync::atomic::Ordering::Relaxed);
         initiate_connections = Vec::new();
         packets_to_send = Vec::new();
 
@@ -2369,6 +2468,10 @@ pub fn sync(
                     let kill_bucket = address_bucket(local_addresses_secret, &connection_address) & (MAX_RECENT_BUCKETS - 1);
                     if let Some(recents) = recent_peer_addresses.get_mut(&(kill_bucket as u16)) {
                         recents.remove(&connection_address);
+                    }
+                    if let Some(synthetic) = synthetic_peers.iter_mut().find(|p| p.address.connection_key() == connection_key) {
+                        synthetic.alive = false;
+                        let _ = synthetic.events.send(SyntheticPeerEvent::Killed(format!($($arg)*)));
                     }
                     dbg_panic!();
                 }};
@@ -2728,6 +2831,9 @@ pub fn sync(
 
                 println!("Queueing for commit: {}", hash);
                 blocks_to_commit.push((hash, std::sync::Arc::new(block)));
+                if synthetic_peers.iter().any(|p| p.address.connection_key() == connection_key) {
+                    synthetic_delivered.insert(hash, connection_key);
+                }
             } else {
                 warning!("NewNet: Got unknown msg type={} len={}, ignoring.", packet_type, msg.len());
                 continue 'process_packets;
@@ -2904,23 +3010,39 @@ pub fn sync(
                 Err((phase, msg, _)) => Err(BlockCommitError::Other(format!("{phase}: {msg}"))),
             };
 
+            let outcome = match (&verdict, &res) {
+                (_, Ok(committed)) => IngestOutcome::Committed(*committed),
+                (_, Err(BlockCommitError::Duplicate)) => IngestOutcome::Known {
+                    location: crate::response::KnownBlockLocation::BestChain,
+                    height: block::Height(height),
+                },
+                (Err((phase, msg, _)), _) => IngestOutcome::Failed {
+                    reason: format!("{phase}: {msg}"),
+                    misbehavior_score: 0,
+                },
+                (_, Err(BlockCommitError::Other(why))) => IngestOutcome::Failed {
+                    reason: why.clone(),
+                    misbehavior_score: 0,
+                },
+            };
             if let Some(reply) = submission_replies.remove(&hash) {
-                let outcome = match (&verdict, &res) {
-                    (_, Ok(committed)) => IngestOutcome::Committed(*committed),
-                    (_, Err(BlockCommitError::Duplicate)) => IngestOutcome::Known {
-                        location: crate::response::KnownBlockLocation::BestChain,
-                        height: block::Height(height),
-                    },
-                    (Err((phase, msg, _)), _) => IngestOutcome::Failed {
-                        reason: format!("{phase}: {msg}"),
-                        misbehavior_score: 0,
-                    },
-                    (_, Err(BlockCommitError::Other(why))) => IngestOutcome::Failed {
-                        reason: why.clone(),
-                        misbehavior_score: 0,
-                    },
-                };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome.clone());
+            }
+
+            if let Some(key) = synthetic_delivered.get(&hash).copied() {
+                let deferred = matches!(&verdict, Err((_, _, true)));
+                if let Some(synthetic) = synthetic_peers.iter().find(|p| p.address.connection_key() == key) {
+                    let event = match &verdict {
+                        Err((phase, msg, true)) => first_attempt.then(|| SyntheticPeerEvent::Deferred { hash, reason: format!("{phase}: {msg}") }),
+                        _ => Some(SyntheticPeerEvent::Outcome { hash, outcome }),
+                    };
+                    if let Some(event) = event {
+                        let _ = synthetic.events.send(event);
+                    }
+                }
+                if !deferred {
+                    synthetic_delivered.remove(&hash);
+                }
             }
 
             // A deferrable verdict means "not yet", not "no": keep the block so the next tick
@@ -2973,6 +3095,7 @@ pub fn sync(
 
         // memoized cheap checks live exactly as long as their queue entry
         cheap_checks_memo.retain(|hash, _| blocks_to_commit.iter().any(|(queued, _)| queued == hash));
+        synthetic_delivered.retain(|hash, _| blocks_to_commit.iter().any(|(queued, _)| queued == hash));
 
         let _ = any_blocks_in_the_queue_can_make_progress;
 

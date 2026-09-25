@@ -34,12 +34,19 @@ const PRINT_BFT_CONDITIONS: bool = 1 == 1;
 const PRINT_BFT_SIG_FAULT:  bool = 0 == 1;
 const PRINT_BFT_TIMEOUTS:   bool = 0 == 1;
 
+/// Whether debug builds stop on dbg_break/dbg_panic/dbg_verify. Tests that feed a node bad peer
+/// data turn this off: there, rejecting the data and killing the peer is the behaviour under
+/// test, and debug builds then behave as release builds do.
+pub static DBG_TRAPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 #[cfg(debug_assertions)] pub fn dbg_break() {
+    if !DBG_TRAPS.load(std::sync::atomic::Ordering::Relaxed) { return; }
     #[cfg(target_arch = "x86_64")] #[allow(unsafe_code)] unsafe { std::arch::asm!("int 3"); }
     // @Todo: AArch64 debugbreak.
 }
 
-#[cfg(debug_assertions)] #[track_caller] pub fn dbg_panic_internal(msg: std::fmt::Arguments<'_>) -> ! {
+#[cfg(debug_assertions)] #[track_caller] pub fn dbg_panic_internal(msg: std::fmt::Arguments<'_>) {
+    if !DBG_TRAPS.load(std::sync::atomic::Ordering::Relaxed) { return; }
     dbg_break();
     #[allow(unsafe_code)] unsafe { std::env::set_var("RUST_BACKTRACE", "full"); }
     panic!("{msg}");

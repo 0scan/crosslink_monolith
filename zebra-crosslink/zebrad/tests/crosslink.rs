@@ -1398,6 +1398,55 @@ fn crosslink_gen_pow_fork() {
     test_bytes(tf.write_to_bytes());
 }
 
+#[test]
+fn crosslink_recv_pow_over_stp() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = Network::new_regtest(Default::default());
+    let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
+    let mut gen =
+        BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    for _ in 2..4 {
+        tf.push_instr_load_pow(&gen.next_block(&miner_addr), 0);
+    }
+    let mut fork = gen.clone();
+
+    // served by a peer instead of submitted
+    let served = gen.next_block(&miner_addr);
+    tf.push_instr_recv_pow(&served, 0, 0);
+    tf.push_instr_expect_pow_chain_length(5, 0);
+
+    // a known block is never requested, which is not a failure
+    tf.push_instr_recv_pow(&served, 0, 0);
+
+    // a longer fork from a second peer, one block at a time, reorgs the chain
+    let miner_addr2 = zcash_keys::address::Address::Transparent(
+        zcash_transparent::address::TransparentAddress::PublicKeyHash([1u8; 20]),
+    );
+    for _ in 4..7 {
+        tf.push_instr_recv_pow(&fork.next_block(&miner_addr2), 1, 0);
+    }
+    tf.push_instr_expect_pow_chain_length(7, 0);
+
+    // the header still hashes as advertised, so the node downloads the body before refusing it
+    let mut tampered = fork.next_block(&miner_addr2).as_ref().clone();
+    tampered.transactions.push(tampered.transactions[0].clone());
+    tf.push_instr_recv_pow(&tampered, 1, SHOULD_FAIL);
+    tf.push_instr_expect_pow_chain_length(7, 0);
+
+    // an unknown packet type is ignored; a truncated chunk header gets the peer killed, for good
+    tf.push_instr_recv_stp_packet(&[0x63, 1, 2, 3], 2, 0);
+    tf.push_instr_recv_stp_packet(&[2, 1, 2], 2, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("chunk header", 0);
+    tf.push_instr_recv_pow(&fork.next_block(&miner_addr2), 2, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("already killed", 0);
+    tf.push_instr_expect_node_alive(0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
 // NOTE: a staking action is the only transaction we can synthesize without spendable
 // UTXOs or shielded proofs: `has_inputs_and_outputs` waives the inputs/outputs rule for
 // it. The amount must be 0 unless the bond is funded: the per-tx value balance must be
