@@ -1,6 +1,7 @@
 use static_assertions::*;
 use std::{io::Write, mem::align_of, mem::size_of};
 use zebra_chain::serialization::{ZcashDeserialize, ZcashSerialize, SerializationError};
+use zebra_chain::transaction::{Transaction, UnminedTxId};
 use zerocopy::*;
 use zerocopy_derive::*;
 
@@ -80,8 +81,13 @@ static TF_INSTR_KIND_STRS: [&str; TFInstr::COUNT as usize] = {
     strs[TFInstr::EXPECT_ROSTER_INCLUDES as usize] = "EXPECT_ROSTER_INCLUDES";
     strs[TFInstr::EXPECT_REJECTION_REASON as usize] = "EXPECT_REJECTION_REASON";
     strs[TFInstr::EXPECT_NODE_ALIVE as usize] = "EXPECT_NODE_ALIVE";
+    strs[TFInstr::RECV_TX as usize] = "RECV_TX";
+    strs[TFInstr::SUBMIT_TX as usize] = "SUBMIT_TX";
+    strs[TFInstr::EXPECT_MEMPOOL_CONTAINS as usize] = "EXPECT_MEMPOOL_CONTAINS";
+    strs[TFInstr::EXPECT_MEMPOOL_ABSENT as usize] = "EXPECT_MEMPOOL_ABSENT";
+    strs[TFInstr::EXPECT_MEMPOOL_REJECTED as usize] = "EXPECT_MEMPOOL_REJECTED";
 
-    const_assert!(TFInstr::COUNT == 10);
+    const_assert!(TFInstr::COUNT == 15);
     strs
 };
 
@@ -104,7 +110,25 @@ impl TFInstr {
     /// The node still answers: the state service returns its tip within a bound, and
     /// re-submitting the tip block through the ingest path answers `Known`.
     pub const EXPECT_NODE_ALIVE: TFInstrKind = 9;
-    pub const COUNT: TFInstrKind = 10;
+    /// A wire message (the data, header included) arriving from synthetic peer `val[0]`: decoded
+    /// with the peer codec and routed through the inbound service exactly as a connection routes
+    /// an unsolicited message. A `tx` message reaches the mempool as that peer's transaction.
+    /// Checks only that it was delivered; verification is asynchronous, so follow it with an
+    /// EXPECT_MEMPOOL_* instruction.
+    pub const RECV_TX: TFInstrKind = 10;
+    /// A transaction (the data) submitted locally, the doorway the wallet and RPC use. Checks the
+    /// mempool's verdict, and its message is the rejection reason when rejected.
+    pub const SUBMIT_TX: TFInstrKind = 11;
+    /// The transaction (the data) becomes resident in the mempool within a bound. Fails early if
+    /// it is rejected instead.
+    pub const EXPECT_MEMPOOL_CONTAINS: TFInstrKind = 12;
+    /// The transaction (the data) is not resident in the mempool, or stops being so within a
+    /// bound: after it is mined, or evicted as a conflict. It holds at once for a transaction the
+    /// mempool never had, so follow an EXPECT_MEMPOOL_CONTAINS with it to check an eviction.
+    pub const EXPECT_MEMPOOL_ABSENT: TFInstrKind = 13;
+    /// The transaction (the data) is in the mempool's rejected set within a bound.
+    pub const EXPECT_MEMPOOL_REJECTED: TFInstrKind = 14;
+    pub const COUNT: TFInstrKind = 15;
 
     pub fn str_from_kind(kind: TFInstrKind) -> &'static str {
         let kind = kind as usize;
@@ -156,6 +180,13 @@ impl TFInstr {
             }
             Some(TestInstr::ExpectRejectionReason(reason)) => str += &format!("{reason:?}"),
             Some(TestInstr::ExpectNodeAlive) => {}
+            Some(TestInstr::RecvTx { wire, peer }) => {
+                str += &format!("{} bytes from peer {peer}", wire.len())
+            }
+            Some(TestInstr::SubmitTx(tx))
+            | Some(TestInstr::ExpectMempoolContains(tx))
+            | Some(TestInstr::ExpectMempoolAbsent(tx))
+            | Some(TestInstr::ExpectMempoolRejected(tx)) => str += &tx.hash().to_string(),
             None => {}
         }
 
@@ -352,6 +383,28 @@ impl TF {
 
     pub fn push_instr_expect_node_alive(&mut self, flags: u32) {
         self.push_instr_ex(TFInstr::EXPECT_NODE_ALIVE, flags, &[0; 0], [0; 2])
+    }
+
+    /// A wire message delivered as if synthetic peer `peer` sent it. For a transaction, frame it
+    /// with `zebra_network::wire::tx_message_bytes`.
+    pub fn push_instr_recv_tx_wire(&mut self, wire: &[u8], peer: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::RECV_TX, flags, wire, [peer, 0])
+    }
+
+    pub fn push_instr_submit_tx(&mut self, tx: &Transaction, flags: u32) {
+        self.push_instr_serialize_ex(TFInstr::SUBMIT_TX, flags, tx, [0; 2])
+    }
+
+    pub fn push_instr_expect_mempool_contains(&mut self, tx: &Transaction, flags: u32) {
+        self.push_instr_serialize_ex(TFInstr::EXPECT_MEMPOOL_CONTAINS, flags, tx, [0; 2])
+    }
+
+    pub fn push_instr_expect_mempool_absent(&mut self, tx: &Transaction, flags: u32) {
+        self.push_instr_serialize_ex(TFInstr::EXPECT_MEMPOOL_ABSENT, flags, tx, [0; 2])
+    }
+
+    pub fn push_instr_expect_mempool_rejected(&mut self, tx: &Transaction, flags: u32) {
+        self.push_instr_serialize_ex(TFInstr::EXPECT_MEMPOOL_REJECTED, flags, tx, [0; 2])
     }
 
     /// A block the node must reject for `reason`, and must survive rejecting: the load, the
@@ -618,7 +671,7 @@ pub fn crosslink_parameters_for_test(bytes: &[u8]) -> ZcashCrosslinkParameters {
 }
 
 pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> {
-    const_assert!(TFInstr::COUNT == 10);
+    const_assert!(TFInstr::COUNT == 15);
     match instr.kind {
         TFInstr::LOAD_POW => {
             let block = Block::zcash_deserialize(instr.data_slice(bytes)).ok()?;
@@ -671,6 +724,22 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             String::from_utf8(instr.data_slice(bytes).to_vec()).ok()?,
         )),
         TFInstr::EXPECT_NODE_ALIVE => Some(TestInstr::ExpectNodeAlive),
+        TFInstr::RECV_TX => Some(TestInstr::RecvTx {
+            wire: instr.data_slice(bytes).to_vec(),
+            peer: instr.val[0],
+        }),
+        TFInstr::SUBMIT_TX => Some(TestInstr::SubmitTx(
+            Transaction::zcash_deserialize(instr.data_slice(bytes)).ok()?,
+        )),
+        TFInstr::EXPECT_MEMPOOL_CONTAINS => Some(TestInstr::ExpectMempoolContains(
+            Transaction::zcash_deserialize(instr.data_slice(bytes)).ok()?,
+        )),
+        TFInstr::EXPECT_MEMPOOL_ABSENT => Some(TestInstr::ExpectMempoolAbsent(
+            Transaction::zcash_deserialize(instr.data_slice(bytes)).ok()?,
+        )),
+        TFInstr::EXPECT_MEMPOOL_REJECTED => Some(TestInstr::ExpectMempoolRejected(
+            Transaction::zcash_deserialize(instr.data_slice(bytes)).ok()?,
+        )),
 
         _ => {
             panic!("Unrecognized instruction {}", instr.kind);
@@ -689,6 +758,11 @@ pub(crate) enum TestInstr {
     ExpectPoWBlockFinality(ZebBlockHash, Option<TFLBlockFinality>),
     ExpectRejectionReason(String),
     ExpectNodeAlive,
+    RecvTx { wire: Vec<u8>, peer: u64 },
+    SubmitTx(Transaction),
+    ExpectMempoolContains(Transaction),
+    ExpectMempoolAbsent(Transaction),
+    ExpectMempoolRejected(Transaction),
     RosterForceInclude([u8; 32], u64),   // public address
     ExpectRosterIncludes([u8; 32], u64), // public address
 }
@@ -792,6 +866,37 @@ pub(crate) async fn handle_instr(
             test_check(flags, alive, &message);
         }
 
+        TestInstr::RecvTx { wire, peer } => {
+            let sender = synthetic_peer(peer);
+            let delivery = tokio::time::timeout(NODE_ANSWER_WAIT, (internal_handle.call.inbound_wire)(sender, wire)).await;
+            let (delivered, message) = match delivery {
+                Ok(Ok(())) => (true, format!("RECV_TX: delivered from peer {sender}")),
+                Ok(Err(err)) => (false, format!("RECV_TX: the message from peer {sender} was refused: {err}")),
+                Err(_) => (false, format!("RECV_TX: no answer delivering from peer {sender} within {NODE_ANSWER_WAIT:?}")),
+            };
+            test_check(flags, delivered, &message);
+        }
+
+        TestInstr::SubmitTx(transaction) => {
+            let (accepted, message) = submit_tx(internal_handle, transaction).await;
+            test_check(flags, accepted, &message);
+        }
+
+        TestInstr::ExpectMempoolContains(transaction) => {
+            let (holds, message) = await_mempool(internal_handle, &transaction, MempoolExpect::Resident).await;
+            test_check(flags, holds, &message);
+        }
+
+        TestInstr::ExpectMempoolAbsent(transaction) => {
+            let (holds, message) = await_mempool(internal_handle, &transaction, MempoolExpect::Absent).await;
+            test_check(flags, holds, &message);
+        }
+
+        TestInstr::ExpectMempoolRejected(transaction) => {
+            let (holds, message) = await_mempool(internal_handle, &transaction, MempoolExpect::Rejected).await;
+            test_check(flags, holds, &message);
+        }
+
         TestInstr::ExpectPoSChainLength(h) => {
             let expect = h as usize;
             let actual = zebra_state::new_network::bft::bft_chain().read().unwrap().blocks.len();
@@ -892,6 +997,98 @@ async fn node_alive(internal_handle: &TFLServiceHandle) -> (bool, String) {
         }
         Ok(other) => (false, format!("node alive: re-submitting the tip answered {other:?}, not Known")),
         Err(err) => (false, format!("node alive: the ingest loop did not answer re-submitting the tip: {err}")),
+    }
+}
+
+/// The address synthetic peer `index` sends from. Distinct peers get distinct addresses, so each
+/// meets the mempool's per-peer limits separately.
+fn synthetic_peer(index: u64) -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 1, (index >> 8) as u8, index as u8], 18233))
+}
+
+/// Submits `transaction` locally, as the wallet and RPC do, and returns the mempool's verdict:
+/// accepted, or rejected with its reason.
+async fn submit_tx(internal_handle: &TFLServiceHandle, transaction: Transaction) -> (bool, String) {
+    use zebra_node_services::mempool::{Gossip, Request, Response};
+
+    let txid = transaction.hash();
+    let queued = tokio::time::timeout(
+        NODE_ANSWER_WAIT,
+        (internal_handle.call.mempool)(Request::Queue(vec![Gossip::Tx(transaction.into())])),
+    )
+    .await;
+    let verdict = match queued {
+        Ok(Ok(Response::Queued(mut results))) if results.len() == 1 => match results.remove(0) {
+            Ok(verdict) => verdict,
+            Err(err) => return (false, format!("SUBMIT_TX {txid}: the mempool refused to queue it: {err}")),
+        },
+        Ok(Ok(other)) => return (false, format!("SUBMIT_TX {txid}: the mempool answered {other:?}")),
+        Ok(Err(err)) => return (false, format!("SUBMIT_TX {txid}: the queue request failed: {err}")),
+        Err(_) => return (false, format!("SUBMIT_TX {txid}: no answer from the mempool within {NODE_ANSWER_WAIT:?}")),
+    };
+    match tokio::time::timeout(NODE_ANSWER_WAIT, verdict).await {
+        Ok(Ok(Ok(()))) => (true, format!("SUBMIT_TX {txid}: accepted into the mempool")),
+        Ok(Ok(Err(err))) => (false, format!("SUBMIT_TX {txid}: rejected: {err}")),
+        Ok(Err(_)) => (false, format!("SUBMIT_TX {txid}: the mempool dropped the verdict")),
+        Err(_) => (false, format!("SUBMIT_TX {txid}: no verdict within {NODE_ANSWER_WAIT:?}")),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MempoolExpect {
+    Resident,
+    Absent,
+    Rejected,
+}
+
+/// Waits, within a bound, for `transaction` to reach the state `expect` names in the mempool.
+/// Peer-sent transactions are downloaded and verified asynchronously, so a single read would race
+/// the verification.
+async fn await_mempool(
+    internal_handle: &TFLServiceHandle,
+    transaction: &Transaction,
+    expect: MempoolExpect,
+) -> (bool, String) {
+    use zebra_node_services::mempool::{Request, Response};
+
+    let id = UnminedTxId::from(transaction);
+    let txid = transaction.hash();
+    let ask = |request: Request| {
+        tokio::time::timeout(NODE_ANSWER_WAIT, (internal_handle.call.mempool)(request))
+    };
+    let deadline = tokio::time::Instant::now() + NODE_ANSWER_WAIT;
+    loop {
+        let resident = match ask(Request::TransactionIds).await {
+            Ok(Ok(Response::TransactionIds(ids))) => ids.contains(&id),
+            other => return (false, format!("mempool {txid}: the transaction ids request answered {other:?}")),
+        };
+        let rejected = match ask(Request::RejectedTransactionIds([id].into_iter().collect())).await {
+            Ok(Ok(Response::RejectedTransactionIds(ids))) => !ids.is_empty(),
+            other => return (false, format!("mempool {txid}: the rejected ids request answered {other:?}")),
+        };
+        let state = format!("resident {resident}, rejected {rejected}");
+        let reached = match expect {
+            MempoolExpect::Resident => resident,
+            MempoolExpect::Absent => !resident,
+            MempoolExpect::Rejected => rejected,
+        };
+        if reached {
+            return (true, format!("mempool {txid}: {expect:?} ({state})"));
+        }
+        // A rejected transaction won't become resident; say so now rather than at the deadline.
+        if matches!(expect, MempoolExpect::Resident) && rejected {
+            return (false, format!("mempool {txid}: expected {expect:?}, but it was rejected"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return (
+                false,
+                format!(
+                    "mempool {txid}: expected {expect:?}, still {state} after {NODE_ANSWER_WAIT:?} \
+                     (a disabled mempool drops peer transactions without a word)"
+                ),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

@@ -82,6 +82,18 @@ pub(crate) type MempoolServiceProcedure = Arc<
         + Sync,
 >;
 
+/// Delivers raw wire bytes to the node's inbound peer-request service as if the peer at the
+/// address had just sent them: they are decoded with the peer codec and routed as a connection
+/// routes an unsolicited message.
+pub(crate) type InboundWireProcedure = Arc<
+    dyn Fn(
+            std::net::SocketAddr,
+            Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// `TFLServiceCalls` encapsulates the service calls that this service needs to make to other services.
 /// Simply put, it is a function pointer bundle for all outgoing calls to the rest of Zebra.
 #[derive(Clone)]
@@ -89,6 +101,7 @@ pub struct TFLServiceCalls {
     pub(crate) state: StateServiceProcedure,
     pub(crate) read_state: ReadStateServiceProcedure,
     pub(crate) mempool: MempoolServiceProcedure,
+    pub(crate) inbound_wire: InboundWireProcedure,
 }
 impl fmt::Debug for TFLServiceCalls {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -106,6 +119,7 @@ pub fn spawn_new_tfl_service(
     state_service_call: StateServiceProcedure,
     read_state_service_call: ReadStateServiceProcedure,
     mempool_service_call: MempoolServiceProcedure,
+    inbound_wire_call: InboundWireProcedure,
     config: crate::config::Config,
     params: ZcashCrosslinkParameters,
     network: zebra_chain::parameters::Network,
@@ -123,6 +137,7 @@ pub fn spawn_new_tfl_service(
             state: state_service_call,
             read_state: read_state_service_call,
             mempool: mempool_service_call,
+            inbound_wire: inbound_wire_call,
         },
         config,
         params,

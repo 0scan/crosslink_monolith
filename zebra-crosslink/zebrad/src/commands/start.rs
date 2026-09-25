@@ -472,6 +472,9 @@ impl StartCmd {
                 config.sync.full_verify_concurrency_limit,
                 setup_rx,
             ));
+        // The Crosslink test format delivers wire messages through this same stack, so what it
+        // sends meets exactly the layers a real peer's messages do.
+        let inbound_for_crosslink = inbound.clone();
 
         let (peer_set, address_book, misbehavior_sender) =
             zebra_network::init_with_block_gossip_peer_ips(
@@ -566,6 +569,22 @@ impl StartCmd {
                     let mempool = mempool2.clone();
                     Box::pin(async move { mempool.clone().ready().await?.call(req).await })
                 }),
+                {
+                    let network = config.network.network.clone();
+                    Arc::new(move |sender: std::net::SocketAddr, wire: Vec<u8>| {
+                        let inbound = inbound_for_crosslink.clone();
+                        let network = network.clone();
+                        Box::pin(async move {
+                            let request = zebra_network::wire::inbound_request_from_wire(
+                                &network,
+                                &wire,
+                                sender.into(),
+                            )?;
+                            inbound.oneshot(request).await?;
+                            Ok(())
+                        })
+                    })
+                },
                 config.crosslink.clone(),
                 config.network.network.crosslink_parameters(),
                 config.network.network.clone(),
