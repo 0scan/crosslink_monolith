@@ -2092,10 +2092,12 @@ fn crosslink_reject_pow_block_with_oversized_staking_amount() {
 /// height follows it; the node must reject the bad one and still accept the good one.
 #[test]
 fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block() {
-    use zcash_primitives::transaction::{STAKING_ACTION_DELAY, STAKING_DAY_WINDOW, STAKING_PERIOD};
-
     set_test_name(function_name!());
-    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    // A short calendar keeps the lifecycle to about 20 blocks rather than 300. BFT is supplied
+    // and nothing here depends on finality, so the period need not exceed the finality depth.
+    let staking = zcash_primitives::bft::StakingParameters { period: 10, day_window: 5, action_delay: 6 };
+    let mut tf = TF::new(&zcash_primitives::bft::ZcashCrosslinkParameters { staking, ..HARNESS_PARAMETERS });
 
     let network = Network::new_regtest(Default::default());
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
@@ -2114,13 +2116,13 @@ fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block(
         }
     };
 
-    // Unbonding needs STAKING_ACTION_DELAY blocks after creation, withdrawal the same after
-    // unbonding, and both must land in a staking day window: the start of the next two periods.
+    // Unbonding needs action_delay blocks after creation, withdrawal the same after unbonding,
+    // and both must land in a staking day window: the start of the next two periods.
     const CREATED: u32 = 2;
-    const UNBOND: u32 = STAKING_PERIOD;
-    const WITHDRAW: u32 = 2 * STAKING_PERIOD;
-    for (at, after) in [(UNBOND, CREATED), (WITHDRAW, UNBOND)] {
-        assert!(at >= after + STAKING_ACTION_DELAY && at % STAKING_PERIOD < STAKING_DAY_WINDOW);
+    let unbond = staking.period;
+    let withdraw = 2 * staking.period;
+    for (at, after) in [(unbond, CREATED), (withdraw, unbond)] {
+        assert!(at >= after + staking.action_delay && at % staking.period < staking.day_window);
     }
 
     let block = gen.next_block_with_txs(
@@ -2134,7 +2136,7 @@ fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block(
     assert_eq!(height(&gen), CREATED);
     tf.push_instr_load_pow(&block, 0);
 
-    mine_empty_until(&mut gen, &mut tf, UNBOND);
+    mine_empty_until(&mut gen, &mut tf, unbond);
     let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_unbond(b"bond-a"), staking_tx_unbond(b"bond-b")]);
     tf.push_instr_load_pow(&block, 0);
 
@@ -2143,11 +2145,11 @@ fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block(
         .clone()
         .next_block_with_txs(&miner_addr, &[staking_tx_unbond(b"bond-c"), staking_tx_retarget(b"bond-c", target, other)]);
     tf.push_instr_load_pow(&bad, SHOULD_FAIL);
-    tf.push_instr_expect_pow_chain_length(UNBOND as usize + 1, 0);
+    tf.push_instr_expect_pow_chain_length(unbond as usize + 1, 0);
     let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_retarget(b"bond-c", target, other)]);
     tf.push_instr_load_pow(&block, 0);
 
-    mine_empty_until(&mut gen, &mut tf, WITHDRAW);
+    mine_empty_until(&mut gen, &mut tf, withdraw);
     let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_withdraw(b"bond-b", 0, 0)]);
     tf.push_instr_load_pow(&block, 0);
 
@@ -2157,10 +2159,10 @@ fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block(
         &[staking_tx_withdraw(b"bond-a", 0, 0), staking_tx_withdraw(b"bond-a", 0, 10_000)],
     );
     tf.push_instr_load_pow(&bad, SHOULD_FAIL);
-    tf.push_instr_expect_pow_chain_length(WITHDRAW as usize + 1, 0);
+    tf.push_instr_expect_pow_chain_length(withdraw as usize + 1, 0);
     let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_withdraw(b"bond-a", 0, 0)]);
     tf.push_instr_load_pow(&block, 0);
-    tf.push_instr_expect_pow_chain_length(WITHDRAW as usize + 2, 0);
+    tf.push_instr_expect_pow_chain_length(withdraw as usize + 2, 0);
 
     test_bytes(tf.write_to_bytes());
 }
