@@ -19,7 +19,7 @@ use tenderlink::{
 use zcash_primitives::bft::{
     BftBlock, BftBootstrap, Blake3Hash, FatPointerToBftBlock, FinalizerRecencyStatus,
     HardForkConfig, PubKeyID, TFLRecencyStatus, TMSig, ZcashCrosslinkParameters,
-    FINALITY_LIVENESS_ALLOWANCE,
+    // FINALITY_LIVENESS_ALLOWANCE, // only used by the disabled variable-reward gate
 };
 use zcash_primitives::block::{
     BlockHash, BlockHeader as BcBlockHeaderWrap, BlockHeaderData as BcBlockHeader,
@@ -400,7 +400,9 @@ pub fn admit_fat_pointer(
         return Some(CrosslinkVerdict::Reject);
     }
 
-    let mut pos_payout = false;
+    // Variable reward disabled: stakers and finalizers are paid on every block, so the verdict
+    // no longer decides it. The field stays so the gate can be re-enabled by uncommenting below.
+    let pos_payout = true;
     if let Some(snapshot_hash) = snapshot_hash {
         // The sigma-confirmation rule. A certificate finalizing PoW height F may only be carried
         // by a PoW block at F + sigma + 1 or above: the sigma carried headers F+1 ..= F+sigma,
@@ -437,37 +439,38 @@ pub fn admit_fat_pointer(
             None => return None,
         }
 
-        // PoS issuance rides on this check because this is the one place that knows both facts it
-        // needs. A block pays only when it ADVANCES finality (its certificate is a different BFT
-        // block than its parent's -- compared by the cert's identity, the BFT block hash, since
-        // two honest nodes can carry different signature sets for the same decision) and does so
-        // PROMPTLY (`gap <= sigma + FINALITY_LIVENESS_ALLOWANCE`; the check above already put
-        // `gap >= sigma + 1`, so the payable window is exactly those few heights).
+        // VARIABLE REWARD DISABLED: every block pays its staking share (see `Chain::push`).
+        // // PoS issuance rides on this check because this is the one place that knows both facts it
+        // // needs. A block pays only when it ADVANCES finality (its certificate is a different BFT
+        // // block than its parent's -- compared by the cert's identity, the BFT block hash, since
+        // // two honest nodes can carry different signature sets for the same decision) and does so
+        // // PROMPTLY (`gap <= sigma + FINALITY_LIVENESS_ALLOWANCE`; the check above already put
+        // // `gap >= sigma + 1`, so the payable window is exactly those few heights).
+        // //
+        // // Both facts are objective functions of committed chain data, so every node reaches the
+        // // same answer for the same block. See `FINALITY_LIVENESS_ALLOWANCE`.
+        // let cert_advanced =
+        // child_fat_pointer.points_at_block_hash() != parent_fat_pointer.points_at_block_hash();
+        // pos_payout = cert_advanced && gap <= sigma + FINALITY_LIVENESS_ALLOWANCE;
         //
-        // Both facts are objective functions of committed chain data, so every node reaches the
-        // same answer for the same block. See `FINALITY_LIVENESS_ALLOWANCE`.
-        let cert_advanced =
-            child_fat_pointer.points_at_block_hash() != parent_fat_pointer.points_at_block_hash();
-        pos_payout = cert_advanced && gap <= sigma + FINALITY_LIVENESS_ALLOWANCE;
-
-        // One line per block recording the decision and the facts behind it. `debug!` would be
-        // the natural level, but the release binary is built with `release_max_level_info`, so
-        // anything below `info` is compiled out and would never be seen on a real node.
-        if cert_advanced && !pos_payout {
-            // The notable case: finality DID advance here, but so slowly that the block earns
-            // nothing. It is otherwise indistinguishable from a block that simply carried the
-            // same certificate as its parent, so it is spelled out.
-            tracing::info!(
-                "no PoS issuance at height {}: the certificate finalizes height {} \
-                 (gap {}), beyond sigma {} + FINALITY_LIVENESS_ALLOWANCE {}",
-                pow_block_height.0, snapshot_height.0, gap, sigma, FINALITY_LIVENESS_ALLOWANCE,
-            );
-        } else {
-            tracing::info!(
-                "PoS payout decision at height {}: payout={} cert_advanced={} gap={} snapshot={} sigma={}",
-                pow_block_height.0, pos_payout, cert_advanced, gap, snapshot_height.0, sigma,
-            );
-        }
+        // // One line per block recording the decision and the facts behind it. `debug!` would be
+        // // the natural level, but the release binary is built with `release_max_level_info`, so
+        // // anything below `info` is compiled out and would never be seen on a real node.
+        // if cert_advanced && !pos_payout {
+        // // The notable case: finality DID advance here, but so slowly that the block earns
+        // // nothing. It is otherwise indistinguishable from a block that simply carried the
+        // // same certificate as its parent, so it is spelled out.
+        // tracing::info!(
+        // "no PoS issuance at height {}: the certificate finalizes height {} \
+        // (gap {}), beyond sigma {} + FINALITY_LIVENESS_ALLOWANCE {}",
+        // pow_block_height.0, snapshot_height.0, gap, sigma, FINALITY_LIVENESS_ALLOWANCE,
+        // );
+        // } else {
+        // tracing::info!(
+        // "PoS payout decision at height {}: payout={} cert_advanced={} gap={} snapshot={} sigma={}",
+        // pow_block_height.0, pos_payout, cert_advanced, gap, snapshot_height.0, sigma,
+        // );
+        // }
     }
 
     Some(CrosslinkVerdict::Accept { pos_payout })

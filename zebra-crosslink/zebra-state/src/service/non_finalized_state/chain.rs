@@ -2192,13 +2192,17 @@ impl Chain {
         let size = block.zcash_serialized_size();
         self.update_chain_tip_with(&(*chain_value_pool_change, height, size))?;
 
-        // PoS issuance is paid only by a block that advances finality promptly: `pos_payout` is
-        // the crosslink fat-pointer gate's verdict on exactly that (cert changed vs the parent's,
-        // and carried no more than sigma + FINALITY_LIVENESS_ALLOWANCE above what it finalizes).
-        // A block that does not pay still pushes empty reward/commission entries, because both
+        // PoS issuance is paid by EVERY block (zero before the Crosslink activation height):
+        // the staking share goes 90/10 to bonds and their finalizers' banks.
+        //
+        // VARIABLE REWARD DISABLED. It paid only a block that advanced finality promptly, as
+        // decided by the crosslink fat-pointer gate (`pos_payout`: cert changed vs the parent's,
+        // carried no more than sigma + FINALITY_LIVENESS_ALLOWANCE above what it finalizes):
+        //     let (bond_rewards, commissions) = if pos_payout { ... } else { (Vec::new(), Vec::new()) };
+        // A block that pays nothing still pushes empty reward/commission entries, because both
         // logs are positional twins of the block list and `pop_tip` pops one entry per block.
         //
-        // Nothing at stake (no active bond, every bank empty) also means no issuance this
+        // Nothing at stake (no active bond, every bank empty) means no issuance this
         // block; the two logs then hold empty entries.
         //
         // The amount is the staking share the consensus check already withheld from the
@@ -2206,7 +2210,8 @@ impl Chain {
         // for a burn: the share was never issued.
         {
             let ChainInner { delegation_bonds, finalizer_rewards, chain_value_pools, .. } = &mut self.inner;
-            let (bond_rewards, commissions) = if pos_payout {
+            let _ = pos_payout; // variable reward disabled; see above
+            let (bond_rewards, commissions) = if height.0 > 0 {
                 let reward = crate::service::pos_block_reward(height, &self.network);
                 crate::service::update_bonds_with_pos_issuance(reward, delegation_bonds, finalizer_rewards)
             } else {

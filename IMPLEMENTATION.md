@@ -223,7 +223,7 @@ failure the PoS store file already shows (FINALITY.md §8.1).
   holds: resolve `H.context_bft` to its bft-block, take `snapshot(LF(H))`, look up its height,
   test ancestry against `H`. Extension, Last Final Snapshot and the σ-confirmation depth are the
   same rules (FINALITY.md §6.2); only their inputs are local.
-- The payout verdict rides the same path with the same rule: `cert(P) != cert(parent(P))` and
+- The payout verdict (currently disabled: every block pays) rides the same path with the same rule: `cert(P) != cert(parent(P))` and
   `height(P) − F ≤ σ + FINALITY_LIVENESS_ALLOWANCE`, carried on
   `SemanticallyVerifiedBlock::pos_payout` and persisted in the non-finalized state backup
   (FINALITY.md §5.4). The constants, the three copies that must agree, and the backup do not

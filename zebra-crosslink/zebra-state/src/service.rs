@@ -191,9 +191,10 @@ pub enum CrosslinkVerdict {
     Reject,
     /// Admit the block.
     Accept {
-        /// Whether this block pays PoS issuance.
+        /// Whether this block pays PoS issuance. Currently always true and ignored by
+        /// `Chain::push`: the variable reward is disabled and every block pays.
         ///
-        /// True exactly when the block advances the certificate (its `context_bft` names a
+        /// When enabled: true exactly when the block advances the certificate (its `context_bft` names a
         /// different BFT block than its parent's does) *and* that certificate is fresh: at most
         /// `sigma + FINALITY_LIVENESS_ALLOWANCE` blocks above the PoW block it finalizes. The
         /// gate is the one place that resolves both facts, so it decides here and the state
@@ -2032,6 +2033,14 @@ pub fn burn_delegation_bonds(delegation_bonds: &mut HashMap<BondKey, (Delegation
 }
 
 
+/// The staking reward every block at `height` pays (variable reward disabled): the block subsidy's
+/// `pos_subsidy`, which the consensus check withheld from the miner. Zero before activation.
+pub fn pos_block_reward(height: block::Height, network: &Network) -> u64 {
+    use zebra_chain::parameters::subsidy::{block_subsidy, pos_subsidy};
+    let subsidy = block_subsidy(height, network).unwrap_or_default();
+    pos_subsidy(height, network, subsidy).map(u64::from).unwrap_or_default()
+}
+
 /// Pays one block's PoS issuance. Each active bond earns its stake-weighted share of
 /// `bond_reward_total`; of that share, one part in [`FINALIZER_COMMISSION_DIVISOR`]
 /// (rounded down) is the commission credited to the bond's target finalizer in
@@ -2053,14 +2062,6 @@ pub fn burn_delegation_bonds(delegation_bonds: &mut HashMap<BondKey, (Delegation
 /// Returns the amounts actually paid, per bond and per finalizer, so a revert can
 /// undo exactly what was done without recomputing. Both are empty when nothing is
 /// at stake.
-/// The staking reward a block at `height` pays if it advances finality: the block subsidy's
-/// `pos_subsidy`, which the consensus check withheld from the miner. Zero before activation.
-pub fn pos_block_reward(height: block::Height, network: &Network) -> u64 {
-    use zebra_chain::parameters::subsidy::{block_subsidy, pos_subsidy};
-    let subsidy = block_subsidy(height, network).unwrap_or_default();
-    pos_subsidy(height, network, subsidy).map(u64::from).unwrap_or_default()
-}
-
 pub fn update_bonds_with_pos_issuance(
     bond_reward_total: u64,
     delegation_bonds: &mut HashMap<finalized_state::disk_format::BondKey, (finalized_state::disk_format::DelegationBond, non_finalized_state::BondStatusInChain)>,

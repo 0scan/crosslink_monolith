@@ -477,19 +477,20 @@ pub fn block_subsidy(height: Height, net: &Network) -> Result<Amount<NonNegative
 /// Staking (PoS) share of the block subsidy after the founders reward and funding streams,
 /// as a fraction `POS_SUBSIDY_NUMERATOR / POS_SUBSIDY_DENOMINATOR`.
 ///
-/// This is the "48% staking rewards" of the crosslink design overview (§14, "Proposed issuance
-/// split"), measured on post-dev-fund issuance. The 4% first-inclusion miner bounty from the same
-/// section is not implemented; it stays with the miner subsidy.
-pub const POS_SUBSIDY_NUMERATOR: u64 = 48;
+/// Post-dev-fund issuance is split 50/50 between the miner and the staking side; the staking half
+/// is then split 90/10 between bonds and their finalizers (`FINALIZER_COMMISSION_DIVISOR` in
+/// zebra-state). (The design overview's 48/48/4 split with a first-inclusion bounty is not used.)
+pub const POS_SUBSIDY_NUMERATOR: u64 = 50;
 /// Denominator of the staking share; see [`POS_SUBSIDY_NUMERATOR`].
 pub const POS_SUBSIDY_DENOMINATOR: u64 = 100;
 
 /// `PosSubsidy(height)`: the part of the block subsidy that is carved out of the miner subsidy
-/// from the Crosslink activation height on and paid to stakers when the block advances finality.
+/// from the Crosslink activation height on and paid to stakers and finalizers on every block.
 ///
 /// Issuance is conserved: `block_subsidy = founders + funding_streams + miner_subsidy +
-/// pos_subsidy` at every height. A block that does not pay stakers (no finality advance, or no
-/// stake) burns its `pos_subsidy`; the miner never gets it, so a coinbase claiming it is invalid.
+/// pos_subsidy` at every height. A block with nothing at stake burns its `pos_subsidy`; the miner
+/// never gets it, so a coinbase claiming it is invalid. (The variable reward, which also burned it
+/// when a block did not advance finality, is disabled.)
 ///
 /// Only the subsidy is shared. Transaction fees are not part of it and go to the miner in full.
 ///

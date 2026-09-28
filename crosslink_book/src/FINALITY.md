@@ -838,25 +838,28 @@ wants the latest value and nothing else.
 At the end of `Chain::push` in
 `zebra-crosslink/zebra-state/src/service/non_finalized_state/chain.rs`:
 
-- a block that does not pay (see the payout rule below) pushes empty `bond_rewards` and
-  `finalizer_commissions` entries and mints nothing; the empty entries keep positional reorg
-  reversal aligned;
-- if no bond is active, the same empty entries are pushed and no staking reward is minted; and
-- otherwise it distributes the block's `pos_subsidy` (the staking share of the block subsidy,
-  `POS_SUBSIDY_NUMERATOR / POS_SUBSIDY_DENOMINATOR` of post-dev-fund issuance from the Crosslink
-  activation height on, which `miner_fees_are_valid` withholds from the coinbase), increases
-  `staking_bonded_amount` by the same total, and records the per-bond rewards for exact reorg
-  reversal. Issuance is conserved: a block that does not pay burns that share, the miner never
-  gets it.
+- if no bond is active, empty `bond_rewards` and `finalizer_commissions` entries are pushed and
+  no staking reward is minted; the empty entries keep positional reorg reversal aligned; and
+- otherwise every block distributes its `pos_subsidy` (the staking share of the block subsidy:
+  50 % of post-dev-fund issuance from the Crosslink activation height on, which
+  `miner_fees_are_valid` withholds from the coinbase; the miner keeps the other 50 % plus all
+  transaction fees). Of each bond's share, 90 % is added to the bond and 10 %
+  (`FINALIZER_COMMISSION_DIVISOR`) goes to its finalizer's reward bank. Pools and the per-bond
+  and per-finalizer amounts are recorded for exact reorg reversal. Issuance is conserved: when
+  nothing is staked the share is burned, the miner never gets it.
 
 `update_bonds_with_pos_issuance` in `zebra-crosslink/zebra-state/src/service.rs` allocates the
 total pro rata with integer division, gives the remainder to the largest active bond (then
 smallest key on a tie), and adds rewards to bond principal. Rewards therefore compound.
 
-#### The variable payout rule
+#### The variable payout rule (DISABLED)
 
-Issuance is not paid per PoW block. A block `P` pays exactly when it *advances* finality and
-does so *promptly*:
+**Currently disabled**: every PoW block pays. The gate is commented out in
+`zebra-state/src/new_network/bft.rs` (`pos_payout` is always true), `Chain::push` and
+`stake_fixup.rs`; the description below is what re-enabling it restores.
+
+With the rule enabled, issuance is not paid per PoW block. A block `P` pays exactly when it
+*advances* finality and does so *promptly*:
 
 ```text
 payout(P)  iff  cert(P) != cert(parent(P))  and  height(P) - F <= σ + FINALITY_LIVENESS_ALLOWANCE
@@ -1414,7 +1417,7 @@ An objective per-block event can instead be derived from block data, for example
 payout boundary at H  iff  candidate(H) != candidate(parent(H))
 ```
 
-**Implemented.** The prototype now takes this trigger, with a liveness bound added to it:
+**Implemented, currently disabled** (every block pays; see §5.4). The prototype takes this trigger, with a liveness bound added to it:
 a block pays iff its certificate differs from its parent's *and* the certificate is at most
 `σ + FINALITY_LIVENESS_ALLOWANCE` blocks behind it. §5.4 states the rule and where each path
 evaluates it. The consequences listed below under "payout amount" are the ones this choice

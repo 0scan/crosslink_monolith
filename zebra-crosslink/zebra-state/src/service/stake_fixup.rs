@@ -133,7 +133,7 @@ pub fn fixup_aggregated_stakes(
     let mut replay = StakingReplay::new(&config.hardfork_schedule);
     // The previous block's certificate, to decide whether the next block advances it. Genesis
     // carries none, which is exactly the null pointer every pre-activation block also carries.
-    let mut prev_fat_pointer = zebra_chain::block::FatPointerToBftBlock::null();
+    // let mut prev_fat_pointer = zebra_chain::block::FatPointerToBftBlock::null(); // variable reward disabled
     let mut fills: Vec<(Height, block::Hash, AggregatedStakes)> = Vec::new();
     let mut mismatches: u32 = 0;
 
@@ -148,17 +148,19 @@ pub fn fixup_aggregated_stakes(
                 .block(HashOrHeight::Height(height))
                 .ok_or_else(|| format!("no block at height {h}, below the finalized tip"))?;
 
-            // Variable payout: a block mints only if it ADVANCES the certificate. That half of the
-            // rule is visible here, in the block headers. The other half -- that the certificate
-            // is fresh, `gap <= sigma + FINALITY_LIVENESS_ALLOWANCE` -- is NOT: the finalized
-            // height lives inside the BFT block, which this repair tool cannot see (it has the
-            // PoW database and nothing else). So an advancing block is assumed to have paid,
-            // which is right whenever BFT kept up. If it did not, the replay disagrees with the
-            // stored rows and the mismatch check below refuses to write anything: wrong rows are
-            // never produced, the repair just declines. See FINALITY.md.
-            let cert_advanced = block.header.fat_pointer_to_bft_block.points_at_block_hash()
-                != prev_fat_pointer.points_at_block_hash();
-            prev_fat_pointer = block.header.fat_pointer_to_bft_block.clone();
+            // VARIABLE REWARD DISABLED: every block pays, matching `Chain::push`.
+            let cert_advanced = true;
+            // // Variable payout: a block mints only if it ADVANCES the certificate. That half of the
+            // // rule is visible here, in the block headers. The other half -- that the certificate
+            // // is fresh, `gap <= sigma + FINALITY_LIVENESS_ALLOWANCE` -- is NOT: the finalized
+            // // height lives inside the BFT block, which this repair tool cannot see (it has the
+            // // PoW database and nothing else). So an advancing block is assumed to have paid,
+            // // which is right whenever BFT kept up. If it did not, the replay disagrees with the
+            // // stored rows and the mismatch check below refuses to write anything: wrong rows are
+            // // never produced, the repair just declines. See FINALITY.md.
+            // let cert_advanced = block.header.fat_pointer_to_bft_block.points_at_block_hash()
+            // != prev_fat_pointer.points_at_block_hash();
+            // prev_fat_pointer = block.header.fat_pointer_to_bft_block.clone();
 
             // The live path burns before the activation block's own staking
             // actions and reward (`NonFinalizedState::validate_and_commit`), so
