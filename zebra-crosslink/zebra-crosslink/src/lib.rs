@@ -208,6 +208,7 @@ pub(crate) struct TFLServiceInternal {
 ///
 /// Returns an error rather than `false` when the certificate cannot be resolved: silently
 /// skipping a payout would understate issuance without saying so.
+#[allow(dead_code)] // variable reward disabled: every block pays; see `total_issuance_from_key`
 async fn block_pays_pos_issuance(
     internal_handle: &TFLServiceHandle,
     block_height: ZebBlockHeight,
@@ -423,7 +424,7 @@ async fn total_issuance_from_key(
     let mut staking = zebra_state::StakingReplay::new(&hardfork_schedule);
     // The certificate carried by the previously scanned block, to tell whether the next one
     // advances it. `None` until the first block of the range, whose parent is outside it.
-    let mut prev_fat_pointer: Option<FatPointerToBftBlock> = None;
+    // let mut prev_fat_pointer: Option<FatPointerToBftBlock> = None; // variable reward disabled
     let mut utxos_per_ufvk = vec![HashSet::<(PubKeyID, u32)>::new(); ufvks.len()]; // NOTE: hashsets here are grow-only
     let mut t_spend_per_ufvk = vec![false; ufvks.len()];
 
@@ -560,27 +561,34 @@ async fn total_issuance_from_key(
         }
 
         // PoS issuance is applied once per block, after that block's staking actions, exactly as
-        // the live commit path does -- and only for blocks that pay under the variable payout
-        // rule. `block_pays_pos_issuance` replays that decision.
-        let fat_pointer = block.header.fat_pointer_to_bft_block.clone();
-        let parent_fat_pointer = match &prev_fat_pointer {
-            Some(fat_pointer) => fat_pointer.clone(),
-            None if height == 0 => FatPointerToBftBlock::null(),
-            None => {
-                // First block of the range: its parent was not scanned, so read its header.
-                match (call.read_state)(StateReadRequest::Block(ZebBlockHeight(height - 1).into())).await {
-                    Ok(StateReadResponse::Block(Some(parent))) => parent.header.fat_pointer_to_bft_block.clone(),
-                    _ => return Err(format!("failed to get block at height {} to read its certificate", height - 1)),
-                }
-            }
-        };
-        if height != 0
-            && block_pays_pos_issuance(&internal_handle, ZebBlockHeight(height), &fat_pointer, &parent_fat_pointer).await?
-        {
-            timed(&PROF.replay_ns, || staking.apply_block_reward());
+        // the live commit path does. VARIABLE REWARD DISABLED: every non-genesis block pays.
+        if height != 0 {
+            timed(&PROF.replay_ns, || staking.apply_block_reward(&internal_handle.network, ZebBlockHeight(height)));
         }
 
-        prev_fat_pointer = Some(fat_pointer);
+        // Disabled variable-payout replay (re-enable together with `admit_fat_pointer`):
+        // // PoS issuance is applied once per block, after that block's staking actions, exactly as
+        // // the live commit path does -- and only for blocks that pay under the variable payout
+        // // rule. `block_pays_pos_issuance` replays that decision.
+        // let fat_pointer = block.header.fat_pointer_to_bft_block.clone();
+        // let parent_fat_pointer = match &prev_fat_pointer {
+        //     Some(fat_pointer) => fat_pointer.clone(),
+        //     None if height == 0 => FatPointerToBftBlock::null(),
+        //     None => {
+        //         // First block of the range: its parent was not scanned, so read its header.
+        //         match (call.read_state)(StateReadRequest::Block(ZebBlockHeight(height - 1).into())).await {
+        //             Ok(StateReadResponse::Block(Some(parent))) => parent.header.fat_pointer_to_bft_block.clone(),
+        //             _ => return Err(format!("failed to get block at height {} to read its certificate", height - 1)),
+        //         }
+        //     }
+        // };
+        // if height != 0
+        //     && block_pays_pos_issuance(&internal_handle, ZebBlockHeight(height), &fat_pointer, &parent_fat_pointer).await?
+        // {
+        //     timed(&PROF.replay_ns, || staking.apply_block_reward(&internal_handle.network, ZebBlockHeight(height)));
+        // }
+        //
+        // prev_fat_pointer = Some(fat_pointer);
     }
 
     for scan_info in &mut scan_infos {

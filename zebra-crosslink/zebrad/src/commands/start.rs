@@ -568,6 +568,7 @@ impl StartCmd {
                 }),
                 config.crosslink.clone(),
                 config.network.network.crosslink_parameters(),
+                config.network.network.clone(),
             )
         };
         let tfl_service = BoxService::new(tfl_handle);

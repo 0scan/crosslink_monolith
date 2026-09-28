@@ -108,6 +108,7 @@ pub fn spawn_new_tfl_service(
     mempool_service_call: MempoolServiceProcedure,
     config: crate::config::Config,
     params: ZcashCrosslinkParameters,
+    network: zebra_chain::parameters::Network,
 ) -> (TFLServiceHandle, JoinHandle<Result<(), String>>) {
     let internal = Arc::new(Mutex::new(TFLServiceInternal {
         bft_msg_flags: 0,
@@ -125,6 +126,7 @@ pub fn spawn_new_tfl_service(
         },
         config,
         params,
+        network,
     };
 
     let handle2 = handle1.clone();
@@ -147,4 +149,6 @@ pub struct TFLServiceHandle {
     /// The network's Crosslink consensus parameters. Immutable, and kept outside `internal` so the
     /// fat-pointer gate can decide on them before taking that lock.
     pub(crate) params: ZcashCrosslinkParameters,
+    /// The network, for the staking share of the block subsidy (`pos_subsidy`) in replays.
+    pub(crate) network: zebra_chain::parameters::Network,
 }
