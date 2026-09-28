@@ -352,8 +352,16 @@ pub fn miner_fees_are_valid(
         + expected_deferred_pool_balance_change.value())
     .map_err(|_| SubsidyError::Overflow)?;
 
-    let total_input_value =
-        (expected_block_subsidy + block_miner_fees).map_err(|_| SubsidyError::Overflow)?;
+    // Crosslink: the staking share of the subsidy is never the miner's. It is paid to bonds by
+    // the state when the block advances finality and burned otherwise, so the coinbase input is
+    // the subsidy less that share at every height from the activation on.
+    let pos_subsidy =
+        zebra_chain::parameters::subsidy::pos_subsidy(height, network, expected_block_subsidy)
+            .map_err(|_| SubsidyError::Overflow)?;
+    let total_input_value = ((expected_block_subsidy - pos_subsidy)
+        .map_err(|_| SubsidyError::Overflow)?
+        + block_miner_fees)
+        .map_err(|_| SubsidyError::Overflow)?;
 
     // # Consensus
     //

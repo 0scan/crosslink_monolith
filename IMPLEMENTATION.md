@@ -31,7 +31,7 @@ the same test files, and stages 3 and 4 depend on stage 1.
   in `zebra-state` instead, even where the crate's existing structure would take it
   (FINALITY.md §7.1). That a change fits the TFL service's main loop is an argument against it.
 - `σ` and the staking reward and payout code belong to other work. No stage changes
-  `bc_confirmation_depth_sigma`, `POS_BLOCK_REWARD_ZATS`, `update_bonds_with_pos_issuance`,
+  `bc_confirmation_depth_sigma`, `pos_subsidy`, `update_bonds_with_pos_issuance`,
   `fixup_aggregated_stakes`, or the wallet reward projection.
 - PoS stores and databases written by an earlier derivation are deleted, not migrated. No stage
   adds code that loads them.

@@ -168,7 +168,7 @@ pub fn fixup_aggregated_stakes(
                 db.block(HashOrHeight::Height(wh))
                     .expect("every height at or below the activation is finalized")
             };
-            if let Some(slash) = replay.apply_block(height, &block, cert_advanced, block_at)? {
+            if let Some(slash) = replay.apply_block(network, height, &block, cert_advanced, block_at)? {
                 println!(
                     "applied hardfork slash burns at height {h}: {} bond(s) burned for {} \
                      terminated finalizer(s)",

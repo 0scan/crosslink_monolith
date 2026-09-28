@@ -2053,6 +2053,14 @@ pub fn burn_delegation_bonds(delegation_bonds: &mut HashMap<BondKey, (Delegation
 /// Returns the amounts actually paid, per bond and per finalizer, so a revert can
 /// undo exactly what was done without recomputing. Both are empty when nothing is
 /// at stake.
+/// The staking reward a block at `height` pays if it advances finality: the block subsidy's
+/// `pos_subsidy`, which the consensus check withheld from the miner. Zero before activation.
+pub fn pos_block_reward(height: block::Height, network: &Network) -> u64 {
+    use zebra_chain::parameters::subsidy::{block_subsidy, pos_subsidy};
+    let subsidy = block_subsidy(height, network).unwrap_or_default();
+    pos_subsidy(height, network, subsidy).map(u64::from).unwrap_or_default()
+}
+
 pub fn update_bonds_with_pos_issuance(
     bond_reward_total: u64,
     delegation_bonds: &mut HashMap<finalized_state::disk_format::BondKey, (finalized_state::disk_format::DelegationBond, non_finalized_state::BondStatusInChain)>,

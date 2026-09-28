@@ -23,13 +23,12 @@ use zcash_primitives::transaction::StakingAction;
 use zebra_chain::{
     amount::{Amount, NonNegative, MAX_MONEY},
     block::{Block, Height},
-    parameters::HardForkSchedule,
+    parameters::{HardForkSchedule, Network},
     transaction,
     value_balance::ValueBalance,
 };
 
 use crate::{
-    constants::POS_BLOCK_REWARD_ZATS,
     service::{
         burn_delegation_bonds,
         finalized_state::{
@@ -37,7 +36,7 @@ use crate::{
             slashing::slash_burn_set,
         },
         non_finalized_state::BondStatusInChain,
-        update_bonds_with_pos_issuance, update_chain_tip_with_delegation_bond,
+        pos_block_reward, update_bonds_with_pos_issuance, update_chain_tip_with_delegation_bond,
     },
     ValidateContextError,
 };
@@ -86,6 +85,7 @@ impl StakingReplay {
     /// Genesis carries no staking state and the live path skips it, so height 0 is a no-op.
     pub fn apply_block(
         &mut self,
+        network: &Network,
         height: Height,
         block: &Block,
         pays_reward: bool,
@@ -112,7 +112,7 @@ impl StakingReplay {
         }
 
         if pays_reward {
-            self.apply_block_reward();
+            self.apply_block_reward(network, height);
         }
         Ok(slash)
     }
@@ -144,10 +144,11 @@ impl StakingReplay {
         )
     }
 
-    /// Pays the block's staking reward. Call once per paying non-genesis block, after all of
-    /// its staking actions.
-    pub fn apply_block_reward(&mut self) {
-        update_bonds_with_pos_issuance(POS_BLOCK_REWARD_ZATS, &mut self.delegation_bonds, &mut self.finalizer_rewards);
+    /// Pays the block's staking reward, the `pos_subsidy` at `height`. Call once per paying
+    /// non-genesis block, after all of its staking actions.
+    pub fn apply_block_reward(&mut self, network: &Network, height: Height) {
+        let reward = pos_block_reward(height, network);
+        update_bonds_with_pos_issuance(reward, &mut self.delegation_bonds, &mut self.finalizer_rewards);
     }
 
     /// Whether a hardfork slash activates at `height`, so the caller must read its window.

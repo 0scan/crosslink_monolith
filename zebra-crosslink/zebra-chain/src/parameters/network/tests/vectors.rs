@@ -774,3 +774,40 @@ fn temporary_orchard_disabling_soft_fork_heights() {
     );
     assert!(!disabled.is_temporary_orchard_disabling_soft_fork_activation_height(testnet_height));
 }
+
+/// The staking share is carved out of the miner subsidy from the Crosslink activation height
+/// on, so issuance is conserved at every height and the miner never receives that share.
+#[test]
+fn pos_subsidy_conserves_issuance() {
+    for network in [Network::new_regtest(RegtestParameters::default()), Network::new_default_testnet(), Network::Mainnet] {
+        let start = network.pos_issuance_start_height();
+        assert_eq!(start.is_none(), network == Network::Mainnet, "only Mainnet has no staking share");
+
+        for height in (1..2_000).map(Height) {
+            let block_subsidy = block_subsidy(height, &network).unwrap();
+            let founders = subsidy::founders_reward(&network, height);
+            let streams = funding_stream_values(height, &network, block_subsidy)
+                .unwrap()
+                .values()
+                .sum::<Result<Amount<NonNegative>, _>>()
+                .unwrap();
+            let miner = subsidy::miner_subsidy(height, &network, block_subsidy).unwrap();
+            let pos = subsidy::pos_subsidy(height, &network, block_subsidy).unwrap();
+
+            assert_eq!(
+                (((founders + streams).unwrap() + miner).unwrap() + pos).unwrap(),
+                block_subsidy,
+                "issuance not conserved on {network} at {height:?}"
+            );
+
+            let post_dev_fund = ((block_subsidy - founders).unwrap() - streams).unwrap();
+            let expected_pos = match start {
+                Some(start) if height >= start => {
+                    u64::from(post_dev_fund) * subsidy::POS_SUBSIDY_NUMERATOR / subsidy::POS_SUBSIDY_DENOMINATOR
+                }
+                _ => 0,
+            };
+            assert_eq!(u64::from(pos), expected_pos, "wrong staking share on {network} at {height:?}");
+        }
+    }
+}

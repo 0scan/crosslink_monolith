@@ -1277,6 +1277,17 @@ impl Network {
         }
     }
 
+    /// The first height whose block subsidy carries a staking share (see
+    /// [`super::subsidy::pos_subsidy`]): the Crosslink activation height `h2`, genesis when BFT
+    /// is supplied from outside, and `None` on Mainnet, where Crosslink is not activated and the
+    /// historical miner subsidy must keep validating.
+    pub fn pos_issuance_start_height(&self) -> Option<Height> {
+        if let Self::Mainnet = self {
+            return None;
+        }
+        Some(Height(self.crosslink_parameters().bootstrap.activation_height().unwrap_or(0)))
+    }
+
     /// Returns slow start interval for this network
     pub fn slow_start_interval(&self) -> Height {
         if let Self::Testnet(params) = self {

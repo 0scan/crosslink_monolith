@@ -474,7 +474,51 @@ pub fn block_subsidy(height: Height, net: &Network) -> Result<Amount<NonNegative
     Ok(Amount::try_from(amount)?)
 }
 
-/// `MinerSubsidy(height)` as described in [protocol specification §7.8][7.8]
+/// Staking (PoS) share of the block subsidy after the founders reward and funding streams,
+/// as a fraction `POS_SUBSIDY_NUMERATOR / POS_SUBSIDY_DENOMINATOR`.
+///
+/// This is the "48% staking rewards" of the crosslink design overview (§14, "Proposed issuance
+/// split"), measured on post-dev-fund issuance. The 4% first-inclusion miner bounty from the same
+/// section is not implemented; it stays with the miner subsidy.
+pub const POS_SUBSIDY_NUMERATOR: u64 = 48;
+/// Denominator of the staking share; see [`POS_SUBSIDY_NUMERATOR`].
+pub const POS_SUBSIDY_DENOMINATOR: u64 = 100;
+
+/// `PosSubsidy(height)`: the part of the block subsidy that is carved out of the miner subsidy
+/// from the Crosslink activation height on and paid to stakers when the block advances finality.
+///
+/// Issuance is conserved: `block_subsidy = founders + funding_streams + miner_subsidy +
+/// pos_subsidy` at every height. A block that does not pay stakers (no finality advance, or no
+/// stake) burns its `pos_subsidy`; the miner never gets it, so a coinbase claiming it is invalid.
+///
+/// Only the subsidy is shared. Transaction fees are not part of it and go to the miner in full.
+///
+/// Zero before the activation height, and on networks without one (Mainnet).
+pub fn pos_subsidy(
+    height: Height,
+    network: &Network,
+    expected_block_subsidy: Amount<NonNegative>,
+) -> Result<Amount<NonNegative>, amount::Error> {
+    let Some(start) = network.pos_issuance_start_height() else {
+        return Ok(Amount::zero());
+    };
+    if height < start {
+        return Ok(Amount::zero());
+    }
+
+    let founders_reward = founders_reward(network, height);
+    let funding_streams_sum = funding_stream_values(height, network, expected_block_subsidy)?
+        .values()
+        .sum::<Result<Amount<NonNegative>, _>>()?;
+    let post_dev_fund = (expected_block_subsidy - founders_reward - funding_streams_sum)?;
+
+    // floor(post_dev_fund * numerator / denominator); no overflow: post_dev_fund < 2^63 / 100.
+    let zats = u64::from(post_dev_fund) * POS_SUBSIDY_NUMERATOR / POS_SUBSIDY_DENOMINATOR;
+    Amount::try_from(zats)
+}
+
+/// `MinerSubsidy(height)` as described in [protocol specification §7.8][7.8], less the
+/// Crosslink [`pos_subsidy`].
 ///
 /// [7.8]: https://zips.z.cash/protocol/protocol.pdf#subsidies
 pub fn miner_subsidy(
@@ -488,7 +532,9 @@ pub fn miner_subsidy(
         .values()
         .sum::<Result<Amount<NonNegative>, _>>()?;
 
-    expected_block_subsidy - founders_reward - funding_streams_sum
+    let pos_subsidy = pos_subsidy(height, network, expected_block_subsidy)?;
+
+    expected_block_subsidy - founders_reward - funding_streams_sum - pos_subsidy
 }
 
 /// Returns the founders reward address for a given height and network as described in [§7.9].

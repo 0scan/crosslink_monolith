@@ -2199,11 +2199,16 @@ impl Chain {
         // logs are positional twins of the block list and `pop_tip` pops one entry per block.
         //
         // Nothing at stake (no active bond, every bank empty) also means no issuance this
-        // block; the two logs then hold empty entries. TODO: for prototyping this is whatever.
+        // block; the two logs then hold empty entries.
+        //
+        // The amount is the staking share the consensus check already withheld from the
+        // coinbase (`pos_subsidy`); a block that does not pay it burns it. No value pool moves
+        // for a burn: the share was never issued.
         {
             let ChainInner { delegation_bonds, finalizer_rewards, chain_value_pools, .. } = &mut self.inner;
             let (bond_rewards, commissions) = if pos_payout {
-                crate::service::update_bonds_with_pos_issuance(crate::constants::POS_BLOCK_REWARD_ZATS, delegation_bonds, finalizer_rewards)
+                let reward = crate::service::pos_block_reward(height, &self.network);
+                crate::service::update_bonds_with_pos_issuance(reward, delegation_bonds, finalizer_rewards)
             } else {
                 (Vec::new(), Vec::new())
             };

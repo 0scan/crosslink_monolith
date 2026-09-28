@@ -842,9 +842,12 @@ At the end of `Chain::push` in
   `finalizer_commissions` entries and mints nothing; the empty entries keep positional reorg
   reversal aligned;
 - if no bond is active, the same empty entries are pushed and no staking reward is minted; and
-- otherwise it distributes the fixed `POS_BLOCK_REWARD_ZATS` for that PoW block, increases
+- otherwise it distributes the block's `pos_subsidy` (the staking share of the block subsidy,
+  `POS_SUBSIDY_NUMERATOR / POS_SUBSIDY_DENOMINATOR` of post-dev-fund issuance from the Crosslink
+  activation height on, which `miner_fees_are_valid` withholds from the coinbase), increases
   `staking_bonded_amount` by the same total, and records the per-bond rewards for exact reorg
-  reversal.
+  reversal. Issuance is conserved: a block that does not pay burns that share, the miner never
+  gets it.
 
 `update_bonds_with_pos_issuance` in `zebra-crosslink/zebra-state/src/service.rs` allocates the
 total pro rata with integer division, gives the remainder to the largest active bond (then
@@ -886,7 +889,7 @@ accounting slip. It changes the bonded stake, the bonded stake is the voting pow
 roster derived from it then differs between nodes — which in a two-node roster is enough to
 make both nodes believe they are the proposer, prevote different values forever and stall
 finality permanently. This was observed on a dilated two-node testnet: node two restarted,
-restored 4 backed-up blocks, and came back exactly `4 × POS_BLOCK_REWARD_ZATS` short, after
+restored 4 backed-up blocks, and came back exactly 4 blocks' staking reward short, after
 which BFT never decided another block.
 
 The same per-block calculation is replayed by the wallet projection path in
@@ -1430,8 +1433,8 @@ objective advance trigger lets whoever dominates `bc_best` delay payouts while `
 
 Payout amount is a separate decision:
 
-- A flat `POS_BLOCK_REWARD_ZATS` per objective advance lowers issuance during a BFT stall and
-  can leave it permanently lower if advances never resume.
+- The `pos_subsidy` of each advancing block, burned when the block does not advance, lowers
+  issuance during a BFT stall and leaves it permanently lower if advances never resume.
 - A deferred amount based on elapsed PoW height can catch up only when a later payout occurs
   and only under an explicit accrual rule. Issuance is still lower at intermediate heights,
   remains lower after a permanent stall, and intervals with no active bonds need a rule: drop,
