@@ -5,7 +5,7 @@ use std::{collections::HashMap, hash::Hash, sync::Mutex};
 use chrono::{DateTime, Utc};
 use wallet::BlockHeight;
 // use twox_hash::XxHash3_64;
-use winit::event::MouseButton;
+use crate::{keys::*, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 
 use super::*;
 
@@ -1319,11 +1319,16 @@ const BLOCK_SPACING: f32 = 10.0;
 fn y_for_height(height: f32) -> f32 { -BLOCK_SPACING * height }
 fn height_for_y(y: f32) -> f32 { -y / BLOCK_SPACING }
 
+/// Zoom steps (exponent of ZOOM_FACTOR) per mouse-wheel click. Rolling the wheel away from
+/// you zooms in, the map/browser convention.
+const WHEEL_ZOOM_STEP: f32 = 0.4;
+/// Zoom steps per unit of pinch (a pinch that doubles the finger spread is +1.0).
+const PINCH_ZOOM_STEPS: f32 = 10.0;
+
+/// Vertical travel over a minimap in logical pixels: a touchpad pans 1:1, a wheel steps
+/// WHEEL_LINE per click. Both devices scrub; neither is guessed from the numbers.
 fn effective_vertical_wheel_for_scrub(input_ctx: &InputCtx) -> f32 {
-    if input_ctx.scroll_delta.1.abs() > 1e-6 || input_ctx.scroll_delta.0.abs() > 1e-6 {
-        return input_ctx.scroll_delta.1 as f32;
-    }
-    -(input_ctx.zoom_delta as f32) * 28.0
+    input_ctx.scroll_delta.1 as f32 + input_ctx.wheel_delta.1 as f32 * crate::ui::WHEEL_LINE
 }
 
 #[derive(Clone, Copy)]
@@ -1719,7 +1724,10 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         let dxm = (input_ctx.mouse_pos().0.clamp(0, draw_ctx.window_width) - draw_ctx.window_width/2) as f32;
         let dym = (input_ctx.mouse_pos().1.clamp(0, draw_ctx.window_height) - draw_ctx.window_height/2) as f32;
         let old_screen_unit = SCREEN_UNIT_CONST * (ZOOM_FACTOR.powf(viz_state.zoom) * ui.dpi_scale);
-        viz_state.zoom += input_ctx.zoom_delta as f32;
+        viz_state.zoom += input_ctx.zoom_delta as f32 * PINCH_ZOOM_STEPS;
+        if !inside_any_minimap {
+            viz_state.zoom += input_ctx.wheel_delta.1 as f32 * WHEEL_ZOOM_STEP;
+        }
         viz_state.zoom = viz_state.zoom.min(26.0);
         let new_screen_unit = SCREEN_UNIT_CONST * (ZOOM_FACTOR.powf(viz_state.zoom) * ui.dpi_scale);
         viz_state.camera_x += (dxm / old_screen_unit) - (dxm / new_screen_unit);
@@ -1736,7 +1744,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         viz_state.camera_x = e_lerp(viz_state.camera_x, 0.0, dt);
     }
 
-    if ui.mouse_pressed_id == ui::Id::VIZ_GUI && input_ctx.mouse_held(MouseButton::Left) {
+    if ui.mouse_pressed_id == ui::Id::VIZ_GUI && input_ctx.mouse_held(BTN_LEFT) {
         if input_ctx.mouse_delta() != (0, 0) {
             viz_state.follow_tip = false;
         }
@@ -1747,11 +1755,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
     let mut minimap_wheel_scrubbed = false;
     if inside_any_minimap {
         let dy = effective_vertical_wheel_for_scrub(input_ctx);
-        if dy.abs() > 1e-6
-            || input_ctx.scroll_delta.0.abs() > 1e-6
-            || input_ctx.scroll_delta.1.abs() > 1e-6
-            || input_ctx.zoom_delta.abs() > 1e-12
-        {
+        if dy.abs() > 1e-6 {
             if inside_pos_minimap {
                 let (bft_min, bft_max) = bft_minimap_height_span(viz_state);
                 let strip_h = (pos_mm_y1 - pos_mm_y0).max(1.0);
@@ -1773,12 +1777,14 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         }
     }
 
-    viz_state.camera_x -= input_ctx.scroll_delta.0 as f32 / screen_unit;
+    // A touchpad pans the camera 1:1 with the fingers: scroll_delta is logical pixels and
+    // screen_unit is physical pixels per world unit, so the dpi scale bridges them.
+    viz_state.camera_x -= input_ctx.scroll_delta.0 as f32 * ui.dpi_scale / screen_unit;
     if !inside_any_minimap || !minimap_wheel_scrubbed {
         if input_ctx.scroll_delta.1 != 0.0 {
             viz_state.follow_tip = false;
         }
-        viz_state.camera_y -= input_ctx.scroll_delta.1 as f32 / screen_unit;
+        viz_state.camera_y -= input_ctx.scroll_delta.1 as f32 * ui.dpi_scale / screen_unit;
     }
 
     let mut origin_x = (draw_ctx.window_width / 2) as f32 - viz_state.camera_x * screen_unit;
@@ -1790,7 +1796,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
     let mut minimap_scrub_this_frame = false;
     if !ui.capture || inside_any_minimap {
         if (ui.mouse_pressed_id == ui::Id::CHAIN_MINIMAP_POW || ui.mouse_pressed_id == ui::Id::CHAIN_MINIMAP_POS)
-            && input_ctx.mouse_held(MouseButton::Left)
+            && input_ctx.mouse_held(BTN_LEFT)
         {
             if ui.mouse_pressed_id == ui::Id::CHAIN_MINIMAP_POS {
                 let (bft_min, bft_max) = bft_minimap_height_span(viz_state);
@@ -1811,7 +1817,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
             }
         }
         if ui.mouse_pressed_id == ui::Id::default()
-            && input_ctx.mouse_pressed(MouseButton::Left)
+            && input_ctx.mouse_pressed(BTN_LEFT)
             && inside_pow_minimap
         {
             let (h_min, h_max) = chain_minimap_height_span(viz_state);
@@ -1822,7 +1828,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
             minimap_scrub_this_frame = true;
         }
         if ui.mouse_pressed_id == ui::Id::default()
-            && input_ctx.mouse_pressed(MouseButton::Left)
+            && input_ctx.mouse_pressed(BTN_LEFT)
             && inside_pos_minimap
         {
             let (bft_min, bft_max) = bft_minimap_height_span(viz_state);
@@ -1834,7 +1840,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         }
     }
     if !ui.capture {
-        if ui.mouse_pressed_id == ui::Id::default() && input_ctx.mouse_pressed(MouseButton::Left) && !inside_any_minimap {
+        if ui.mouse_pressed_id == ui::Id::default() && input_ctx.mouse_pressed(BTN_LEFT) && !inside_any_minimap {
             ui.mouse_pressed_id = ui::Id::VIZ_GUI;
         }
     }
@@ -1947,12 +1953,12 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         if on_screen_bc.block.this_hash == hovered_block || viz_blocks.contains(&on_screen_bc.block.this_hash) {
             on_screen_bc.t_roundness = 0.3;
             on_screen_bc.t_darkness = 0.2;
-            if input_ctx.key_pressed(KeyCode::Space) {
+            if input_ctx.key_pressed(KEY_SPACE) {
                 on_screen_bc.x = 0.0;
                 on_screen_bc.y = 0.0;
                 on_screen_bc.alpha = 0.0;
             }
-            if input_ctx.mouse_pressed(MouseButton::Left) && !minimap_scrub_this_frame {
+            if input_ctx.mouse_pressed(BTN_LEFT) && !minimap_scrub_this_frame {
                 viz_state.follow_tip = false;
                 viz_state.camera_x = on_screen_bc.t_x;
                 viz_state.camera_y = on_screen_bc.t_y;
@@ -1999,13 +2005,13 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         if on_screen_bft.block.this_hash == hovered_block || viz_blocks.contains(&on_screen_bft.block.this_hash) {
             on_screen_bft.t_roundness = 0.3;
             on_screen_bft.t_darkness = 0.2;
-            if input_ctx.key_pressed(KeyCode::Space) {
+            if input_ctx.key_pressed(KEY_SPACE) {
                 on_screen_bft.x = 0.0;
                 on_screen_bft.y = 0.0;
                 on_screen_bft.alpha = 0.0;
             }
             // same deal as PoW branch above, bft click to recenter should not piggyback on minimap press
-            if input_ctx.mouse_pressed(MouseButton::Left) && !minimap_scrub_this_frame {
+            if input_ctx.mouse_pressed(BTN_LEFT) && !minimap_scrub_this_frame {
                 viz_state.follow_tip = false;
                 viz_state.camera_x = on_screen_bft.t_x;
                 viz_state.camera_y = on_screen_bft.t_y;
@@ -2334,7 +2340,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         { play_sound(SOUND_UI_HOVER, 0.5, 1.0); }
     }
 
-    if !ui.capture && input_ctx.mouse_pressed(MouseButton::Left) && !minimap_scrub_this_frame {
+    if !ui.capture && input_ctx.mouse_pressed(BTN_LEFT) && !minimap_scrub_this_frame {
         viz_state.inspecting_block_hash = hovered_block;
         viz_state.inspecting_block_screen_x = hovered_block_screen_x;
         viz_state.inspecting_block_screen_y = hovered_block_screen_y;
@@ -2348,7 +2354,7 @@ pub(crate) fn viz_gui_draw_the_stuff_for_the_things(viz_state: &mut VizState, ui
         input_ctx.scroll_delta != (0.0, 0.0) || input_ctx.zoom_delta != 0.0;
     ui.suppress_scroll_for_clay = ((inside_any_minimap && wheelish) || minimap_wheel_scrubbed)
         || ((ui.mouse_pressed_id == ui::Id::CHAIN_MINIMAP_POW || ui.mouse_pressed_id == ui::Id::CHAIN_MINIMAP_POS)
-            && input_ctx.mouse_held(MouseButton::Left))
+            && input_ctx.mouse_held(BTN_LEFT))
         || (in_center_column && wheelish && !ui.capture);
 }
 

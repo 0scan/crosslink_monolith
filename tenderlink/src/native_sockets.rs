@@ -362,7 +362,7 @@ mod linux {
         msg.msg_iov = &mut iov as *mut libc::iovec;
         msg.msg_iovlen = 1;
         msg.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = cbuf.len();
+        msg.msg_controllen = cbuf.len() as _;
 
         let tclass_byte = ((dscp as u8) << 2) | if ecn_signal { 0b11 } else { 0b10 };
 
@@ -447,7 +447,7 @@ mod linux {
         msg.msg_iov = &mut iov as *mut libc::iovec;
         msg.msg_iovlen = 1;
         msg.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = cbuf.len();
+        msg.msg_controllen = cbuf.len() as _;
 
         let n = unsafe { libc::recvmsg(fd, &mut msg as *mut libc::msghdr, 0) };
         let timestamp_ns = monotonic_clock_ns();

@@ -1,11 +1,14 @@
 #![allow(warnings)]
 
 const ONE_cTAZ: u64 = 100_000_000;
+/// Logical pixels a scroll container moves per mouse-wheel click (three 16 px lines, the
+/// browser convention). A touchpad pans 1:1 with the fingers instead.
+pub const WHEEL_LINE: f32 = 48.0;
 
 use std::net::Shutdown;
 use std::thread::current;
 use std::{hash::Hash};
-use winit::{event::MouseButton, keyboard::KeyCode};
+use crate::{keys::*, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, CursorIcon};
 use clay_layout as clay;
 use clay::{Clay, Declaration};
 use clay::render_commands::RenderCommandConfig;
@@ -104,12 +107,12 @@ impl UiData {
 pub fn dbg_ui(ui: &mut Context, is_rendering: bool) -> bool {
 
 
-    if ui.input().key_pressed(KeyCode::F3) {
+    if ui.input().key_pressed(KEY_F3) {
         ui.debug = !ui.debug;
-        let shift = (ui.input().key_held(KeyCode::ShiftLeft) || ui.input().key_held(KeyCode::ShiftRight));
+        let shift = (ui.input().key_held(KEY_LEFTSHIFT) || ui.input().key_held(KEY_RIGHTSHIFT));
         ui.frame_graph = shift;
     }
-    if ui.input().key_pressed(KeyCode::F5) {
+    if ui.input().key_pressed(KEY_F5) {
         unsafe {
             if *ui.draw().debug_pixel_inspector == None {
                 ui.pixel_inspector_primed = true;
@@ -120,12 +123,12 @@ pub fn dbg_ui(ui: &mut Context, is_rendering: bool) -> bool {
         }
     }
 
-    if ui.input().key_pressed(KeyCode::F8) {
+    if ui.input().key_pressed(KEY_F8) {
         ui.viz_op = ui.viz_op.cycle_next();
     }
 
     if ui.pixel_inspector_primed {
-        if ui.input().mouse_pressed(MouseButton::Left) {
+        if ui.input().mouse_pressed(BTN_LEFT) {
             unsafe {
                 *ui.draw().debug_pixel_inspector = Some((ui.input().mouse_pos().0.clamp(0, ui.draw().window_width) as usize, ui.input().mouse_pos().1.clamp(0, ui.draw().window_height) as usize));
             }
@@ -271,7 +274,7 @@ impl Id {
                 stringId: clay::Clay_String {
                     isStaticallyAllocated: false,
                     length: self.len as i32,
-                    chars: self.chars as *const i8
+                    chars: self.chars as *const std::ffi::c_char
                 }
             }
         }
@@ -565,7 +568,7 @@ impl Context {
     ) {
         let icon = if *checked { ICON_CHECK } else { ICON_CIRCLE_EMPTY };
         let (clicked, colour, text_colour) = self.button_ex(
-            true, BUTTON_GREY, id, true, winit::window::CursorIcon::Pointer,
+            true, BUTTON_GREY, id, true, CursorIcon::Pointer,
         );
         if let _ = elem().decl(Decl {
             id,
@@ -606,7 +609,7 @@ impl Context {
         let icon = if *checked { ICON_CHECK } else { ICON_CIRCLE_EMPTY };
         let base = BUTTON_GREY.mul(if *checked { 0.95 } else { 0.85 });
         let (clicked, colour, text_colour) = self.button_ex(
-            true, base, id, true, winit::window::CursorIcon::Pointer,
+            true, base, id, true, CursorIcon::Pointer,
         );
         let radius = self.scale(18.0);
         if let _ = elem().decl(Decl {
@@ -637,27 +640,27 @@ impl Context {
         }
     }
 
-    pub fn button_ex(&mut self, act_on_press: bool, colour: (u8, u8, u8, u8), id: Id, enabled: bool, pointer_on_hover: winit::window::CursorIcon) -> (bool, (u8, u8, u8, u8), (u8, u8, u8, u8)) {
+    pub fn button_ex(&mut self, act_on_press: bool, colour: (u8, u8, u8, u8), id: Id, enabled: bool, pointer_on_hover: CursorIcon) -> (bool, (u8, u8, u8, u8), (u8, u8, u8, u8)) {
 
         let mouse_hover = self.hovered_raw(id);
         let key_hover   = self.nav_enable && self.nav_id == id.id;
 
-        let mouse_held     = mouse_hover && self.input().mouse_held(winit::event::MouseButton::Left);
-        let mouse_pressed  = mouse_hover && self.input().mouse_pressed(winit::event::MouseButton::Left);
-        let mouse_released = mouse_hover && self.input().mouse_released(winit::event::MouseButton::Left);
+        let mouse_held     = mouse_hover && self.input().mouse_held(BTN_LEFT);
+        let mouse_pressed  = mouse_hover && self.input().mouse_pressed(BTN_LEFT);
+        let mouse_released = mouse_hover && self.input().mouse_released(BTN_LEFT);
 
-        let key_held     = key_hover && self.input().key_held(winit::keyboard::KeyCode::Enter);
-        let key_pressed  = key_hover && self.input().key_pressed(winit::keyboard::KeyCode::Enter);
-        let key_released = key_hover && self.input().key_released(winit::keyboard::KeyCode::Enter);
+        let key_held     = key_hover && self.input().key_held(KEY_ENTER);
+        let key_pressed  = key_hover && self.input().key_pressed(KEY_ENTER);
+        let key_released = key_hover && self.input().key_released(KEY_ENTER);
 
         if mouse_pressed { self.mouse_pressed_id = id; }
         if key_pressed   { self.key_pressed_id   = id; }
         let mouse_activated  = enabled && self.mouse_pressed_id == id && if act_on_press { mouse_pressed } else { mouse_released };
         let key_activated    = enabled && self.key_pressed_id   == id && if act_on_press { key_pressed   } else { key_released   };
 
-        if mouse_hover && pointer_on_hover != winit::window::CursorIcon::Default &&
+        if mouse_hover && pointer_on_hover != CursorIcon::Default &&
             (self.mouse_pressed_id == Id::default() || self.mouse_pressed_id == id) {
-            self.cursor = winit::window::Cursor::Icon(pointer_on_hover);
+            self.cursor = pointer_on_hover;
         }
 
         let held      = mouse_held      || key_held;
@@ -665,6 +668,7 @@ impl Context {
         let pressed   = mouse_pressed   || key_pressed;
         let released  = mouse_released  || key_released;
         let activated = mouse_activated || key_activated;
+
 
         let mut hsva = colour.hsva();
         if !enabled {
@@ -702,7 +706,7 @@ impl Context {
         (activated, colour, text_colour)
     }
 
-    pub fn button(&mut self, id: Id) -> (bool, (u8, u8, u8, u8), (u8, u8, u8, u8)) { return self.button_ex(true, BUTTON_GREY, id, true, winit::window::CursorIcon::Default); }
+    pub fn button(&mut self, id: Id) -> (bool, (u8, u8, u8, u8), (u8, u8, u8, u8)) { return self.button_ex(true, BUTTON_GREY, id, true, CursorIcon::Default); }
 
     pub fn text(&self, label: &str, decl: TextDecl) {
         let config = clay::text::TextConfig::new()
@@ -769,7 +773,7 @@ impl Context {
         let padding   = child_gap.dup4(); // @Duplicate :TextBox
         let radius    = child_gap.dup4(); // @Duplicate :TextBox
 
-        let (activated, colour, text_colour) = self.button_ex(true, BUTTON_GREY, id, true, winit::window::CursorIcon::Text);
+        let (activated, colour, text_colour) = self.button_ex(true, BUTTON_GREY, id, true, CursorIcon::Text);
 
         if activated {
             self.nav_id = id.id;
@@ -785,24 +789,24 @@ impl Context {
             if self.nav_id == id.id {
                 let mut moved = false;
 
-                let shift = (self.input().key_held(KeyCode::ShiftLeft)   || self.input().key_held(KeyCode::ShiftRight));
-                let ctrl  = (self.input().key_held(KeyCode::ControlLeft) || self.input().key_held(KeyCode::ControlRight));
+                let shift = (self.input().key_held(KEY_LEFTSHIFT)   || self.input().key_held(KEY_RIGHTSHIFT));
+                let ctrl  = (self.input().key_held(KEY_LEFTCTRL) || self.input().key_held(KEY_RIGHTCTRL));
 
                 if !shift && textbox_state.selection.1 != textbox_state.selection.0 {
                     let (min, max) = (textbox_state.selection.0.min(textbox_state.selection.1),
                                       textbox_state.selection.0.max(textbox_state.selection.1));
-                    if self.input().key_pressed(KeyCode::ArrowRight) { moved = true; textbox_state.selection.0 = max; }
-                    if self.input().key_pressed(KeyCode::ArrowLeft)  { moved = true; textbox_state.selection.0 = min; }
+                    if self.input().key_pressed(KEY_RIGHT) { moved = true; textbox_state.selection.0 = max; }
+                    if self.input().key_pressed(KEY_LEFT)  { moved = true; textbox_state.selection.0 = min; }
                 } else {
-                    if self.input().key_pressed(KeyCode::ArrowRight) { moved = true;                                      { textbox_state.selection.0 += 1; }   }
-                    if self.input().key_pressed(KeyCode::ArrowLeft)  { moved = true; { if (textbox_state.selection.0 > 0) { textbox_state.selection.0 -= 1; } } }
+                    if self.input().key_pressed(KEY_RIGHT) { moved = true;                                      { textbox_state.selection.0 += 1; }   }
+                    if self.input().key_pressed(KEY_LEFT)  { moved = true; { if (textbox_state.selection.0 > 0) { textbox_state.selection.0 -= 1; } } }
                 }
 
-                if self.input().key_pressed(KeyCode::Home)       { moved = true; textbox_state.selection.0 = 0; }
-                if self.input().key_pressed(KeyCode::ArrowUp)    { moved = true; textbox_state.selection.0 = 0; }
+                if self.input().key_pressed(KEY_HOME)       { moved = true; textbox_state.selection.0 = 0; }
+                if self.input().key_pressed(KEY_UP)    { moved = true; textbox_state.selection.0 = 0; }
 
-                if self.input().key_pressed(KeyCode::End)        { moved = true; textbox_state.selection.0 = textbox_state.text_buf.len(); }
-                if self.input().key_pressed(KeyCode::ArrowDown)  { moved = true; textbox_state.selection.0 = textbox_state.text_buf.len(); }
+                if self.input().key_pressed(KEY_END)        { moved = true; textbox_state.selection.0 = textbox_state.text_buf.len(); }
+                if self.input().key_pressed(KEY_DOWN)  { moved = true; textbox_state.selection.0 = textbox_state.text_buf.len(); }
 
                 textbox_state.selection.0 = textbox_state.selection.0.min(textbox_state.text_buf.len());
                 textbox_state.selection.1 = textbox_state.selection.1.min(textbox_state.text_buf.len());
@@ -813,12 +817,12 @@ impl Context {
 
                 let has_selection = (textbox_state.selection.1 != textbox_state.selection.0);
 
-                let select_all = (ctrl && self.input().key_pressed(KeyCode::KeyA)) || activated;
-                let copy       = (ctrl && self.input().key_pressed(KeyCode::KeyC));
-                let cut        = (ctrl && self.input().key_pressed(KeyCode::KeyX)) || (shift && self.input().key_pressed(KeyCode::Delete));
+                let select_all = (ctrl && self.input().key_pressed(KEY_A)) || activated;
+                let copy       = (ctrl && self.input().key_pressed(KEY_C));
+                let cut        = (ctrl && self.input().key_pressed(KEY_X)) || (shift && self.input().key_pressed(KEY_DELETE));
 
-                let backspace = self.input().key_pressed(KeyCode::Backspace);
-                let delete    = self.input().key_pressed(KeyCode::Delete);
+                let backspace = self.input().key_pressed(KEY_BACKSPACE);
+                let delete    = self.input().key_pressed(KEY_DELETE);
                 let has_input = self.input().text_input.is_some();
 
                 let should_copy = has_selection && (copy || cut);
@@ -905,11 +909,11 @@ impl Context {
         let track_length = self.scale(96.0);
         let mut new_value = value;
         let mouse_hover = self.hovered_raw(id);
-        if mouse_hover && self.input().mouse_pressed(MouseButton::Left) {
+        if mouse_hover && self.input().mouse_pressed(BTN_LEFT) {
             self.mouse_pressed_id = id;
         }
         if self.mouse_pressed_id == id &&
-           (self.input().mouse_held(MouseButton::Left) || self.input().mouse_pressed(MouseButton::Left)) {
+           (self.input().mouse_held(BTN_LEFT) || self.input().mouse_pressed(BTN_LEFT)) {
             let element_data = unsafe { clay::Clay_GetElementData(id.clay().id) };
             if element_data.found {
                 if horizontal && element_data.boundingBox.width > 0.0 {
@@ -920,7 +924,7 @@ impl Context {
             }
         }
         if mouse_hover {
-            self.cursor = winit::window::Cursor::Icon(winit::window::CursorIcon::Pointer);
+            self.cursor = CursorIcon::Pointer;
         }
         let active = self.mouse_pressed_id == id;
         let track_colour = if active { (0x40, 0x40, 0x45, 0xff) } else if mouse_hover { (0x35, 0x35, 0x3a, 0xff) } else { (0x28, 0x28, 0x2c, 0xff) };
@@ -981,25 +985,28 @@ impl Context {
         let max_x = (scroll_container_state.content_width - scroll_container_state.viewport_width) / self.scale;
 
         if self.hovered(id) && !self.suppress_scroll_for_clay {
-            let shift = self.input().key_held(KeyCode::ShiftLeft) || self.input().key_held(KeyCode::ShiftRight);
+            let shift = self.input().key_held(KEY_LEFTSHIFT) || self.input().key_held(KEY_RIGHTSHIFT);
+            // A touchpad pans by the distance the fingers moved; a wheel steps a
+            // fixed WHEEL_LINE per click. Which device is which was decided upstream.
+            let dy = self.input().scroll_delta.1 as f32 + self.input().wheel_delta.1 as f32 * WHEEL_LINE;
+            let dx = self.input().scroll_delta.0 as f32 + self.input().wheel_delta.0 as f32 * WHEEL_LINE;
             if shift {
-                scroll_container_state.scroll_x -= self.input().scroll_delta.1 as f32 * 32.0 / self.scale;
+                scroll_container_state.scroll_x -= dy / self.scale;
             } else {
-                scroll_container_state.scroll -= self.input().zoom_delta     as f32 * 32.0;
-                scroll_container_state.scroll -= self.input().scroll_delta.1 as f32 * 32.0;
+                scroll_container_state.scroll -= dy;
             }
-            scroll_container_state.scroll_x -= self.input().scroll_delta.0 as f32 * 32.0 / self.scale;
+            scroll_container_state.scroll_x -= dx / self.scale;
 
-            if self.input().key_pressed(KeyCode::PageUp) {
+            if self.input().key_pressed(KEY_PAGEUP) {
                 scroll_container_state.scroll -= scroll_container_state.viewport_height / self.scale;
             }
-            if self.input().key_pressed(KeyCode::PageDown) {
+            if self.input().key_pressed(KEY_PAGEDOWN) {
                 scroll_container_state.scroll += scroll_container_state.viewport_height / self.scale;
             }
-            if self.input().key_pressed(KeyCode::Home) {
+            if self.input().key_pressed(KEY_HOME) {
                 scroll_container_state.scroll = 0.0;
             }
-            if self.input().key_pressed(KeyCode::End) {
+            if self.input().key_pressed(KEY_END) {
                 scroll_container_state.scroll = max;
             }
         }
@@ -1095,7 +1102,7 @@ impl Context {
         }) {
             let button_id = ui::id("Scrollbar Handle");
             let colour = (0x60, 0x60, 0x60, 0);
-            let (activated, mut colour, _) = self.button_ex(true, colour, button_id, true, winit::window::CursorIcon::Default);
+            let (activated, mut colour, _) = self.button_ex(true, colour, button_id, true, CursorIcon::Default);
             colour.3 = colour.2;
 
             if self.mouse_pressed_id == button_id {
@@ -1244,7 +1251,7 @@ fn modal_action_button(
     enabled: bool,
 ) -> bool {
     let id = id(label);
-    let (clicked, colour, text_colour) = ui.button_ex(act_on_press, BUTTON_GREY, id, enabled, winit::window::CursorIcon::Default);
+    let (clicked, colour, text_colour) = ui.button_ex(act_on_press, BUTTON_GREY, id, enabled, CursorIcon::Default);
     if let _ = elem().decl(Decl {
         id,
         child_gap,
@@ -1280,7 +1287,7 @@ fn modal_clickable_icon(
     icon_hovered: &str,
     enabled: bool,
 ) -> bool {
-    let (clicked, colour, _) = ui.button_ex(true, (0xcc, 0xcc, 0xcc, 0xff), id, enabled, winit::window::CursorIcon::Pointer);
+    let (clicked, colour, _) = ui.button_ex(true, (0xcc, 0xcc, 0xcc, 0xff), id, enabled, CursorIcon::Pointer);
     let icon = if ui.hovered(id) { icon_hovered } else { icon };
     if let _ = elem().decl(Decl {
         id,
@@ -1577,11 +1584,11 @@ pub fn ui_left_pane(ui: &mut Context,
     }
     ui.nav_skip = false;
 
-    let shift_held = (ui.input().key_held(KeyCode::ShiftLeft)   || ui.input().key_held(KeyCode::ShiftRight));
-    let ctrl_held  = (ui.input().key_held(KeyCode::ControlLeft) || ui.input().key_held(KeyCode::ControlRight));
+    let shift_held = (ui.input().key_held(KEY_LEFTSHIFT)   || ui.input().key_held(KEY_RIGHTSHIFT));
+    let ctrl_held  = (ui.input().key_held(KEY_LEFTCTRL) || ui.input().key_held(KEY_RIGHTCTRL));
 
     // CTRL-TAB to switch between user and miner wallet.
-    if ui.input().key_pressed(KeyCode::Tab) && ctrl_held {
+    if ui.input().key_pressed(KEY_TAB) && ctrl_held {
         if *tab_id == tab_id_miner_wallet {
             *tab_id = tab_id_user_wallet;
         } else {
@@ -1737,13 +1744,13 @@ pub fn ui_left_pane(ui: &mut Context,
                     if let _ = elem().decl(Decl { id: id("Title Bar Right Side"), width: grow!(), align: Right, ..Decl }) && closeable {
                         let id = id("Close This Modal");
 
-                        let (clicked, colour, _) = ui.button_ex(false, BUTTON_GREY, id, true, winit::window::CursorIcon::Default);
-                        if clicked || (ui.input().key_pressed(KeyCode::Escape) && !ui.nav_enable) {
+                        let (clicked, colour, _) = ui.button_ex(false, BUTTON_GREY, id, true, CursorIcon::Default);
+                        if clicked || (ui.input().key_pressed(KEY_ESC) && !ui.nav_enable) {
                             ui.modal = Modal::None;
                         }
 
                         // Click background to exit -- the code could be placed farther outside but it is here so it can be gated by `closeable`
-                        if ui.hovered(container_id) && !ui.hovered(contents_id) && ui.input().mouse_pressed(winit::event::MouseButton::Left) {
+                        if ui.hovered(container_id) && !ui.hovered(contents_id) && ui.input().mouse_pressed(BTN_LEFT) {
                             ui.modal = Modal::None;
                             ui.mouse_pressed_id = id;
                         }
@@ -1770,7 +1777,7 @@ pub fn ui_left_pane(ui: &mut Context,
                     hsva.2 = ((hsva.2 as f32) * 1.25).min(255.0) as u8;
                     hsva.rgba()
                 };
-                let (clicked, colour, text_colour) = ui.button_ex(false, colour, id, enabled, winit::window::CursorIcon::Default);
+                let (clicked, colour, text_colour) = ui.button_ex(false, colour, id, enabled, CursorIcon::Default);
                 let radius = ui.scale(24.0);
                 if let _ = elem().decl(Decl {
                     id,
@@ -1816,7 +1823,7 @@ pub fn ui_left_pane(ui: &mut Context,
                             ..Decl
                         }) {
                             let pow_id = id("Jump To Pow");
-                            let (pow_clicked, pow_col, pow_txt) = ui.button_ex(true, BUTTON_GREY.mul(if !data.jump_target_pos { 1.0 } else { 0.8 }), pow_id, true, winit::window::CursorIcon::Pointer);
+                            let (pow_clicked, pow_col, pow_txt) = ui.button_ex(true, BUTTON_GREY.mul(if !data.jump_target_pos { 1.0 } else { 0.8 }), pow_id, true, CursorIcon::Pointer);
                             if let _ = elem().decl(Decl {
                                 id: pow_id,
                                 colour: pow_col,
@@ -1830,7 +1837,7 @@ pub fn ui_left_pane(ui: &mut Context,
                             }
 
                             let pos_id = id("Jump To Pos");
-                            let (pos_clicked, pos_col, pos_txt) = ui.button_ex(true, BUTTON_GREY.mul(if data.jump_target_pos { 1.0 } else { 0.8 }), pos_id, true, winit::window::CursorIcon::Pointer);
+                            let (pos_clicked, pos_col, pos_txt) = ui.button_ex(true, BUTTON_GREY.mul(if data.jump_target_pos { 1.0 } else { 0.8 }), pos_id, true, CursorIcon::Pointer);
                             if let _ = elem().decl(Decl {
                                 id: pos_id,
                                 colour: pos_col,
@@ -1860,7 +1867,7 @@ pub fn ui_left_pane(ui: &mut Context,
                         );
 
                         let can_jump = jump_text.trim().len() > 0;
-                        if button_ex(ui, id("Jump To Selected Height"), "Jump", can_jump) || (ui.input().key_pressed(KeyCode::Enter) && ui.nav_id == jump_input_id.id) {
+                        if button_ex(ui, id("Jump To Selected Height"), "Jump", can_jump) || (ui.input().key_pressed(KEY_ENTER) && ui.nav_id == jump_input_id.id) {
                             if let Ok(h) = jump_text.trim().parse::<u64>() {
                                 if data.jump_target_pos {
                                     viz.request_pos_height(h);
@@ -2383,7 +2390,7 @@ pub fn ui_left_pane(ui: &mut Context,
                                     ..Decl
                                 });
 
-                                let (activated, colour, text_colour) = ui.button_ex(true, colour, id, true, winit::window::CursorIcon::Pointer);
+                                let (activated, colour, text_colour) = ui.button_ex(true, colour, id, true, CursorIcon::Pointer);
 
                                 if let _ = elem().decl(Decl {
                                     id,
@@ -2519,7 +2526,7 @@ pub fn ui_left_pane(ui: &mut Context,
                                     ..Decl
                                 });
 
-                                let (activated, colour, text_colour) = ui.button_ex(true, colour, id, true, winit::window::CursorIcon::Pointer);
+                                let (activated, colour, text_colour) = ui.button_ex(true, colour, id, true, CursorIcon::Pointer);
                                 /*@TODO(Giovanni) FILL THESEEEEEE WTH ACTUAL DATA*/
                                 let height = 3000;
                                 let seconds_since_connected = 300;
@@ -2585,7 +2592,7 @@ pub fn ui_left_pane(ui: &mut Context,
 
                                             let colour = BUTTON_GREY.mul(0.6);
 
-                                            let (activated, colour, text_colour) = ui.button_ex(true, colour, id, true, winit::window::CursorIcon::Pointer);
+                                            let (activated, colour, text_colour) = ui.button_ex(true, colour, id, true, CursorIcon::Pointer);
 
                                             elem_bgn();
                                             decl(Decl {
@@ -2848,7 +2855,7 @@ pub fn ui_left_pane(ui: &mut Context,
 
             let button = |ui: &mut Context, enabled: bool, icon: &'static str, label: &'static str| {
                 let id = id(label);
-                let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_BLUE, id, enabled, winit::window::CursorIcon::Default);
+                let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_BLUE, id, enabled, CursorIcon::Default);
                 if let _ = elem().decl(Decl {
                     id, child_gap, align: Center,
                     direction: TopToBottom,
@@ -2983,7 +2990,7 @@ pub fn ui_left_pane(ui: &mut Context,
                             let skip_before = ui.nav_skip;
                             ui.nav_skip = true;
 
-                            let (clicked, _, _) = ui.button_ex(true, BLACK, id, true, winit::window::CursorIcon::Pointer);
+                            let (clicked, _, _) = ui.button_ex(true, BLACK, id, true, CursorIcon::Pointer);
                             let hovered = ui.hovered(id);
                             ui.nav_skip = skip_before;
 
@@ -3407,7 +3414,7 @@ pub fn ui_right_pane(ui: &mut Context,
 
         let button_ex = |ui: &mut Context, label, act_on_press, enabled: bool| {
             let id = id(label);
-            let (clicked, colour, text_colour) = ui.button_ex(act_on_press, BUTTON_GREY, id, enabled, winit::window::CursorIcon::Default);
+            let (clicked, colour, text_colour) = ui.button_ex(act_on_press, BUTTON_GREY, id, enabled, CursorIcon::Default);
             if let _ = elem().decl(Decl {
                 id,
                 child_gap,
@@ -3440,7 +3447,7 @@ pub fn ui_right_pane(ui: &mut Context,
 
         let clickable_icon = |ui: &mut Context, id, icon, enabled| {
 
-            let (clicked, colour, _) = ui.button_ex(false, (0xcc, 0xcc, 0xcc, 0xff) /* @todo colors */, id, enabled, winit::window::CursorIcon::Pointer);
+            let (clicked, colour, _) = ui.button_ex(false, (0xcc, 0xcc, 0xcc, 0xff) /* @todo colors */, id, enabled, CursorIcon::Pointer);
             if let _ = elem().decl(Decl {
                 id,
                 child_gap,
@@ -3477,7 +3484,7 @@ pub fn ui_right_pane(ui: &mut Context,
             let width = ui.scale(160.0);
             let radius = ui.scale(16.0);
             let finalizer_popup_id = id("Finalizer Popup Button");
-            let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, finalizer_popup_id, true, winit::window::CursorIcon::Pointer);
+            let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, finalizer_popup_id, true, CursorIcon::Pointer);
             let label = "Finalizer Filters";
             if let _ = elem().decl(Decl {
                 id: finalizer_popup_id,
@@ -3931,7 +3938,7 @@ pub fn ui_right_pane(ui: &mut Context,
         {
 
             let button_ex = |ui: &mut Context, id, label, act_on_press, enabled: bool| {
-                let (clicked, colour, text_colour) = ui.button_ex(act_on_press, BUTTON_GREY, id, enabled, winit::window::CursorIcon::Default);
+                let (clicked, colour, text_colour) = ui.button_ex(act_on_press, BUTTON_GREY, id, enabled, CursorIcon::Default);
                 if let _ = elem().decl(Decl {
                     id,
                     child_gap,
@@ -3999,22 +4006,22 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
     const MIN_ZOOM: f32 = 0.5;
     const MAX_ZOOM: f32 = 1.75; // @Todo: @PreventOverflowOnZoom
 
-    if ui.input().key_held(KeyCode::ControlLeft) || ui.input().key_held(KeyCode::ControlRight) {
+    if ui.input().key_held(KEY_LEFTCTRL) || ui.input().key_held(KEY_RIGHTCTRL) {
 
 
-        if ui.input().key_pressed(KeyCode::Equal) {
+        if ui.input().key_pressed(KEY_EQUAL) {
             let new_zoom = ui.zoom * (1.0f32 + 1.0f32 / 8f32);
             if new_zoom <= MAX_ZOOM {
                 ui.zoom = new_zoom;
             }
         }
-        if ui.input().key_pressed(KeyCode::Minus) {
+        if ui.input().key_pressed(KEY_MINUS) {
             let new_zoom = ui.zoom / (1.0f32 + 1.0f32 / 8f32);
             if new_zoom >= MIN_ZOOM {
                 ui.zoom = new_zoom;
             }
         }
-        if ui.input().key_pressed(KeyCode::Digit0) {
+        if ui.input().key_pressed(KEY_0) {
             ui.zoom = 1.0f32;
         }
     }
@@ -4026,11 +4033,11 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
     }
     ui.scale = ui.zoom * ui.dpi_scale;
 
-    ui.cursor = winit::window::Cursor::Icon(winit::window::CursorIcon::Default);
+    ui.cursor = CursorIcon::Default;
 
-    let shift_held = (ui.input().key_held(KeyCode::ShiftLeft)   || ui.input().key_held(KeyCode::ShiftRight));
-    let ctrl_held  = (ui.input().key_held(KeyCode::ControlLeft) || ui.input().key_held(KeyCode::ControlRight));
-    if ctrl_held && ui.input().key_pressed(KeyCode::KeyJ) {
+    let shift_held = (ui.input().key_held(KEY_LEFTSHIFT)   || ui.input().key_held(KEY_RIGHTSHIFT));
+    let ctrl_held  = (ui.input().key_held(KEY_LEFTCTRL) || ui.input().key_held(KEY_RIGHTCTRL));
+    if ctrl_held && ui.input().key_pressed(KEY_J) {
         ui.modal = Modal::Jump;
     }
 
@@ -4045,8 +4052,8 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
     let child_gap = ui.scale(12.0);
     let padding = child_gap.dup4();
 
-    let mouse_held    = ui.input().mouse_held(winit::event::MouseButton::Left);
-    let mouse_clicked = ui.input().mouse_pressed(winit::event::MouseButton::Left);
+    let mouse_held    = ui.input().mouse_held(BTN_LEFT);
+    let mouse_clicked = ui.input().mouse_pressed(BTN_LEFT);
 
     let radius = ui.scale(12.0).dup4();
 
@@ -4140,12 +4147,12 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
             let div_w = ui.scale(8.0);
             let div_hover = ui.hovered_raw(left_div_id);
             if div_hover || ui.mouse_pressed_id == left_div_id {
-                ui.cursor = winit::window::Cursor::Icon(winit::window::CursorIcon::EwResize);
+                ui.cursor = CursorIcon::EwResize;
             }
-            if div_hover && ui.input().mouse_pressed(MouseButton::Left) {
+            if div_hover && ui.input().mouse_pressed(BTN_LEFT) {
                 ui.mouse_pressed_id = left_div_id;
             }
-            if ui.mouse_pressed_id == left_div_id && ui.input().mouse_held(MouseButton::Left) {
+            if ui.mouse_pressed_id == left_div_id && ui.input().mouse_held(BTN_LEFT) {
                 let mx = ui.input().mouse_pos().0 as f32;
                 ui.left_pane_width = (mx / window_w).clamp(0.10, 0.45);
             }
@@ -4228,7 +4235,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                     }) {
 
                         let base = BUTTON_GREY.mul(0.85);
-                        let (activated, colour, text_colour) = ui.button_ex(true, base, combo_id, true, winit::window::CursorIcon::Pointer);
+                        let (activated, colour, text_colour) = ui.button_ex(true, base, combo_id, true, CursorIcon::Pointer);
                         net_activated = activated;
                         if let _ = elem().decl(Decl {
                             id: combo_id,
@@ -4279,7 +4286,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                         }) {
                             ui.nav_skip = true; // @Hack.
                             let mute_id = id("Mute Toggle");
-                            let (clicked, colour, _) = ui.button_ex(true, BUTTON_GREY.mul(0.9), mute_id, true, winit::window::CursorIcon::Pointer);
+                            let (clicked, colour, _) = ui.button_ex(true, BUTTON_GREY.mul(0.9), mute_id, true, CursorIcon::Pointer);
                             let icon = if ui.global_audio_volume > 0.01 { ICON_VOLUME_HIGH } else { ICON_VOLUME_OFF_1 };
                             if let _ = elem().decl(Decl {
                                 id: mute_id,
@@ -4411,7 +4418,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
 
                                 let tf_button = |ui: &mut Context, label: &str| -> bool {
                                     let button_id = id(label);
-                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, button_id, true, winit::window::CursorIcon::Default);
+                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, button_id, true, CursorIcon::Default);
                                     let radius = ui.scale(16.0);
                                     if ui.hovered(button_id) { ui.capture = true; }
                                     if let _ = elem().decl(Decl {
@@ -4496,7 +4503,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                 {
                     let label = "Jump To Height...";
                     let id = id(label);
-                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, id, true, winit::window::CursorIcon::Default);
+                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, id, true, CursorIcon::Default);
                     let radius = ui.scale(20.0);
 
                     if ui.hovered(id) {
@@ -4531,9 +4538,9 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                     let reset_enabled = !viz.follow_tip && (viz.camera_x != 0.0 || viz.camera_y != viz.bc_tip_y || viz.zoom != 0.0);
 
                     let (reset_clicked, reset_colour, reset_text_colour) = ui.button_ex(
-                        true, BUTTON_GREY, reset_id, reset_enabled, winit::window::CursorIcon::Default);
+                        true, BUTTON_GREY, reset_id, reset_enabled, CursorIcon::Default);
                     let (follow_clicked, follow_colour, follow_text_colour) = ui.button_ex(
-                        true, BUTTON_GREY.mul(if viz.follow_tip { 1.0 } else { 0.8 }), follow_id, true, winit::window::CursorIcon::Default);
+                        true, BUTTON_GREY.mul(if viz.follow_tip { 1.0 } else { 0.8 }), follow_id, true, CursorIcon::Default);
 
                     if ui.hovered(reset_id) || ui.hovered(follow_id) {
                         ui.capture = true;
@@ -4613,12 +4620,12 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
             let right_div_w = ui.scale(8.0);
             let right_div_hover = ui.hovered_raw(right_div_id);
             if right_div_hover || ui.mouse_pressed_id == right_div_id {
-                ui.cursor = winit::window::Cursor::Icon(winit::window::CursorIcon::EwResize);
+                ui.cursor = CursorIcon::EwResize;
             }
-            if right_div_hover && ui.input().mouse_pressed(MouseButton::Left) {
+            if right_div_hover && ui.input().mouse_pressed(BTN_LEFT) {
                 ui.mouse_pressed_id = right_div_id;
             }
-            if ui.mouse_pressed_id == right_div_id && ui.input().mouse_held(MouseButton::Left) {
+            if ui.mouse_pressed_id == right_div_id && ui.input().mouse_held(BTN_LEFT) {
                 let mx = ui.input().mouse_pos().0 as f32;
                 ui.right_pane_width = ((window_w - mx) / window_w).clamp(0.10, 0.45);
             }
@@ -4670,9 +4677,9 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
 
         let resize_hover = ui.hovered_raw(resize_id);
         if resize_hover || ui.mouse_pressed_id == resize_id {
-            ui.cursor = winit::window::Cursor::Icon(winit::window::CursorIcon::NwseResize);
+            ui.cursor = CursorIcon::NwseResize;
         }
-        if resize_hover && ui.input().mouse_pressed(MouseButton::Left) {
+        if resize_hover && ui.input().mouse_pressed(BTN_LEFT) {
             ui.mouse_pressed_id = resize_id;
         }
 
@@ -4772,7 +4779,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                             }) {
                                 {
                                     let copy_id = id("Block Inspector Copy Hash");
-                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, copy_id, true, winit::window::CursorIcon::Default);
+                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, copy_id, true, CursorIcon::Default);
                                     let radius = ui.scale(14.0);
                                     if let _ = elem().decl(Decl {
                                         id: copy_id,
@@ -4793,7 +4800,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                                 }
                                 {
                                     let copy_id = id("Block Inspector Copy Data");
-                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, copy_id, true, winit::window::CursorIcon::Default);
+                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, copy_id, true, CursorIcon::Default);
                                     let radius = ui.scale(14.0);
                                     if let _ = elem().decl(Decl {
                                         id: copy_id,
@@ -4814,7 +4821,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                                 }
                                 if let Some(BlockInspection::Pow(pow)) = viz.block_inspection.as_ref() && pow.serialized_hex.len() > 0 {
                                     let copy_id = id("Block Inspector Copy Hex");
-                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, copy_id, true, winit::window::CursorIcon::Default);
+                                    let (clicked, colour, text_colour) = ui.button_ex(true, BUTTON_GREY, copy_id, true, CursorIcon::Default);
                                     let radius = ui.scale(14.0);
                                     if let _ = elem().decl(Decl {
                                         id: copy_id,
@@ -4857,7 +4864,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                     }) {
                         if v_scroll_active {
                             let v_scroll_handle_id = ui::id("Block Inspector V Scrollbar Handle");
-                            let (_, mut v_colour, _) = ui.button_ex(true, (0x60, 0x60, 0x60, 0), v_scroll_handle_id, true, winit::window::CursorIcon::Default);
+                            let (_, mut v_colour, _) = ui.button_ex(true, (0x60, 0x60, 0x60, 0), v_scroll_handle_id, true, CursorIcon::Default);
                             v_colour.3 = v_colour.2;
 
                             if ui.mouse_pressed_id == v_scroll_handle_id {
@@ -4895,7 +4902,7 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
                     let handle_offset_x = scroll_pct_x * (scrollbar_region_w - handle_w);
 
                     let h_scroll_handle_id = ui::id("Block Inspector H Scrollbar Handle");
-                    let (_, mut h_colour, _) = ui.button_ex(true, (0x60, 0x60, 0x60, 0), h_scroll_handle_id, true, winit::window::CursorIcon::Default);
+                    let (_, mut h_colour, _) = ui.button_ex(true, (0x60, 0x60, 0x60, 0), h_scroll_handle_id, true, CursorIcon::Default);
                     h_colour.3 = h_colour.2;
 
                     if ui.mouse_pressed_id == h_scroll_handle_id {
@@ -4983,11 +4990,11 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
         }
     }
 
-    if !ui.input().mouse_held(winit::event::MouseButton::Left) {
+    if !ui.input().mouse_held(BTN_LEFT) {
         ui.mouse_pressed_id = Id::default();
     }
     if ui.mouse_pressed_id == Id::default() {
-        if ui.input().mouse_pressed(winit::event::MouseButton::Left) {
+        if ui.input().mouse_pressed(BTN_LEFT) {
             // ui.nav_enable = false;
         }
     } else {
@@ -5008,11 +5015,11 @@ pub fn run_ui(ui: &mut Context, wallet_state: Arc<Mutex<WalletState>>, data: &mu
         ui.nav_id = 0;
         ui.nav_enable = false;
     }
-    // if ui.input().key_pressed(KeyCode::Escape) {
+    // if ui.input().key_pressed(KEY_ESC) {
     //     ui.nav_enable = false;
     // }
 
-    if ui.input().key_pressed(KeyCode::Tab) && !ctrl_held && ui.nav_idx_to_id.len() > 0 {
+    if ui.input().key_pressed(KEY_TAB) && !ctrl_held && ui.nav_idx_to_id.len() > 0 {
         let idx = if ui.nav_id != 0 {
             let old_idx = ui.nav_id_to_idx[&ui.nav_id] as isize;
             if shift_held {
@@ -5261,8 +5268,8 @@ pub struct Context {
 
     pub global_audio_volume: f32,
 
-    pub cursor: winit::window::Cursor,
-    pub prev_cursor: winit::window::Cursor,
+    pub cursor: CursorIcon,
+    pub prev_cursor: CursorIcon,
 
     pub debug: bool,
     pub frame_graph: bool,
