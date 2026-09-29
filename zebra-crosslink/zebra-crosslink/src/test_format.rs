@@ -99,8 +99,9 @@ static TF_INSTR_KIND_STRS: [&str; TFInstr::COUNT as usize] = {
     strs[TFInstr::EXPECT_POOL_TOTALS as usize] = "EXPECT_POOL_TOTALS";
     strs[TFInstr::RECV_POW as usize] = "RECV_POW";
     strs[TFInstr::RECV_STP_PACKET as usize] = "RECV_STP_PACKET";
+    strs[TFInstr::MINE_FROM_TEMPLATE as usize] = "MINE_FROM_TEMPLATE";
 
-    const_assert!(TFInstr::COUNT == 20);
+    const_assert!(TFInstr::COUNT == 21);
     strs
 };
 
@@ -158,7 +159,11 @@ impl TFInstr {
     /// An STP application packet (the data, type byte first) arriving from synthetic peer
     /// `val[0]`. Fails when the node kills the peer for it; any other handling passes.
     pub const RECV_STP_PACKET: TFInstrKind = 19;
-    pub const COUNT: TFInstrKind = 20;
+    /// The node builds a block from its own getblocktemplate response, as its miner does, and
+    /// the block is submitted through the LOAD_POW doorway. Accepted and rejected as LOAD_POW is;
+    /// also rejected when no template or block could be made.
+    pub const MINE_FROM_TEMPLATE: TFInstrKind = 20;
+    pub const COUNT: TFInstrKind = 21;
 
     pub fn str_from_kind(kind: TFInstrKind) -> &'static str {
         let kind = kind as usize;
@@ -230,6 +235,7 @@ impl TFInstr {
                     Err(_) => format!("{} unparseable bytes from peer {peer}", block.len()),
                 }
             }
+            Some(TestInstr::MineFromTemplate) => {}
             Some(TestInstr::RecvStpPacket { packet, peer }) => {
                 str += &format!("type {:?}, {} bytes from peer {peer}", packet.first(), packet.len())
             }
@@ -483,6 +489,10 @@ impl TF {
 
     pub fn push_instr_recv_stp_packet(&mut self, packet: &[u8], peer: u64, flags: u32) {
         self.push_instr_ex(TFInstr::RECV_STP_PACKET, flags, packet, [peer, 0])
+    }
+
+    pub fn push_instr_mine_from_template(&mut self, flags: u32) {
+        self.push_instr_ex(TFInstr::MINE_FROM_TEMPLATE, flags, &[0; 0], [0; 2])
     }
 
     /// A block the node must reject for `reason`, and must survive rejecting: the load, the
@@ -749,7 +759,7 @@ pub fn crosslink_parameters_for_test(bytes: &[u8]) -> ZcashCrosslinkParameters {
 }
 
 pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> {
-    const_assert!(TFInstr::COUNT == 20);
+    const_assert!(TFInstr::COUNT == 21);
     match instr.kind {
         TFInstr::LOAD_POW => {
             let block = Block::zcash_deserialize(instr.data_slice(bytes)).ok()?;
@@ -836,6 +846,7 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             block: instr.data_slice(bytes).to_vec(),
             peer: instr.val[0],
         }),
+        TFInstr::MINE_FROM_TEMPLATE => Some(TestInstr::MineFromTemplate),
         TFInstr::RECV_STP_PACKET => Some(TestInstr::RecvStpPacket {
             packet: instr.data_slice(bytes).to_vec(),
             peer: instr.val[0],
@@ -871,6 +882,7 @@ pub(crate) enum TestInstr {
     /// Raw bytes: the peer serves exactly what the file holds, parseable or not.
     RecvPoW { block: Vec<u8>, peer: u64 },
     RecvStpPacket { packet: Vec<u8>, peer: u64 },
+    MineFromTemplate,
     RosterForceInclude([u8; 32], u64),   // public address
     ExpectRosterIncludes([u8; 32], u64), // public address
 }
@@ -889,18 +901,28 @@ pub(crate) async fn handle_instr(
             // let mut file = std::fs::File::create(&path).expect("valid file");
             // file.write_all(instr.data_slice(bytes));
 
-            // Route through new_network's ingest queue -- the same doorway submit_block uses --
-            // so the tests exercise the production admission path rather than a parallel one.
-            let (force_feed_ok, msg) = match zebra_state::new_network::submit_block_to_new_network(
-                Arc::new(block),
-                std::time::Duration::from_secs(30),
-            ).await {
-                Ok(zebra_state::new_network::IngestOutcome::Committed(_)) => (true, "PoW ingest ok".to_string()),
-                Ok(zebra_state::new_network::IngestOutcome::Known { .. }) => (true, "PoW already known".to_string()),
-                Ok(zebra_state::new_network::IngestOutcome::Failed { reason, .. }) => (false, reason),
-                Err(msg) => (false, msg),
-            };
+            let (force_feed_ok, msg) = ingest_pow(Arc::new(block)).await;
             test_check(flags, force_feed_ok, &msg);
+        }
+
+        TestInstr::MineFromTemplate => {
+            let (accepted, message) = match internal_handle.call.block_from_template.get() {
+                None => (false, "MINE_FROM_TEMPLATE: the node has no RPC implementation to take a template from".to_string()),
+                Some(block_from_template) => match block_from_template().await {
+                    Err(err) => (false, format!("MINE_FROM_TEMPLATE: {err}")),
+                    Ok(block) => {
+                        let label = format!(
+                            "MINE_FROM_TEMPLATE {} @ {:?}, {} transaction(s)",
+                            block.hash(),
+                            block.coinbase_height().map(|height| height.0),
+                            block.transactions.len()
+                        );
+                        let (accepted, verdict) = ingest_pow(Arc::new(block)).await;
+                        (accepted, format!("{label}: {verdict}"))
+                    }
+                },
+            };
+            test_check(flags, accepted, &message);
         }
 
         TestInstr::LoadPoS((block, fat_ptr)) => {
@@ -1227,6 +1249,18 @@ const STP_PACKET_SETTLE: Duration = Duration::from_secs(1);
 /// How long to watch a peer advertise a block the node already has. The node never requests it,
 /// so there is no verdict to wait for, only a kill to rule out.
 const KNOWN_BLOCK_SETTLE: Duration = Duration::from_secs(2);
+
+/// Through new_network's ingest queue, the doorway submitblock uses, so blocks take the
+/// production admission path rather than a parallel one.
+async fn ingest_pow(block: Arc<Block>) -> (bool, String) {
+    use zebra_state::new_network::IngestOutcome;
+    match zebra_state::new_network::submit_block_to_new_network(block, NODE_ANSWER_WAIT).await {
+        Ok(IngestOutcome::Committed(_)) => (true, "PoW ingest ok".to_string()),
+        Ok(IngestOutcome::Known { .. }) => (true, "PoW already known".to_string()),
+        Ok(IngestOutcome::Failed { reason, .. }) => (false, reason),
+        Err(msg) => (false, msg),
+    }
+}
 
 fn take_stp_peer(index: u64) -> HarnessStpPeer {
     let mut peers = TEST_STP_PEERS.lock().unwrap();

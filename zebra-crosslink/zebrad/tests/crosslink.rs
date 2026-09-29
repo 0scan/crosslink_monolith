@@ -74,6 +74,15 @@ pub fn test_start() {
                 },
             );
             base.state.ephemeral = true;
+            // getblocktemplate refuses to build a coinbase without one (MINE_FROM_TEMPLATE). The
+            // test miner's key, so scenarios can spend what the node's templates pay out.
+            base.mining.miner_address = Some(
+                TestKey::new(b"crosslink test miner")
+                    .address()
+                    .encode(&base.network.network)
+                    .parse()
+                    .expect("an encoded address parses"),
+            );
 
             Some(std::sync::Arc::new(base))
         };
@@ -1481,6 +1490,38 @@ fn crosslink_gen_pow_fork() {
     // P  LOAD_POW (6 - bbb0e46c50d3730cd217c073b3da08929d33ec8cd5800b5226027c7a48ba016c, parent: 8fde5bb6d9d7b21795b06da74b574167628fce2cf5f651ddc41d9d33dc76ca8e)
     // P  LOAD_POW (7 - 879e7c77dd9c141689ff4f05bb0b80e153639062b5371f2ffced3acaaf563d31, parent: bbb0e46c50d3730cd217c073b3da08929d33ec8cd5800b5226027c7a48ba016c)
     // P  EXPECT_POW_CHAIN_LENGTH (8)
+
+    test_bytes(tf.write_to_bytes());
+}
+
+#[test]
+fn crosslink_mine_from_template() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let key = TestKey::new(b"crosslink test miner");
+    let miner = key.address();
+    let mut gen = BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    let mut chain_length = 2;
+    while gen.mature_coinbase_for(&key).is_none() {
+        tf.push_instr_load_pow(&gen.next_block(&miner), 0);
+        chain_length += 1;
+    }
+
+    // mempool to block the way production does it: the node's own template picks the spend up
+    let spend = transparent_spend(&key, gen.mature_coinbase_for(&key).expect("matured above"));
+    tf.push_instr_submit_tx(&spend, 0);
+    tf.push_instr_expect_mempool_contains(&spend, 0);
+    tf.push_instr_mine_from_template(0);
+    tf.push_instr_expect_mempool_absent(&spend, 0);
+
+    for _ in 0..2 {
+        tf.push_instr_mine_from_template(0);
+    }
+    tf.push_instr_expect_pow_chain_length(chain_length + 3, 0);
+    tf.push_instr_expect_node_alive(0);
 
     test_bytes(tf.write_to_bytes());
 }

@@ -107,7 +107,12 @@ impl Ingest {
             .expect("tokio runtime");
 
         let latest_chain_tip = rt.block_on(async {
-            let network = Network::new_regtest(Default::default());
+            // The corpus is built for the test-format harness's network; on any other the
+            // coinbase amounts differ and every seed is rejected before reaching deeper checks.
+            let network = Network::new_regtest(zebra_chain::parameters::testnet::RegtestParameters {
+                crosslink: Some(zebra_crosslink::test_format::HARNESS_PARAMETERS),
+                ..Default::default()
+            });
 
             // `ephemeral()` already sets network_local_port = 0 and network_initial_peers = [],
             // so the sync loop's STP thread binds an ephemeral port and never connects.

@@ -94,6 +94,14 @@ pub(crate) type InboundWireProcedure = Arc<
         + Sync,
 >;
 
+/// Builds a block from the node's getblocktemplate response, as the node's own miner does,
+/// without submitting it.
+pub(crate) type BlockFromTemplateProcedure = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<zebra_chain::block::Block, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// `TFLServiceCalls` encapsulates the service calls that this service needs to make to other services.
 /// Simply put, it is a function pointer bundle for all outgoing calls to the rest of Zebra.
 #[derive(Clone)]
@@ -102,6 +110,9 @@ pub struct TFLServiceCalls {
     pub(crate) read_state: ReadStateServiceProcedure,
     pub(crate) mempool: MempoolServiceProcedure,
     pub(crate) inbound_wire: InboundWireProcedure,
+    /// Set once the RPC implementation exists: it is built after this service, and takes this
+    /// service as an input, so it cannot be passed in at spawn time.
+    pub(crate) block_from_template: Arc<std::sync::OnceLock<BlockFromTemplateProcedure>>,
 }
 impl fmt::Debug for TFLServiceCalls {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -120,6 +131,7 @@ pub fn spawn_new_tfl_service(
     read_state_service_call: ReadStateServiceProcedure,
     mempool_service_call: MempoolServiceProcedure,
     inbound_wire_call: InboundWireProcedure,
+    block_from_template: Arc<std::sync::OnceLock<BlockFromTemplateProcedure>>,
     config: crate::config::Config,
     params: ZcashCrosslinkParameters,
     network: zebra_chain::parameters::Network,
@@ -138,6 +150,7 @@ pub fn spawn_new_tfl_service(
             read_state: read_state_service_call,
             mempool: mempool_service_call,
             inbound_wire: inbound_wire_call,
+            block_from_template,
         },
         config,
         params,

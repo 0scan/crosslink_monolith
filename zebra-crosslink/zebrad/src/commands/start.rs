@@ -552,6 +552,7 @@ impl StartCmd {
         let submit_block_channel = SubmitBlockChannel::new();
 
         let mempool2 = mempool.clone();
+        let block_from_template = Arc::new(std::sync::OnceLock::new());
         info!("spawning tfl service task");
         let (tfl_handle, tfl_service_task_handle) = {
             let state = state.clone();
@@ -585,6 +586,7 @@ impl StartCmd {
                         })
                     })
                 },
+                block_from_template.clone(),
                 config.crosslink.clone(),
                 config.network.network.crosslink_parameters(),
                 config.network.network.clone(),
@@ -671,6 +673,30 @@ impl StartCmd {
         let rpc_impl = rpc_impl.with_end_of_support_height(
             sync::end_of_support::end_of_support_height(&config.network.network),
         );
+
+        // The internal miner's template-to-block step, without the solver: PoW is disabled on
+        // every network the test harness runs.
+        {
+            use zebra_rpc::methods::RpcServer as _;
+            let rpc_impl = rpc_impl.clone();
+            let _ = block_from_template.set(Arc::new(move || {
+                let rpc_impl = rpc_impl.clone();
+                Box::pin(async move {
+                    let template = rpc_impl
+                        .get_block_template(None)
+                        .await
+                        .map_err(|err| format!("getblocktemplate failed: {err:?}"))?
+                        .try_into_template()
+                        .ok_or("getblocktemplate answered with a proposal, not a template")?;
+                    zebra_rpc::proposal_block_from_template(
+                        &template,
+                        zebra_rpc::client::BlockTemplateTimeSource::CurTime,
+                        rpc_impl.network(),
+                    )
+                    .map_err(|err| format!("the template does not make a block: {err}"))
+                }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+            }));
+        }
 
         let rpc_task_handle = if config.rpc.listen_addr.is_some() {
             RpcServer::start(rpc_impl.clone(), config.rpc.clone())
