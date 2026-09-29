@@ -1179,6 +1179,10 @@ struct BlockGen {
     history_tree: HistoryTree,
 
     tip: Arc<Block>,
+
+    // Every output of every generated block not yet spent by a generated block, so a block's
+    // coinbase can include its transactions' fees and a test can find coinbase to spend.
+    utxos: std::collections::HashMap<zebra_chain::transparent::OutPoint, zebra_chain::transparent::Utxo>,
 }
 
 impl BlockGen {
@@ -1190,14 +1194,17 @@ impl BlockGen {
 
     #[allow(dead_code)]
     pub fn init_regtest_at_tip(tip: Arc<Block>) -> Self {
-        BlockGen {
+        let mut gen = BlockGen {
             network: Network::new_regtest(Default::default()),
             sapling_root: sapling::tree::NoteCommitmentTree::default().root(),
             orchard_root: orchard::tree::NoteCommitmentTree::default().root(),
             ironwood_root: orchard::tree::NoteCommitmentTree::default().root(),
             history_tree: HistoryTree::default(),
-            tip,
-        }
+            tip: tip.clone(),
+            utxos: Default::default(),
+        };
+        gen.record_block(&tip);
+        gen
     }
 
     pub fn init_at_genesis_plus_1(
@@ -1223,6 +1230,7 @@ impl BlockGen {
         let difficulty_threshold =
             CompactDifficulty::from_bytes_in_display_order(&[0x20, 0x0f, 0x0f, 0x0f]).unwrap();
 
+        // Nothing precedes this block but genesis, so its transactions spend nothing and pay no fee.
         let tip = BlockGen::create_block(
             &network,
             miner_addr,
@@ -1232,15 +1240,64 @@ impl BlockGen {
             &history_tree,
             difficulty_threshold,
             extra_txs,
+            zebra_chain::amount::Amount::zero(),
         );
-        BlockGen {
+        let mut gen = BlockGen {
             network,
             history_tree,
             sapling_root: sapling::tree::NoteCommitmentTree::default().root(),
             orchard_root: orchard::tree::NoteCommitmentTree::default().root(),
             ironwood_root: orchard::tree::NoteCommitmentTree::default().root(),
-            tip,
+            tip: tip.clone(),
+            utxos: Default::default(),
+        };
+        gen.record_block(&tip);
+        gen
+    }
+
+    /// Records `block`'s outputs as unspent and removes the outputs it spends.
+    fn record_block(&mut self, block: &Block) {
+        let height = block.coinbase_height().expect("generated blocks have a height");
+        for tx in &block.transactions {
+            for outpoint in tx.spent_outpoints() {
+                self.utxos.remove(&outpoint);
+            }
+            let hash = tx.hash();
+            for (index, output) in tx.outputs().iter().enumerate() {
+                self.utxos.insert(
+                    zebra_chain::transparent::OutPoint::from_usize(hash, index),
+                    zebra_chain::transparent::Utxo { output: output.clone(), height, from_coinbase: tx.is_coinbase() },
+                );
+            }
         }
+    }
+
+    /// The total fee `txs` pay, which the block's coinbase must include (NU6 onward requires its
+    /// outputs to equal the subsidy plus the fees exactly). A transaction whose value doesn't
+    /// balance contributes nothing: tests build such transactions to check they are rejected.
+    fn fees(&self, txs: &[Arc<Transaction>]) -> zebra_chain::amount::Amount<zebra_chain::amount::NonNegative> {
+        let mut total = zebra_chain::amount::Amount::zero();
+        for tx in txs {
+            let Ok(value_balance) = tx.value_balance(&self.utxos) else { continue };
+            let Ok(fee) = value_balance.remaining_transaction_value() else { continue };
+            total = (total + fee).expect("test fees fit in an amount");
+        }
+        total
+    }
+
+    /// The oldest unspent coinbase output paying `key` that the next block may spend.
+    fn mature_coinbase_for(&self, key: &TestKey) -> Option<(zebra_chain::transparent::OutPoint, zebra_chain::transparent::Output)> {
+        let next_height = self.tip.coinbase_height().expect("generated blocks have a height").0 + 1;
+        let lock_script = key.lock_script();
+        self.utxos
+            .iter()
+            .filter(|(_, utxo)| {
+                utxo.from_coinbase
+                    && utxo.output.lock_script == lock_script
+                    && next_height >= utxo.height.0 + zebra_chain::transparent::MIN_TRANSPARENT_COINBASE_MATURITY
+            })
+            .min_by_key(|(outpoint, utxo)| (utxo.height, outpoint.hash.0, outpoint.index))
+            .map(|(outpoint, utxo)| (*outpoint, utxo.output.clone()))
     }
 
     pub fn create_block(
@@ -1252,13 +1309,13 @@ impl BlockGen {
         history_tree: &HistoryTree,
         difficulty_threshold: CompactDifficulty,
         extra_txs: &[Arc<Transaction>],
+        txs_fee: zebra_chain::amount::Amount<zebra_chain::amount::NonNegative>,
     ) -> Arc<zebra_chain::block::Block> {
         // Build the coinbase the same way the production miner path does. Ironwood v6 removed
         // the old `standard_coinbase_outputs` / `Transaction::new_v*_coinbase` helpers, so we go
         // MinerParams -> TransactionTemplate::new_coinbase -> deserialize. This is
-        // network-agnostic (not regtest-specific), which is what the fuzzer needs too. Extra txs
-        // must be zero-fee: NU6 onward requires coinbase outputs == subsidy + fees exactly, so the
-        // coinbase fee is 0.
+        // network-agnostic (not regtest-specific), which is what the fuzzer needs too. NU6 onward
+        // requires coinbase outputs == subsidy + fees exactly, so the caller passes `txs_fee`.
         use zebra_rpc::methods::types::get_block_template::MinerParams;
         use zebra_rpc::methods::types::transaction::TransactionTemplate;
         let mining_config = zebra_rpc::config::mining::Config {
@@ -1272,7 +1329,7 @@ impl BlockGen {
             network,
             height,
             &miner_params,
-            zebra_chain::amount::Amount::zero(),
+            txs_fee,
         )
         .expect("valid coinbase template")
         .data()
@@ -1360,6 +1417,7 @@ impl BlockGen {
 
         let difficulty_threshold =
             CompactDifficulty::from_bytes_in_display_order(&[0x20, 0x0f, 0x0f, 0x0f]).unwrap();
+        let fees = self.fees(extra_txs);
         self.tip = BlockGen::create_block(
             &self.network,
             miner_addr,
@@ -1369,7 +1427,10 @@ impl BlockGen {
             &self.history_tree,
             difficulty_threshold,
             extra_txs,
+            fees,
         );
+        let tip = self.tip.clone();
+        self.record_block(&tip);
 
         self.tip.clone()
     }
@@ -1507,35 +1568,206 @@ fn signed_staking_tx(
     expiry_height: u32,
     action: impl Fn([u8; 32], [u8; 64]) -> zcash_primitives::transaction::StakingAction,
 ) -> Arc<Transaction> {
-    use zebra_chain::transaction::HashType;
+    signed_tx(None, &[], Vec::new(), Some((bond_seed, &action)), expiry_height)
+}
 
-    let (_, bond_signing_key, bond_pub_key) =
-        zebra_crosslink::rng_private_public_key_from_address(bond_seed);
+/// A transparent key a test holds. BlockGen can mine to its address, so the test can spend what
+/// the coinbase pays it.
+#[derive(Clone)]
+struct TestKey {
+    secret: secp256k1::SecretKey,
+    public: secp256k1::PublicKey,
+}
+
+impl TestKey {
+    fn new(seed: &[u8]) -> Self {
+        use sha2::Digest;
+
+        let secret = secp256k1::SecretKey::from_slice(&sha2::Sha256::digest(seed))
+            .expect("a SHA-256 digest is a valid secret key");
+        let public = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret);
+        TestKey { secret, public }
+    }
+
+    fn pub_key_hash(&self) -> [u8; 20] {
+        use ripemd::Digest as _;
+        use sha2::Digest as _;
+
+        ripemd::Ripemd160::digest(sha2::Sha256::digest(self.public.serialize())).into()
+    }
+
+    /// The address to pass BlockGen as its miner address.
+    fn address(&self) -> Address {
+        Address::Transparent(zcash_transparent::address::TransparentAddress::PublicKeyHash(self.pub_key_hash()))
+    }
+
+    fn lock_script(&self) -> zebra_chain::transparent::Script {
+        zebra_chain::transparent::Address::from_pub_key_hash(zebra_chain::parameters::NetworkKind::Regtest, self.pub_key_hash())
+            .script()
+    }
+
+    /// A P2PKH unlock script: the signature over `sighash` (SIGHASH_ALL), then the public key.
+    fn unlock_script(&self, sighash: &[u8]) -> zebra_chain::transparent::Script {
+        let message = secp256k1::Message::from_digest_slice(sighash).expect("a sighash is 32 bytes");
+        let signature = secp256k1::Secp256k1::new().sign_ecdsa(&message, &self.secret).serialize_der();
+        let public = self.public.serialize();
+
+        let mut script = Vec::new();
+        script.push(signature.len() as u8 + 1);
+        script.extend_from_slice(&signature);
+        script.push(0x01);
+        script.push(public.len() as u8);
+        script.extend_from_slice(&public);
+        zebra_chain::transparent::Script::new(&script)
+    }
+}
+
+/// A VCrosslink transaction spending `inputs`, all locked to `key`, into `outputs`, optionally
+/// carrying a staking action signed by the bond key its seed names. The fee is whatever the inputs
+/// leave over; the caller picks it by choosing the outputs.
+///
+/// Signing order doesn't matter: the staking action signs the sighash with no input selected,
+/// which commits to the inputs' outpoints and amounts but not their unlock scripts, and each input
+/// signs a sighash that covers the staking action without its signature.
+fn signed_tx(
+    key: Option<&TestKey>,
+    inputs: &[(zebra_chain::transparent::OutPoint, zebra_chain::transparent::Output)],
+    outputs: Vec<zebra_chain::transparent::Output>,
+    staking: Option<(&[u8], &dyn Fn([u8; 32], [u8; 64]) -> zcash_primitives::transaction::StakingAction)>,
+    expiry_height: u32,
+) -> Arc<Transaction> {
+    use zebra_chain::transaction::HashType;
 
     // must match NetworkUpgrade::current at the block's height: regtest activates every upgrade
     // at height 1, so this is the last row of REGTEST_NETWORK_UPGRADES and moves with it (NU6
     // until 57d335cc added NU6.1 through NU6.3).
     let network_upgrade = NetworkUpgrade::Nu6_3;
-    let tx_with_signature = |signature: [u8; 64]| {
+    let build = |unlock_scripts: &[zebra_chain::transparent::Script], staking_signature: [u8; 64]| {
+        let inputs = inputs
+            .iter()
+            .zip(unlock_scripts)
+            .map(|((outpoint, _), unlock_script)| zebra_chain::transparent::Input::PrevOut {
+                outpoint: *outpoint,
+                unlock_script: unlock_script.clone(),
+                sequence: u32::MAX,
+            })
+            .collect();
+        let staking_action = staking.map(|(bond_seed, action)| {
+            let bond_pub_key = zebra_crosslink::rng_private_public_key_from_address(bond_seed).2;
+            action(bond_pub_key.0, staking_signature)
+        });
         Arc::new(Transaction::VCrosslink {
             network_upgrade,
             lock_time: LockTime::unlocked(),
             expiry_height: BlockHeight(expiry_height),
-            inputs: Vec::new(),
-            outputs: Vec::new(),
+            inputs,
+            outputs: outputs.clone(),
             sapling_shielded_data: None,
             orchard_shielded_data: None,
             ironwood_shielded_data: None,
-            staking_action: Some(action(bond_pub_key.0, signature)),
+            staking_action,
         })
     };
 
+    let blank_scripts = vec![zebra_chain::transparent::Script::new(&[]); inputs.len()];
+    let previous_outputs = Arc::new(inputs.iter().map(|(_, output)| output.clone()).collect::<Vec<_>>());
+
     // The sighash covers the action without its signature (`sa.unsigned().tree_hash()` in
     // sighash.rs), so signing what the unsigned transaction hashes to leaves that hash unchanged.
-    let sighash = tx_with_signature([0; 64])
-        .sighash(network_upgrade, HashType::ALL, Arc::new(Vec::new()), None)
-        .expect("a staking-only VCrosslink transaction has a sighash");
-    tx_with_signature(bond_signing_key.sign(sighash.as_ref()).into())
+    let staking_signature = match staking {
+        Some((bond_seed, _)) => {
+            let bond_signing_key = zebra_crosslink::rng_private_public_key_from_address(bond_seed).1;
+            let sighash = build(&blank_scripts, [0; 64])
+                .sighash(network_upgrade, HashType::ALL, previous_outputs.clone(), None)
+                .expect("a VCrosslink transaction has a sighash");
+            bond_signing_key.sign(sighash.as_ref()).into()
+        }
+        None => [0; 64],
+    };
+
+    let unsigned = build(&blank_scripts, staking_signature);
+    let unlock_scripts: Vec<_> = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, (_, output))| {
+            let key = key.expect("a transaction with inputs needs the key they are locked to");
+            let script_code = output.lock_script.as_raw_bytes().to_vec();
+            let sighash = unsigned
+                .sighash(network_upgrade, HashType::ALL, previous_outputs.clone(), Some((index, script_code)))
+                .expect("a VCrosslink transaction has a sighash");
+            key.unlock_script(sighash.as_ref())
+        })
+        .collect();
+    build(&unlock_scripts, staking_signature)
+}
+
+/// The fee a test transaction pays for the mempool to accept it: the ZIP-317 conventional fee, and
+/// at least the cap of the size-based minimum relay fee.
+///
+/// The floor matters today: `conventional_actions` counts a VCrosslink transaction without a
+/// staking action as 0 actions (STAKING_AUDIT S8), so its conventional fee is 0 and only the relay
+/// fee rule applies. Once S8 is fixed the conventional fee takes over.
+fn mempool_fee(draft: &Transaction) -> zebra_chain::amount::Amount<zebra_chain::amount::NonNegative> {
+    use zebra_chain::transaction::zip317;
+
+    let relay_cap = zebra_chain::amount::Amount::<zebra_chain::amount::NonNegative>::try_from(
+        zip317::MEMPOOL_TX_FEE_REQUIREMENT_CAP as u64,
+    )
+    .expect("the relay fee cap is a valid amount");
+    std::cmp::max(zip317::conventional_fee(draft), relay_cap)
+}
+
+/// Spends `input` back to `key`, paying `mempool_fee`.
+fn transparent_spend(
+    key: &TestKey,
+    input: (zebra_chain::transparent::OutPoint, zebra_chain::transparent::Output),
+) -> Arc<Transaction> {
+    let input_value = input.1.value;
+    let change = |fee: zebra_chain::amount::Amount<zebra_chain::amount::NonNegative>| {
+        vec![zebra_chain::transparent::Output::new(
+            (input_value - fee).expect("the input covers the fee"),
+            key.lock_script(),
+        )]
+    };
+    // The conventional fee depends only on the transaction's shape, not its amounts.
+    let draft = signed_tx(Some(key), &[input.clone()], change(zebra_chain::amount::Amount::zero()), None, 0);
+    let fee = mempool_fee(&draft);
+    signed_tx(Some(key), &[input], change(fee), None, 0)
+}
+
+/// Bonds `amount_zats` to `target`, funded by `input` (locked to `key`), which also pays
+/// `mempool_fee`; the rest comes back to `key`. Unlike an input-less staking action,
+/// this pays a fee, so the mempool admits it.
+fn staking_tx_create_bond_funded(
+    bond_seed: &[u8],
+    target_finalizer: zcash_primitives::bft::FinalizerAddress,
+    amount_zats: u64,
+    key: &TestKey,
+    input: (zebra_chain::transparent::OutPoint, zebra_chain::transparent::Output),
+) -> Arc<Transaction> {
+    use zcash_primitives::transaction::StakingAction;
+
+    let create = move |unique_pubkey, signature| StakingAction::CreateNewDelegationBond {
+        amount_zats,
+        unique_pubkey,
+        bond_salt: [0; 32],
+        target_finalizer,
+        signature,
+    };
+    let bonded = zebra_chain::amount::Amount::<zebra_chain::amount::NonNegative>::try_from(amount_zats)
+        .expect("a test bond amount is a valid amount");
+    let input_value = input.1.value;
+    let change = |fee: zebra_chain::amount::Amount<zebra_chain::amount::NonNegative>| {
+        let spent = (bonded + fee).expect("bond plus fee is a valid amount");
+        vec![zebra_chain::transparent::Output::new(
+            (input_value - spent).expect("the input covers the bond and the fee"),
+            key.lock_script(),
+        )]
+    };
+    // The conventional fee depends only on the transaction's shape, not its amounts.
+    let draft = signed_tx(Some(key), &[input.clone()], change(zebra_chain::amount::Amount::zero()), Some((bond_seed, &create)), 0);
+    let fee = mempool_fee(&draft);
+    signed_tx(Some(key), &[input], change(fee), Some((bond_seed, &create)), 0)
 }
 
 fn staking_tx_unbond(bond_seed: &[u8]) -> Arc<Transaction> {
@@ -2243,6 +2475,62 @@ fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block(
     let block = gen.next_block_with_txs(&miner_addr, &[staking_tx_withdraw(b"bond-a", 0, 0)]);
     tf.push_instr_load_pow(&block, 0);
     tf.push_instr_expect_pow_chain_length(withdraw as usize + 2, 0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
+/// A test can mine to a key it holds and spend the matured coinbase with a fee: first a plain
+/// transparent spend, then a bond creation funded the same way. Each passes the mempool's ZIP-317
+/// rules, and the block that mines it credits the fee to its coinbase (NU6 onward requires coinbase
+/// outputs to equal the subsidy, less the staking share, plus the fees exactly), so the node
+/// accepts the block and drops the transaction from its mempool.
+#[test]
+fn crosslink_spend_matured_coinbase_with_a_fee() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let key = TestKey::new(b"crosslink test miner");
+    let miner = key.address();
+    let mut gen = BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    while gen.mature_coinbase_for(&key).is_none() {
+        tf.push_instr_load_pow(&gen.next_block(&miner), 0);
+    }
+
+    let spend = transparent_spend(&key, gen.mature_coinbase_for(&key).expect("matured above"));
+    tf.push_instr_submit_tx(&spend, 0);
+    tf.push_instr_expect_mempool_contains(&spend, 0);
+
+    let block = gen.next_block_with_txs(&miner, &[spend.clone()]);
+    tf.push_instr_load_pow(&block, 0);
+    tf.push_instr_expect_mempool_absent(&spend, 0);
+
+    // A bond funded by the next matured coinbase output.
+    while gen.mature_coinbase_for(&key).is_none() {
+        tf.push_instr_load_pow(&gen.next_block(&miner), 0);
+    }
+    let target = zcash_primitives::bft::FinalizerAddress::create(
+        &zebra_crosslink::rng_private_public_key_from_address(b"staking-target").1,
+    );
+    let bond_seed = b"funded-bond";
+    let bond = staking_tx_create_bond_funded(
+        bond_seed,
+        target,
+        100_000_000,
+        &key,
+        gen.mature_coinbase_for(&key).expect("matured above"),
+    );
+    tf.push_instr_submit_tx(&bond, 0);
+    tf.push_instr_expect_mempool_contains(&bond, 0);
+
+    let block = gen.next_block_with_txs(&miner, &[bond.clone()]);
+    tf.push_instr_load_pow(&block, 0);
+    tf.push_instr_expect_mempool_absent(&bond, 0);
+    // Stakers are paid every block, so the bond's amount moves on from the one bonded; the block
+    // being accepted is what shows the value balanced.
+    let bond_key = zebra_crosslink::rng_private_public_key_from_address(bond_seed).2 .0;
+    tf.push_instr_expect_bond(bond_key, TF_BOND_ACTIVE, TEST_STAKE_IGNORED, 0);
 
     test_bytes(tf.write_to_bytes());
 }

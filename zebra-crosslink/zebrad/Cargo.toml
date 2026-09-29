@@ -356,6 +356,9 @@ tokio-stream = { workspace = true }
 zcash_keys = { workspace = true }
 zcash_primitives = { workspace = true }
 zcash_transparent = { workspace = true }
+# Test transactions sign transparent inputs with a key the test holds.
+secp256k1 = { workspace = true }
+ripemd = { workspace = true }
 
 # test feature lightwalletd-grpc-tests
 prost = { workspace = true }
