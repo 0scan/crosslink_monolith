@@ -218,23 +218,27 @@ The BFT chain has no external genesis. It is started deterministically by every 
 
 ### Heights (as implemented)
 
-`BOOTSTRAP_ROSTER_HEIGHT = STAKING_PERIOD / 2` (call it `h1`)
+`BOOTSTRAP_STAKING_HEIGHT = 1 * STAKING_PERIOD` (call it `h0`)
 
-`BOOTSTRAP_ACTIVATION_HEIGHT = h1 + 200` (call it `h2`)
+`BOOTSTRAP_ROSTER_HEIGHT = 2 * STAKING_PERIOD` (call it `h1`)
 
-`h1`: The PoW block whose staking state supplies the roster that votes on BFT height 0.
+`BOOTSTRAP_ACTIVATION_HEIGHT = 3 * STAKING_PERIOD` (call it `h2`)
+
+`h0`: The first PoW block that may carry a staking action, and the start of the first staking day. Any staking action in a block below `h0` is invalid. `h0` must be a multiple of `STAKING_PERIOD`, so that it opens a staking day on the calendar (which is anchored at genesis).
+
+`h1`: The PoW block whose staking state supplies the roster that votes on BFT height 0. It is the day after `h0`, so the whole first staking window has closed and every bond from it counts.
 
 `h2`: The PoW height at which a node walks back, finalizes `h1`, and starts BFT. Every PoW block at or below `h2` must carry a nil fat pointer; the first non-nil pointer can appear only above `h2`.
 
 ### Safety argument
 
-There is a compile-time assertion that `h2` - `h1` > `MAX_BLOCK_REORG_HEIGHT`. By the time any node reaches `h2`, block `h1` is below the reorg limit and therefore identical on every chain a node could be following. So every node computes the same roster from `h1`, constructs the same BFT genesis, and the Tendermint requirement that all finalizers share one view of the roster (section 6) holds from the first round without any coordination.
+There is a compile-time assertion that `h0` is a multiple of the period, `h0 <= h1`, and `h2` - `h1` > `MAX_BLOCK_REORG_HEIGHT`. By the time any node reaches `h2`, block `h1` is below the reorg limit and therefore identical on every chain a node could be following. So every node computes the same roster from `h1`, constructs the same BFT genesis, and the Tendermint requirement that all finalizers share one view of the roster (section 6) holds from the first round without any coordination.
 
 This is the bootstrap instance of the general rule in section 16: the roster is a pure function of finalized PoW state, and the finality in question here is reorg-depth finality rather than BFT finality.
 
 ### Relation to the three-height plan in the notes
 
-The rewards notes describe three heights: `H1` (staking transactions activate), `H2` (roster is determined), `H3` (first block that may point at a certificate), with `H2` and `H3` fixed in one governance decision and `H2` perhaps `H3` minus 100,000. The code's `h1` corresponds to the notes' `H2` and the code's `h2` to the notes' `H3`; the notes' `H1` (activation of staking actions) is not a separate constant in the code as described. [TBC: reconcile naming, and confirm whether the 200-block gap is a development value versus the ~100,000 suggested for mainnet.]
+The rewards notes describe three heights: `H1` (staking transactions activate), `H2` (roster is determined), `H3` (first block that may point at a certificate), with `H2` and `H3` fixed in one governance decision and `H2` perhaps `H3` minus 100,000. The code's `h0`, `h1`, `h2` are the notes' `H1`, `H2`, `H3`. [TBC: confirm whether one-period gaps are a development value versus the ~100,000 suggested for mainnet.]
 
 At activation every block in [0, `h1`] becomes de facto finalized. Whether BFT genesis should point at the PoW genesis or at `h1` remains open.
 
@@ -552,7 +556,7 @@ No stall, but the stake-weighted share actually voting drifts down toward two th
 
 - Timeout/abandonment rule for "not yet determinable" (section 5).
 - Whether BFT genesis points at PoW genesis or `h1` (section 8).
-- Reconcile the notes' `H1`/`H2`/`H3` with the code's `h1`/`h2`, and the 200-block gap versus ~100,000 (section 8).
+- Confirm the one-period bootstrap gaps versus ~100,000 for mainnet (section 8).
 - How the active roster is selected (section 11).
 - Other anti-tail-thrashing mechanisms (section 1).
 - Precise definition of "close to the tip" (section 14).

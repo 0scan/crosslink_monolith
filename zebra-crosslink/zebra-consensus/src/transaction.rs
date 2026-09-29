@@ -24,7 +24,7 @@ use tower::{
 use tracing::Instrument;
 
 use zcash_protocol::value::ZatBalance;
-use zcash_primitives::bft::StakingParameters;
+use zcash_primitives::bft::{StakingParameters, ZcashCrosslinkParameters};
 
 use zebra_chain::{
     amount::{Amount, NonNegative},
@@ -488,8 +488,9 @@ where
             // These are pure consensus rules over the transaction structure and must always hold.
             check_transaction_invariants(tx.as_ref(), height, &network)?;
 
-            let staking = network.crosslink_parameters().staking;
-            check_staking_day_window(&tx, height, staking)?;
+            let params = network.crosslink_parameters();
+            let staking = params.staking;
+            check_staking_day_window(&tx, height, &params)?;
             check_staking_target_capability(&tx)?;
 
             tracing::trace!(?tx_id, "passed quick checks");
@@ -937,19 +938,22 @@ fn check_staking_target_capability(tx: &Transaction) -> Result<(), TransactionEr
     Ok(())
 }
 
-/// Checks that staking actions are only performed within the allowed staking window.
+/// Checks that staking actions are only performed from `h0` on, and within the allowed staking
+/// window.
 ///
-/// Staking actions are only valid when `block_height % staking.period < staking.day_window`, using
-/// the network's staking calendar. For example, with period 100 and day window 10, staking is
-/// allowed on blocks 0-9, 100-109, 200-209, etc.
+/// No staking action of any kind is valid below the bootstrap's `staking_height` (`h0`), the
+/// first staking day. From there, staking actions are only valid when
+/// `block_height % staking.period < staking.day_window`, using the network's staking calendar.
+/// For example, with period 100 and day window 10, staking is allowed on blocks 0-9, 100-109,
+/// 200-209, etc.
 ///
-/// RetargetDelegationBond is exempt from this rule and can be submitted at any time.
+/// RetargetDelegationBond is exempt from the window rule and can be submitted at any time.
 ///
 /// Returns `Ok(())` if the transaction has no staking action or is within the staking window.
 fn check_staking_day_window(
     tx: &Transaction,
     height: block::Height,
-    staking: StakingParameters,
+    params: &ZcashCrosslinkParameters,
 ) -> Result<(), TransactionError> {
     use zcash_primitives::transaction::StakingActionKind;
 
@@ -957,6 +961,17 @@ fn check_staking_day_window(
         Some(action) => action,
         None => return Ok(()),
     };
+
+    if let Some(staking_height) = params.bootstrap.staking_height() {
+        if height.0 < staking_height {
+            return Err(TransactionError::StakingActionBeforeActivation {
+                block_height: height.0,
+                staking_height,
+            });
+        }
+    }
+
+    let staking = params.staking;
 
     // Retarget and finalizer reward conversion are exempt from staking day
     // restrictions: neither moves value into or out of the staking pools from
@@ -998,7 +1013,7 @@ pub fn check_block_transaction(
     network: &Network,
 ) -> Result<(), TransactionError> {
     // Staking actions are only allowed during specific block ranges.
-    check_staking_day_window(tx, height, network.crosslink_parameters().staking)?;
+    check_staking_day_window(tx, height, &network.crosslink_parameters())?;
 
     // The target finalizer address must be a valid capability (its embedded
     // signature verifies); the state contextual check enforces the same rule on blocks.

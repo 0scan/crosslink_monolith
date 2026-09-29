@@ -23,21 +23,23 @@ state directories and both nodes' logs, with the pre-restart logs kept beside th
    this tree) and moves 0.5 ZEC to the user account through `requestfaucetdonation`.
 3. Bonds 0.2 ZEC to each node's finalizer address through `staking_command`, taking the
    addresses from each node's own `finalizer address:` startup line, and mines each
-   transaction in. Both bonds must be in the chain before the bootstrap roster height (75),
+   transaction in. The bonds go in on the first staking day, at or above the staking height
+   (150); staking actions are illegal below it. Both bonds must be in the chain before the
+   bootstrap roster height (300),
    because BFT height 1's roster is the set of stakes at that height and an empty roster means
    BFT never starts.
 4. Mines through `generate` without pausing until node 0's tip reaches the restart height,
    halfway between the activation height and `TARGET`, printing a sample of both nodes every
    50 blocks.
 5. Kills both nodes, moves their logs aside and starts them again against the same state
-   directories, then mines on to `TARGET` (default 450). The kill is hard, so each node comes
+   directories, then mines on to `TARGET` (default 650). The kill is hard, so each node comes
    back at its committed height rather than its old tip and re-mines the difference.
 6. Checks both nodes and prints `PASS` or every failed check.
 
 ## What it checks
 
 - Both nodes reach `TARGET` and agree on the tip within two blocks.
-- Node 0 logged the bootstrap at the activation height (275) and neither node reported an
+- Node 0 logged the bootstrap at the activation height (450) and neither node reported an
   empty roster.
 - No panic, and no `ERROR` line other than the known placeholder
   `not yet implemented: all the documented validations`, which `BftBlock::try_from` logs for

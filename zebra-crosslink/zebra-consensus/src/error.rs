@@ -326,6 +326,15 @@ pub enum TransactionError {
         window: u32,
     },
 
+    #[error(
+        "staking action before staking activation: block {block_height} is below the first staking day at {staking_height}"
+    )]
+    #[non_exhaustive]
+    StakingActionBeforeActivation {
+        block_height: u32,
+        staking_height: u32,
+    },
+
     #[error("staking action bond key is not usable as a bond key (undecodable or small order): {bond_key:?}")]
     StakingActionBondKeyInvalid { bond_key: [u8; 32] },
 

@@ -1400,7 +1400,7 @@ impl BftRunner {
     /// Decide genesis (finalizing h1 on the PoW side and taking h1's aggregated stakes as the
     /// roster for height 1) and start tenderlink at height 1.
     fn bootstrap(&mut self, read_state: &ReadState, block_writer: &mut WriteBlockWorkerTask) {
-        let BftBootstrap::FromChain { roster_height, activation_height } = self.params.bootstrap else {
+        let BftBootstrap::FromChain { roster_height, activation_height, .. } = self.params.bootstrap else {
             return;
         };
         // Genesis is decided exactly once. `decide` asserts the block it is given validates

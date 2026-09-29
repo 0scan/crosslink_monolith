@@ -701,8 +701,9 @@ const TF_BOOTSTRAP_FROM_CHAIN: u8 = 1;
 fn params_to_bytes(bootstrap: BftBootstrap, staking: StakingParameters) -> Vec<u8> {
     let mut bytes = match bootstrap {
         BftBootstrap::Supplied => vec![TF_BOOTSTRAP_SUPPLIED],
-        BftBootstrap::FromChain { roster_height, activation_height } => {
+        BftBootstrap::FromChain { staking_height, roster_height, activation_height } => {
             let mut bytes = vec![TF_BOOTSTRAP_FROM_CHAIN];
+            bytes.extend_from_slice(&staking_height.to_le_bytes());
             bytes.extend_from_slice(&roster_height.to_le_bytes());
             bytes.extend_from_slice(&activation_height.to_le_bytes());
             bytes
@@ -719,8 +720,9 @@ fn params_to_bytes(bootstrap: BftBootstrap, staking: StakingParameters) -> Vec<u
 fn params_from_bytes(bytes: &[u8]) -> Option<(BftBootstrap, StakingParameters)> {
     let (bootstrap, rest) = match bytes {
         [TF_BOOTSTRAP_SUPPLIED, rest @ ..] => (BftBootstrap::Supplied, rest),
-        [TF_BOOTSTRAP_FROM_CHAIN, r0, r1, r2, r3, a0, a1, a2, a3, rest @ ..] => (
+        [TF_BOOTSTRAP_FROM_CHAIN, s0, s1, s2, s3, r0, r1, r2, r3, a0, a1, a2, a3, rest @ ..] => (
             BftBootstrap::FromChain {
+                staking_height: u32::from_le_bytes([*s0, *s1, *s2, *s3]),
                 roster_height: u32::from_le_bytes([*r0, *r1, *r2, *r3]),
                 activation_height: u32::from_le_bytes([*a0, *a1, *a2, *a3]),
             },
@@ -1616,7 +1618,7 @@ mod tests {
 
     #[test]
     fn set_params_round_trips_the_staking_calendar() {
-        for bootstrap in [BftBootstrap::Supplied, BftBootstrap::FromChain { roster_height: 5, activation_height: 300 }] {
+        for bootstrap in [BftBootstrap::Supplied, BftBootstrap::FromChain { staking_height: 0, roster_height: 5, activation_height: 300 }] {
             for staking in [PROTOTYPE_STAKING, SHORT] {
                 assert_eq!(params_from_bytes(&params_to_bytes(bootstrap, staking)), Some((bootstrap, staking)));
             }

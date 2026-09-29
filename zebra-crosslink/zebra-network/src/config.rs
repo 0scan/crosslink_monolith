@@ -630,6 +630,7 @@ struct DTestnetParameters {
 #[serde(deny_unknown_fields)]
 struct DCrosslinkParameters {
     bc_confirmation_depth_sigma: Option<u64>,
+    bootstrap_staking_height: Option<u32>,
     bootstrap_roster_height: Option<u32>,
     bootstrap_activation_height: Option<u32>,
     staking_period: Option<u32>,
@@ -640,9 +641,9 @@ struct DCrosslinkParameters {
 impl DCrosslinkParameters {
     fn to_parameters(&self) -> ZcashCrosslinkParameters {
         let prototype = PROTOTYPE_PARAMETERS;
-        let (prototype_roster_height, prototype_activation_height) = match prototype.bootstrap {
-            BftBootstrap::FromChain { roster_height, activation_height } => {
-                (roster_height, activation_height)
+        let (prototype_staking_height, prototype_roster_height, prototype_activation_height) = match prototype.bootstrap {
+            BftBootstrap::FromChain { staking_height, roster_height, activation_height } => {
+                (staking_height, roster_height, activation_height)
             }
             BftBootstrap::Supplied => unreachable!("the prototype bootstraps BFT from the chain"),
         };
@@ -651,6 +652,7 @@ impl DCrosslinkParameters {
                 .bc_confirmation_depth_sigma
                 .unwrap_or(prototype.bc_confirmation_depth_sigma),
             bootstrap: BftBootstrap::FromChain {
+                staking_height: self.bootstrap_staking_height.unwrap_or(prototype_staking_height),
                 roster_height: self.bootstrap_roster_height.unwrap_or(prototype_roster_height),
                 activation_height: self
                     .bootstrap_activation_height
@@ -672,6 +674,7 @@ impl From<ZcashCrosslinkParameters> for DCrosslinkParameters {
         let staking = (params.staking != PROTOTYPE_PARAMETERS.staking).then_some(params.staking);
         Self {
             bc_confirmation_depth_sigma: Some(params.bc_confirmation_depth_sigma),
+            bootstrap_staking_height: params.bootstrap.staking_height(),
             bootstrap_roster_height: params.bootstrap.roster_height(),
             bootstrap_activation_height: params.bootstrap.activation_height(),
             staking_period: staking.map(|s| s.period),

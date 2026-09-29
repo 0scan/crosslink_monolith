@@ -4,17 +4,17 @@
 # blocks and keeps the final height near the tip. Needs a built zebrad (phuild.bat zebra-crosslink
 # Debug Win64 -p zebrad), curl and jq. See DILATED_REGTEST.md at the repository root.
 #
-#   dilated_regtest/run.sh [TARGET=450]
+#   dilated_regtest/run.sh [TARGET=650]
 #
 # Mining never pauses once stake is placed: an idle tip makes every BFT proposal empty and the
 # round timeouts grow with the round number, so a pause of minutes costs minutes more to recover.
 set -u
-TARGET=${1:-450}
+TARGET=${1:-650}
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/.." && pwd); OUT=$HERE/out
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WIN=1; ROOT_TOML=$(cd "$ROOT" && pwd -W);; *) WIN=0; ROOT_TOML=$ROOT;; esac
 ZEBRAD=$ROOT/target/debug/zebrad; [ $WIN = 1 ] && ZEBRAD=$ZEBRAD.exe
 [ -x "$ZEBRAD" ] || { echo "no zebrad at $ZEBRAD"; exit 2; }
-BOND=20000000; ROSTER_HEIGHT=75; ACTIVATION_HEIGHT=275
+BOND=20000000; STAKING_HEIGHT=150; ROSTER_HEIGHT=300; ACTIVATION_HEIGHT=450
 PORT=(8232 8242); PID=(); FAIL=0
 
 rpc() { curl -s -m 300 -X POST "http://127.0.0.1:${PORT[$1]}" -H 'content-type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":${3:-[]}}"; }
@@ -74,6 +74,8 @@ settle() { # wait for the wallet's tx to reach the mempool, mine it in, mine unt
   until s=$(rpc 0 wallet_spendable_funds | jq -r '.result.spendable_zats // empty') && [ -n "$s" ] && [ "$s" -ge "$1" ]; do rpc 0 generate '[1]' >/dev/null; sleep 2; done
 }
 settle $((2 * BOND + 1000000))
+# Staking actions are illegal below the staking height, the first staking day.
+while [ "$(tip 0)" -lt "$STAKING_HEIGHT" ]; do rpc 0 generate "[$(( STAKING_HEIGHT - $(tip 0) ))]" >/dev/null; sleep 1; done
 for n in 0 1; do
   cmd=$(jq -cn --arg f "${FIN[$n]}" --argjson a "$BOND" '{CreateNewDelegationBond:{amount_zats:$a,target_finalizer:$f}}')
   log "bond -> node$n: $(rpc 0 staking_command "$(jq -cn --arg c "$cmd" '[$c]')" | jq -c 'if .error then .error else "submitted" end')"

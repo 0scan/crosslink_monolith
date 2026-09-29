@@ -393,32 +393,42 @@ impl std::error::Error for InvalidBftBlock {}
 /// On a real network BFT does not run from genesis. Three PoW heights define how it comes up, so
 /// that no node needs an operator-supplied starting roster:
 ///
-/// - `h0`: staking actions become legal. In this prototype that is genesis (the new transaction
-///   format is on from the start), so it is not a parameter.
+/// - `h0` (`staking_height`): the first block that may carry a staking action. Blocks below it
+///   must not carry any.
 /// - `h1` (`roster_height`): the block whose aggregated stakes become the roster that votes on BFT
 ///   height 0.
 /// - `h2` (`activation_height`): when a node accepts any PoW block at this height it walks back
 ///   that chain to its `h1` ancestor, finalizes it, and starts BFT with `h1`'s roster.
 ///
 /// Every PoW block at or below `h2` must carry a nil fat pointer; only blocks above `h2` may point
-/// at a BFT block. `h2 - h1` must exceed the reorg limit, so by the time any `h2` block is accepted
-/// the `h1` ancestor is the same on every chain and its stakes are already in the finalized state;
-/// [`ZcashCrosslinkParameters::bootstrap_is_valid`] checks this.
+/// at a BFT block. `h0 <= h1`, and `h2 - h1` must exceed the reorg limit, so by the time any `h2`
+/// block is accepted the `h1` ancestor is the same on every chain and its stakes are already in
+/// the finalized state; [`ZcashCrosslinkParameters::bootstrap_is_valid`] checks this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BftBootstrap {
     /// BFT is created from the chain, as described above.
     FromChain {
+        /// `h0`
+        staking_height: u32,
         /// `h1`
         roster_height: u32,
         /// `h2`
         activation_height: u32,
     },
-    /// BFT blocks are supplied from outside from genesis, so there is no bootstrap and a fat
-    /// pointer is legal at any height. Only the test-format harness does this.
+    /// BFT blocks are supplied from outside from genesis, so there is no bootstrap: staking
+    /// actions and fat pointers are legal at any height. Only the test-format harness does this.
     Supplied,
 }
 
 impl BftBootstrap {
+    /// `h0`, or `None` when BFT is supplied rather than bootstrapped.
+    pub const fn staking_height(&self) -> Option<u32> {
+        match *self {
+            BftBootstrap::FromChain { staking_height, .. } => Some(staking_height),
+            BftBootstrap::Supplied => None,
+        }
+    }
+
     /// `h1`, or `None` when BFT is supplied rather than bootstrapped.
     pub const fn roster_height(&self) -> Option<u32> {
         match *self {
@@ -510,12 +520,15 @@ const _: () = assert!(
 );
 
 impl ZcashCrosslinkParameters {
-    /// Whether a chain-built bootstrap puts `h1` beyond reorg reach before any `h2` block can be
-    /// accepted. Always true for [`BftBootstrap::Supplied`].
+    /// Whether a chain-built bootstrap is consistent: `h0` is the start of a staking day on this
+    /// network's calendar, the roster block is not before it, and `h1` is beyond reorg reach
+    /// before any `h2` block can be accepted. Always true for [`BftBootstrap::Supplied`].
     pub const fn bootstrap_is_valid(&self) -> bool {
         match self.bootstrap {
-            BftBootstrap::FromChain { roster_height, activation_height } => {
-                activation_height > roster_height
+            BftBootstrap::FromChain { staking_height, roster_height, activation_height } => {
+                staking_height % self.staking.period == 0
+                    && staking_height <= roster_height
+                    && activation_height > roster_height
                     && activation_height - roster_height
                         > zcash_protocol::consensus::MAX_BLOCK_REORG_HEIGHT
             }
@@ -526,21 +539,23 @@ impl ZcashCrosslinkParameters {
 
 /// Crosslink parameters chosed for prototyping / testing
 ///
-/// `h1` is halfway between the first and second staking day, i.e. after the first staking window
-/// has closed, so every bond from day one counts.
+/// `h0` is the second staking day (the first day of the calendar, at genesis, carries no staking
+/// actions); `h1` is the following day, after `h0`'s staking window has closed, so every bond from
+/// the first staking day counts; `h2` is the day after that.
 ///
 /// <div class="warning">No verification has been done on the security or performance of these parameters.</div>
 pub const PROTOTYPE_PARAMETERS: ZcashCrosslinkParameters = ZcashCrosslinkParameters {
     bc_confirmation_depth_sigma: 4,
     bootstrap: BftBootstrap::FromChain {
-        roster_height: crate::transaction::STAKING_PERIOD / 2,
-        activation_height: crate::transaction::STAKING_PERIOD / 2 + 200,
+        staking_height: crate::transaction::STAKING_PERIOD,
+        roster_height: 2 * crate::transaction::STAKING_PERIOD,
+        activation_height: 3 * crate::transaction::STAKING_PERIOD,
     },
     staking: PROTOTYPE_STAKING,
 };
 const _: () = assert!(
     PROTOTYPE_PARAMETERS.bootstrap_is_valid(),
-    "the bootstrap roster block must be below the reorg limit when any activation-height block is accepted"
+    "h0 must start a staking day, h1 must not precede it, and the roster block must be below the reorg limit when any activation-height block is accepted"
 );
 
 /// How far finality may lag behind the chain and still earn PoS issuance, measured in PoW
