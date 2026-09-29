@@ -2123,6 +2123,12 @@ pub fn update_bonds_with_pos_issuance(
     let Some(max_staker) = max_staker else {
         return (Vec::new(), Vec::new());
     };
+    // Bonds can hold zero zats, so stake can exist and still total zero. Shares are proportional
+    // to stake and `share` divides by the total, so there is nothing to pay: the reward goes
+    // unpaid and is burned, as for a block that pays no stakers.
+    if total_staked_zats == 0 {
+        return (Vec::new(), Vec::new());
+    }
 
     let mut so_far_payed_reward = 0u64;
 
