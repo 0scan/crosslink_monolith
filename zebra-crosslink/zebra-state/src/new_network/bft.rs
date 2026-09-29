@@ -187,7 +187,8 @@ pub fn bc_hdr_to_lrz(header: &Header) -> BcBlockHeader {
 /// The context-free proof-of-work checks for a carried bc-header: a well-formed difficulty
 /// threshold within the network's PoWLimit, a block hash under that threshold, and a valid
 /// Equihash solution. These are the same checks Zebra's block verifier applies to a header before
-/// it has the block's ancestry.
+/// it has the block's ancestry, including its exemption: on a network with PoW disabled it checks
+/// only the threshold, so a header here must not have to meet more than its block did.
 fn header_pow_is_valid(header: &BcBlockHeader, network: &zebra_chain::parameters::Network) -> Result<(), String> {
     use zebra_chain::work::difficulty::ParameterDifficulty as _;
     let mut bytes = Vec::new();
@@ -200,6 +201,9 @@ fn header_pow_is_valid(header: &BcBlockHeader, network: &zebra_chain::parameters
         .ok_or_else(|| format!("invalid difficulty threshold {:?}", header.difficulty_threshold))?;
     if threshold > network.target_difficulty_limit() {
         return Err(format!("difficulty threshold {threshold:?} is above the network limit"));
+    }
+    if network.disable_pow() {
+        return Ok(());
     }
     if hash > threshold {
         return Err(format!("hash {hash} does not meet difficulty threshold {threshold:?}"));
