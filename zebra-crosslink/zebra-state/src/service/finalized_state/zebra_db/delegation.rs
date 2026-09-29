@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use zcash_primitives::{bft::FinalizerAddress, transaction::StakingAction};
 use zebra_chain::{amount::{Amount, NonNegative}, block, block::Height};
 
 use crate::{
@@ -40,6 +41,28 @@ pub type AggregatedStakesByHashCf<'cf> = TypedColumnFamily<'cf, block::Hash, Agg
 /// The type for reading finalizer reward banks from the database.
 pub type FinalizerRewardByKeyCf<'cf> = TypedColumnFamily<'cf, [u8; 32], Amount<NonNegative>>;
 
+/// The name of the finalizer address column family: finalizer public key -> the first verified
+/// [`FinalizerAddress`] a committed staking action carried for it.
+///
+/// A raw public key cannot be turned into an address: the address embeds the finalizer key's
+/// signature, which only the key holder can make. So the only honest source of an address is
+/// one the chain already carried, in a `CreateNewDelegationBond` target or either end of a
+/// `RetargetDelegationBond`. Any verified address for a key is equally valid (the signed message
+/// is fixed), so the first one seen is kept and rows are never rewritten or deleted.
+pub const FINALIZER_ADDRESS_BY_KEY: &str = "finalizer_address_by_key";
+
+/// The type for reading finalizer addresses from the database.
+pub type FinalizerAddressByKeyCf<'cf> = TypedColumnFamily<'cf, [u8; 32], FinalizerAddress>;
+
+/// The finalizer addresses a staking action carries: Create's target, and Retarget's
+/// destination and source. Consensus verifies every one of them, but they are unverified data
+/// here; callers verify before trusting one.
+pub(crate) fn staking_action_finalizer_addresses(
+    action: &StakingAction,
+) -> [Option<FinalizerAddress>; 2] {
+    [action.target_finalizer_address(), action.from_finalizer_address()]
+}
+
 impl ZebraDb {
     // Column family convenience methods
 
@@ -65,6 +88,27 @@ impl ZebraDb {
     pub(crate) fn finalizer_reward_by_key_cf(&self) -> FinalizerRewardByKeyCf<'_> {
         FinalizerRewardByKeyCf::new(&self.db, FINALIZER_REWARD_BY_KEY)
             .expect("column family was created when database was created")
+    }
+
+    /// Returns a typed handle to the finalizer address by key column family.
+    pub(crate) fn finalizer_address_by_key_cf(&self) -> FinalizerAddressByKeyCf<'_> {
+        FinalizerAddressByKeyCf::new(&self.db, FINALIZER_ADDRESS_BY_KEY)
+            .expect("column family was created when database was created")
+    }
+
+    /// The verified [`FinalizerAddress`] for a finalizer public key, if a finalized staking
+    /// action has carried one. `None` means no finalized block has revealed this key's address;
+    /// it can never be derived from the key alone.
+    pub fn finalizer_address(&self, finalizer: &[u8; 32]) -> Option<FinalizerAddress> {
+        self.finalizer_address_by_key_cf().zs_get(finalizer)
+    }
+
+    /// Every indexed finalizer address, in key order. Used by format checks and tests.
+    pub fn all_finalizer_addresses(&self) -> Vec<([u8; 32], FinalizerAddress)> {
+        self.finalizer_address_by_key_cf()
+            .zs_items_in_range_ordered(..)
+            .into_iter()
+            .collect()
     }
 
     /// A finalizer's unconverted commission in the finalized state; zero if it has none.
@@ -194,6 +238,38 @@ pub struct BondBatchOverlay {
 }
 
 impl DiskWriteBatch {
+    /// Index the finalizer addresses carried by `actions` (one finalized block's staking
+    /// actions, in block order) into [`FINALIZER_ADDRESS_BY_KEY`].
+    ///
+    /// Keeps the first verified address per key: keys already in the database, or already
+    /// indexed earlier in `actions`, are skipped. Every address is verified before it is
+    /// written, so checkpoint-verified blocks (which skip contextual staking checks) can never
+    /// plant a forged address.
+    pub fn prepare_finalizer_addresses_batch<'a>(
+        &mut self,
+        db: &ZebraDb,
+        actions: impl IntoIterator<Item = &'a StakingAction>,
+    ) {
+        let finalizer_address_by_key_cf = db.db.cf_handle(FINALIZER_ADDRESS_BY_KEY).unwrap();
+        let mut indexed: HashSet<[u8; 32]> = HashSet::new();
+
+        for address in actions
+            .into_iter()
+            .flat_map(staking_action_finalizer_addresses)
+            .flatten()
+        {
+            let key = address.pub_key.0;
+            if indexed.contains(&key) || db.finalizer_address(&key).is_some() {
+                continue;
+            }
+            if !address.verify() {
+                continue;
+            }
+            indexed.insert(key);
+            self.zs_insert(&finalizer_address_by_key_cf, key, address);
+        }
+    }
+
     /// Prepare the delegation bond writes for `finalized.block` into this batch, and
     /// return the overlay of those writes for the stakes snapshot.
     ///
@@ -216,6 +292,11 @@ impl DiskWriteBatch {
         // Finalizer banks this block changes (Convert debits, commission credits),
         // read once from the db and written once at the end.
         let mut banks: HashMap<[u8; 32], u64> = HashMap::new();
+
+        self.prepare_finalizer_addresses_batch(
+            db,
+            finalized.block.transactions.iter().filter_map(|tx| tx.staking_action()),
+        );
 
         // Iterate through all transactions in the block
         for (transaction_index, transaction) in finalized.block.transactions.iter().enumerate() {
@@ -515,5 +596,120 @@ impl DiskWriteBatch {
         self.zs_insert(&delegation_bond_by_key_cf, bond_key, bond);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod finalizer_address_tests {
+    use zcash_primitives::{
+        bft::{finalizer_key_from_seed, FinalizerAddress, TMSig},
+        transaction::StakingAction,
+    };
+    use zebra_chain::parameters::Network;
+
+    use crate::{
+        service::finalized_state::{DiskWriteBatch, FinalizedState, FromDisk, IntoDisk},
+        Config,
+    };
+
+    fn address(seed: &[u8]) -> FinalizerAddress {
+        let (_, key, _) = finalizer_key_from_seed(seed);
+        FinalizerAddress::create(&key)
+    }
+
+    fn forged(address: FinalizerAddress) -> FinalizerAddress {
+        FinalizerAddress { sig: TMSig([9; 64]), ..address }
+    }
+
+    fn create(target_finalizer: FinalizerAddress) -> StakingAction {
+        StakingAction::CreateNewDelegationBond {
+            amount_zats: 1000,
+            unique_pubkey: [1; 32],
+            bond_salt: [2; 32],
+            target_finalizer,
+            signature: [0; 64],
+        }
+    }
+
+    fn retarget(from_finalizer: FinalizerAddress, to_finalizer: FinalizerAddress) -> StakingAction {
+        StakingAction::RetargetDelegationBond {
+            unique_pubkey: [1; 32],
+            signature: [0; 64],
+            from_finalizer,
+            to_finalizer,
+        }
+    }
+
+    fn finalized_state() -> FinalizedState {
+        FinalizedState::new(
+            &Config::ephemeral(),
+            &Network::Mainnet,
+            #[cfg(feature = "elasticsearch")]
+            false,
+        )
+        .expect("opening an ephemeral database should succeed")
+    }
+
+    #[test]
+    fn finalizer_address_round_trips_through_disk_format() {
+        let a = address(b"disk");
+        let bytes = a.as_bytes();
+        assert_eq!(&bytes[..32], &a.pub_key.0);
+        assert_eq!(&bytes[32..], &a.sig.0);
+        assert_eq!(FinalizerAddress::from_bytes(bytes), a);
+    }
+
+    #[test]
+    fn committed_create_and_retarget_addresses_are_indexed_once_verified() {
+        let state = finalized_state();
+        let db = &state.db;
+        let (a, b, c) = (address(b"a"), address(b"b"), address(b"c"));
+
+        // A forged address ahead of the real one must not claim the key or block it.
+        let mut batch = DiskWriteBatch::new();
+        batch.prepare_finalizer_addresses_batch(
+            db,
+            &[create(forged(a)), create(a), retarget(b, forged(c))],
+        );
+        db.write_batch(batch).unwrap();
+
+        assert_eq!(db.finalizer_address(&a.pub_key.0), Some(a));
+        assert_eq!(db.finalizer_address(&b.pub_key.0), Some(b));
+        assert_eq!(db.finalizer_address(&c.pub_key.0), None);
+
+        // A later block reveals `c` as a retarget destination; the stored `a` is never replaced.
+        let mut batch = DiskWriteBatch::new();
+        batch.prepare_finalizer_addresses_batch(db, &[retarget(forged(a), c)]);
+        db.write_batch(batch).unwrap();
+
+        assert_eq!(db.finalizer_address(&a.pub_key.0), Some(a));
+        assert_eq!(db.finalizer_address(&c.pub_key.0), Some(c));
+        assert_eq!(db.all_finalizer_addresses().len(), 3);
+    }
+
+    #[test]
+    fn staking_actions_without_addresses_index_nothing() {
+        let state = finalized_state();
+        let db = &state.db;
+
+        let mut batch = DiskWriteBatch::new();
+        batch.prepare_finalizer_addresses_batch(
+            db,
+            &[
+                StakingAction::BeginDelegationUnbonding { unique_pubkey: [1; 32], signature: [0; 64] },
+                StakingAction::ConvertFinalizerRewardToDelegationBond {
+                    this_finalizer: address(b"raw").pub_key.0,
+                    amount_zats: 1,
+                    unique_pubkey: [3; 32],
+                    bond_salt: [4; 32],
+                    finalizer_signature: [0; 64],
+                    signature: [0; 64],
+                },
+            ],
+        );
+        db.write_batch(batch).unwrap();
+
+        // A raw finalizer key (Convert's `this_finalizer`) is never turned into an address.
+        assert!(db.all_finalizer_addresses().is_empty());
     }
 }

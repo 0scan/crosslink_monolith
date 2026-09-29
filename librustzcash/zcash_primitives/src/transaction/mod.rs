@@ -1455,6 +1455,7 @@ pub struct RosterMember {
     pub pub_key: [u8; 32],
     pub voting_power: u64,
     pub txids: std::vec::Vec<StakeTxId>,
+    pub finalizer_address: Option<FinalizerAddress>,
 }
 impl RosterMember {
     pub fn write_to_vec(&self, data: &mut std::vec::Vec<u8>) {
@@ -1464,18 +1465,70 @@ impl RosterMember {
         for txid in &self.txids {
             txid.write_to_vec(data);
         }
+        // One tagged signature per member; the public key is already in this record.
+        match self.finalizer_address.filter(|address| address.pub_key.0 == self.pub_key && address.verify()) {
+            Some(address) => {
+                data.push(1);
+                data.extend_from_slice(&address.sig.0);
+            }
+            None => data.push(0),
+        }
     }
 
     pub fn read_from<R: Read>(r: &mut R) -> io::Result<Self> {
         let mut pub_key = [0u8; 32];
         r.read_exact(&mut pub_key)?;
         let voting_power = r.read_u64_le()?;
-        let txids_len = r.read_u64_le()? as usize;
-        let mut txids = std::vec::Vec::with_capacity(txids_len);
+        let txids_len = r.read_u64_le()?;
+        let mut txids = std::vec::Vec::new();
         for _ in 0..txids_len {
             txids.push(StakeTxId::read_from(r)?);
         }
-        Ok(Self { pub_key, voting_power, txids })
+        let mut tag = [0u8; 1];
+        r.read_exact(&mut tag)?;
+        let finalizer_address = match tag[0] {
+            0 => None,
+            1 => {
+                let mut sig = [0u8; 64];
+                r.read_exact(&mut sig)?;
+                let address = FinalizerAddress { pub_key: PubKeyID(pub_key), sig: crate::bft::TMSig(sig) };
+                address.verify().then_some(address)
+            }
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid roster address tag")),
+        };
+        Ok(Self { pub_key, voting_power, txids, finalizer_address })
+    }
+}
+
+#[cfg(test)]
+mod roster_codec_tests {
+    use super::*;
+    use std::vec::Vec;
+
+    #[test]
+    fn tagged_addresses_round_trip_and_invalid_signatures_are_downgraded() {
+        let (_, key, pk) = crate::bft::finalizer_key_from_seed(b"roster-codec");
+        let address = FinalizerAddress::create(&key);
+        assert_eq!(address.pub_key, pk);
+        let member = RosterMember { pub_key: pk.0, voting_power: 7, txids: vec![StakeTxId { txid: [3; 32], zats: 7 }], finalizer_address: Some(address) };
+        let mut bytes = Vec::new();
+        member.write_to_vec(&mut bytes);
+        assert_eq!(bytes[32 + 8 + 8 + 32 + 8], 1);
+        assert_eq!(RosterMember::read_from(&mut &bytes[..]).unwrap(), member);
+
+        let mut unknown = member.clone();
+        unknown.finalizer_address = None;
+        let mut absent = Vec::new();
+        unknown.write_to_vec(&mut absent);
+        assert_eq!(absent.last(), Some(&0));
+        assert_eq!(RosterMember::read_from(&mut &absent[..]).unwrap(), unknown);
+
+        bytes.last_mut().map(|b| *b ^= 1);
+        assert_eq!(RosterMember::read_from(&mut &bytes[..]).unwrap().finalizer_address, None);
+        absent.pop();
+        assert!(RosterMember::read_from(&mut &absent[..]).is_err());
+        absent.push(2);
+        assert!(RosterMember::read_from(&mut &absent[..]).is_err());
     }
 }
 

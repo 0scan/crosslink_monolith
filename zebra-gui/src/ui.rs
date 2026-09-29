@@ -1357,6 +1357,22 @@ fn colour_from_hash(hash: &[u8; 32], is_online:bool) -> (u8, u8, u8, u8) {
     (h, s, v, 0xff).rgba()
 }
 
+fn roster_member_identity(member: &WalletRosterMember) -> (&'static str, String, String, String) {
+    if let Some(address) = member.finalizer_address.filter(|address| address.pub_key.0 == member.pub_key && address.verify()) {
+        let full = address.encode();
+        let prefix = "[zfinv1";
+        let unique = &full["zfinv1".len()..];
+        let label = format!("{}..{}]", &unique[..10], &unique[unique.len() - 10..]);
+        let tooltip = format!("Finalizer address {full}");
+        (prefix, label, full, tooltip)
+    } else {
+        let pk = wallet::bft::PubKeyID(member.pub_key).to_string();
+        let label = format!("Unknown (raw pk: {pk})");
+        let tooltip = format!("Finalizer address unknown (raw pk: {pk})");
+        ("", label, pk, tooltip)
+    }
+}
+
 fn get_finalizer_status(bft_status: &wallet::TFLRecencyStatus, pub_key: [u8;32]) -> Option<&FinalizerRecencyStatus> {
     bft_status.finalizer_statuses.iter().find(|(pk,_)| pk.0 == pub_key).map(|st| &st.1)
 }
@@ -1648,6 +1664,7 @@ pub fn ui_left_pane(ui: &mut Context,
                     pub_key: finalizer,
                     voting_power: position,
                     txids: Vec::new(),
+                    finalizer_address: None,
                 });
             }
 
@@ -3474,12 +3491,7 @@ pub fn ui_right_pane(ui: &mut Context,
             ..Decl
         }) {
 
-            // The full self-certifying address (pub key + signature); before the
-            // crosslink service publishes it, fall back to an all-zero address so
-            // the truncated [xxxxxxxx..xxxxxxxx] display below stays in bounds.
-            let recv_address = wallet::TENDERLINK_ADDRESS.lock().unwrap()
-                .unwrap_or(wallet::bft::FinalizerAddress { pub_key: wallet::bft::PubKeyID::NIL, sig: wallet::bft::TMSig::NIL })
-                .encode();
+            let recv_address = wallet::TENDERLINK_ADDRESS.lock().unwrap().filter(|address| address.verify()).map(|address| address.encode());
 
             let width = ui.scale(160.0);
             let radius = ui.scale(16.0);
@@ -3579,7 +3591,9 @@ pub fn ui_right_pane(ui: &mut Context,
                 ..Decl
             }) {
                 ui.text("Your Finalizer Identity", TextDecl { h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
-                ui.text(frame_strf!(data, "[{}..{}]", &recv_address[0..8], &recv_address[recv_address.len()-8..]), TextDecl { font: Mono, h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
+                let identity = recv_address.as_ref().map(|address| format!("[{}..{}]", &address[..8], &address[address.len()-8..]))
+                    .unwrap_or_else(|| format!("Unknown (raw pk: {})", *wallet::TENDERLINK_PUBLIC_KEY.lock().unwrap()));
+                ui.text(frame_strf!(data, "{}", identity), TextDecl { font: Mono, h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
             }
 
             //@TODO(Giovanni): Maybe lock behind a key-input (hold to open the popup)...
@@ -3596,7 +3610,11 @@ pub fn ui_right_pane(ui: &mut Context,
             }
 
             if button_ex(ui, "Copy Identity", true, true) {
-                ui.input().send_to_clipboard(&recv_address);
+                if let Some(address) = recv_address.as_ref() {
+                    ui.input().send_to_clipboard(address);
+                } else {
+                    ui.input().send_to_clipboard(&wallet::TENDERLINK_PUBLIC_KEY.lock().unwrap().to_string());
+                }
             }
 
             // Our own commission bank -> a bond on ourselves. Allowed at any height,
@@ -3640,11 +3658,13 @@ pub fn ui_right_pane(ui: &mut Context,
             pub_key:[0xAA;32],
             voting_power:online_stake,
             txids:Vec::new(),
+            finalizer_address: None,
         },
         WalletRosterMember{
             pub_key:[0xBB;32],
             voting_power:offline_stake,
             txids:Vec::new(),
+            finalizer_address: None,
         }];
 
         finalizer_ratio_bar(ui, data, bft_status, &online_offline_roster_members, total_stake, height, seconds_since_connected, &FinalizerFilters::default(), ui::id("Right Pane Ratio Bar 1"), false);
@@ -3720,6 +3740,7 @@ pub fn ui_right_pane(ui: &mut Context,
                         let _ = elem().decl(Decl { colour, height: fixed!(ui.scale(2.0)), width: percent!(1.0), ..Decl });
                     }
 
+                    let (address_prefix, address_label, address_to_copy, address_tooltip) = roster_member_identity(member);
                     let finalizer_status = get_finalizer_status(bft_status, member.pub_key);
                     let roster_member_id =  id_index("Roster Member", index as u32);
                     if let _ = elem().decl(Decl {
@@ -3752,11 +3773,7 @@ pub fn ui_right_pane(ui: &mut Context,
 
                         {
                             if clickable_icon(ui, id_index("Copy Button", index as u32), ICON_DOCS_1, true) {
-                                let mut address_str = String::new();
-                                for b in member.pub_key.iter().rev() {
-                                    address_str.push_str(&format!("{:02x}", b));
-                                }
-                                ui.input().send_to_clipboard(&address_str);
+                                ui.input().send_to_clipboard(&address_to_copy);
                             }
                         }
 
@@ -3774,24 +3791,10 @@ pub fn ui_right_pane(ui: &mut Context,
                             align: TopLeft,
                             ..Decl
                         }) {
-                            ui.text(frame_strf!(data, "{}", display_str_with_edge_bytes(&chunkify(&member.pub_key), 3)), TextDecl { font: Mono, colour: text_colour, h: info_h, wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
-                        }
-
-                        // right info
-                        if let _ = elem().decl(Decl {
-                            id: id_index("Roster Member Amounts", index as u32),
-                            height: fit!(),
-                            width: grow!(),
-                            direction: TopToBottom,
-                            align: Right,
-                            ..Decl
-                        }) {
-                            let mut colour = (0xff, 0xaf, 0x0e, 0xff);
-                            if !is_online {
-                                colour = colour.mul(0.5);
+                            if !address_prefix.is_empty() {
+                                ui.text(frame_strf!(data, "{}", address_prefix), TextDecl { font: Mono, colour: text_colour, h: ui.scale(12.0), wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
                             }
-                            ui.text(frame_strf!(data, "{} cTAZ", str_from_ctaz(member.voting_power)), TextDecl { font: Mono, h: ui.scale(14.0), colour, wrap: Wrap::None, align: AlignX::Right, ..TextDecl });
-
+                            ui.text(frame_strf!(data, "{}", address_label), TextDecl { font: Mono, colour: text_colour, h: info_h, wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
                         }
                     }
 
@@ -3818,14 +3821,14 @@ pub fn ui_right_pane(ui: &mut Context,
 
                             let bank = bank_balance(&data.finalizer_banks, &member.pub_key);
                             set_tooltip_text!(data,
-                                              std::concat!("Finalizer {}:\n",
+                                              std::concat!("{}:\n",
                                                            "  {:.2}% of stake\n",
                                                            "  Commission bank: {} cTAZ\n",
                                                            "  No  Votes Across All Rounds In This Height: {}\n",
                                                            "  Yes Votes Across All Rounds In This Height: {}\n",
                                                            "  Highest Round This Finalizer Voted (Untrusted): {}\n",
                                                            "  {}"),
-                                              wallet::bft::PubKeyID(member.pub_key),
+                                              address_tooltip,
                                               pct,
                                               str_from_ctaz(bank),
                                               no_votes_across_all_round_in_this_height,
@@ -3837,7 +3840,7 @@ pub fn ui_right_pane(ui: &mut Context,
                             data.tooltip_font = Mono;
                         } else {
                             let bank = bank_balance(&data.finalizer_banks, &member.pub_key);
-                            set_tooltip_text!(data, "Finalizer {}:\n  {:.2}% of stake\n  Commission bank: {} cTAZ", wallet::bft::PubKeyID(member.pub_key), pct, str_from_ctaz(bank));
+                            set_tooltip_text!(data, "{}:\n  {:.2}% of stake\n  Commission bank: {} cTAZ", address_tooltip, pct, str_from_ctaz(bank));
                         }
                     }
                 }
@@ -5319,3 +5322,32 @@ pub struct Context {
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct Font(u64);
+
+#[cfg(test)]
+mod roster_identity_tests {
+    use super::*;
+
+    #[test]
+    fn roster_labels_and_copy_values_distinguish_verified_and_unknown_addresses() {
+        let (_, key, pk) = wallet::bft::finalizer_key_from_seed(b"gui-roster-identity");
+        let address = wallet::bft::FinalizerAddress::create(&key);
+        let mut member = WalletRosterMember { pub_key: pk.0, voting_power: 1, txids: Vec::new(), finalizer_address: Some(address) };
+        let (prefix, label, copy, tooltip) = roster_member_identity(&member);
+        assert_eq!(prefix, "[zfinv1");
+        assert!(label.ends_with(']'));
+        assert_eq!(copy, address.encode());
+        assert!(tooltip.contains(&copy));
+
+        member.finalizer_address = None;
+        let (prefix, unknown, raw_pk, tooltip) = roster_member_identity(&member);
+        assert!(prefix.is_empty());
+        assert!(unknown.contains("Unknown (raw pk:"));
+        assert!(unknown.contains(&raw_pk));
+        assert!(!unknown.contains("zfinv1"));
+        assert_eq!(raw_pk, pk.to_string());
+        assert!(tooltip.contains(&raw_pk));
+
+        member.finalizer_address = Some(wallet::bft::FinalizerAddress { pub_key: pk, sig: wallet::bft::TMSig([0; 64]) });
+        assert_eq!(roster_member_identity(&member).2, raw_pk);
+    }
+}

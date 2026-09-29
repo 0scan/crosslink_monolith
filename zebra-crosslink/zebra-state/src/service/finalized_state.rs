@@ -115,6 +115,7 @@ pub const STATE_COLUMN_FAMILIES_IN_CODE: &[&str] = &[
     "bond_status_by_key",
     "aggregated_stakes_by_hash",
     "finalizer_reward_by_key",
+    "finalizer_address_by_key",
     // The decided BFT chain, by BFT height.
     "bft_block_by_height",
     "bft_fat_pointer_by_height",

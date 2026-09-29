@@ -5,6 +5,7 @@
 //! [`crate::constants::state_database_format_version_in_code()`] must be incremented
 //! each time the database format (column, serialization, etc) changes.
 
+use zcash_primitives::bft::FinalizerAddress;
 use zebra_chain::amount::{Amount, NonNegative};
 
 use crate::service::finalized_state::disk_format::{
@@ -234,6 +235,34 @@ impl IntoDisk for BondStatus {
         }
 
         bytes
+    }
+}
+
+/// A [`FinalizerAddress`] is stored as its raw 96-byte wire form: the 32-byte public key, then
+/// the 64-byte signature over [`zcash_primitives::bft::FINALIZER_ADDRESS_MSG`]. Only addresses
+/// that passed [`FinalizerAddress::verify`] are ever written.
+const FINALIZER_ADDRESS_DISK_BYTES: usize = 96;
+
+impl IntoDisk for FinalizerAddress {
+    type Bytes = [u8; FINALIZER_ADDRESS_DISK_BYTES];
+
+    fn as_bytes(&self) -> Self::Bytes {
+        let mut bytes = [0u8; FINALIZER_ADDRESS_DISK_BYTES];
+        self.write(&mut bytes[..])
+            .expect("a finalizer address is exactly 96 bytes");
+        bytes
+    }
+}
+
+impl FromDisk for FinalizerAddress {
+    fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert_eq!(
+            bytes.len(),
+            FINALIZER_ADDRESS_DISK_BYTES,
+            "FinalizerAddress byte length mismatch"
+        );
+        FinalizerAddress::read(bytes).expect("length was checked above")
     }
 }
 

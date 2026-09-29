@@ -977,6 +977,18 @@ pub struct WalletRosterMember {
     pub pub_key: [u8; 32],
     pub voting_power: u64,
     pub txids: std::vec::Vec<StakeTxId>,
+    pub finalizer_address: Option<bft::FinalizerAddress>,
+}
+
+fn decode_roster_bytes(bytes: &[u8]) -> std::io::Result<Vec<RosterMember>> {
+    let mut reader = std::io::Cursor::new(bytes);
+    let mut roster = Vec::new();
+    while reader.position() < bytes.len() as u64 {
+        let mut member = RosterMember::read_from(&mut reader)?;
+        member.finalizer_address = member.finalizer_address.filter(|address| address.pub_key.0 == member.pub_key && address.verify());
+        roster.push(member);
+    }
+    Ok(roster)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3823,65 +3835,18 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
             match client.get_roster(Empty{}).await {
                 Err(err) => println!("Get roster error: {err:?}"),
                 Ok(res) => {
-                    use std::io::{ Cursor,Read };
                     let roster_bytes = res.into_inner().data;
-
-                    let mut ok = roster_bytes.len() > 0;
-                    let mut cur = Cursor::new(&roster_bytes);
-
-                    let mut new_roster = Vec::new();
-                    let mut num_buf = [0u8; 8];
-                    'read: while cur.position() < roster_bytes.len() as u64 {
-                        let mut m = RosterMember{ pub_key: [0;32], voting_power:0, txids: Vec::new() };
-                        if let Err(err) = cur.read_exact(&mut m.pub_key) {
-                            println!("******* ROSTER DESERIALIZE ERROR: {err:?}");
-                            ok = false;
-                            break;
-                        }
-                        if let Err(err) = cur.read_exact(&mut num_buf) {
-                            println!("******* ROSTER DESERIALIZE ERROR: {err:?}");
-                            ok = false;
-                            break;
-                        }
-                        m.voting_power = u64::from_le_bytes(num_buf);
-
-                        if let Err(err) = cur.read_exact(&mut num_buf) {
-                            println!("******* ROSTER DESERIALIZE ERROR: {err:?}");
-                            ok = false;
-                            break;
-                        }
-
-                        let mut voting_power_check = 0;
-                        let txids_n = u64::from_le_bytes(num_buf);
-                        for _ in 0..txids_n {
-                            let mut stake_txid = StakeTxId{ txid:[0;32], zats:0 };
-                            if let Err(err) = cur.read_exact(&mut stake_txid.txid) {
-                                println!("******* ROSTER DESERIALIZE ERROR: {err:?}");
-                                ok = false;
-                                break 'read;
+                    match decode_roster_bytes(&roster_bytes) {
+                        Ok(new_roster) => {
+                            for member in &new_roster {
+                                let voting_power_check: u64 = member.txids.iter().map(|txid| txid.zats).sum();
+                                if member.voting_power != voting_power_check && DUMP_ROSTER {
+                                    println!("******* RECEIVED ROSTER VOTING POWER INACCURATE: {} vs {}", member.voting_power, voting_power_check);
+                                }
                             }
-                            if let Err(err) = cur.read_exact(&mut num_buf) {
-                                println!("******* ROSTER DESERIALIZE ERROR: {err:?}");
-                                ok = false;
-                                break 'read;
-                            }
-                            stake_txid.zats = u64::from_le_bytes(num_buf);
-                            voting_power_check += stake_txid.zats;
-                            m.txids.push(stake_txid);
+                            roster = new_roster;
                         }
-
-                        if m.voting_power != voting_power_check {
-                            // TODO: use manually-found one?
-                            if DUMP_ROSTER { println!("******* RECEIVED ROSTER VOTING POWER INACCURATE: {} vs {}", m.voting_power, voting_power_check); }
-                            // ok = false;
-                            // break;
-                        }
-
-                        new_roster.push(m);
-                    }
-
-                    if ok {
-                        roster = new_roster;
+                        Err(err) => println!("******* ROSTER DESERIALIZE ERROR: {err:?}"),
                     }
 
                     let wallet_roster = roster
@@ -3889,7 +3854,8 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
                         .map(|member| WalletRosterMember{
                             pub_key: member.pub_key,
                             voting_power: member.voting_power,
-                            txids: member.txids.clone()
+                            txids: member.txids.clone(),
+                            finalizer_address: member.finalizer_address
                         })
                     .collect::<Vec<WalletRosterMember>>();
                     if DUMP_ROSTER { println!("*********** WALLET ROSTER: {wallet_roster:?}"); }
@@ -5299,5 +5265,26 @@ mod tests {
         let anchor = tip.sat_sub(SPENDABLE_CONFIRMATIONS - 1);
         assert_eq!(anchor.confirmations(tip), SPENDABLE_CONFIRMATIONS);
         assert_eq!(BlockHeight(anchor.0 + 1).confirmations(tip), SPENDABLE_CONFIRMATIONS - 1);
+    }
+
+    #[test]
+    fn roster_client_downgrades_invalid_addresses_and_rejects_bad_tags() {
+        let (_, key, pk) = bft::finalizer_key_from_seed(b"wallet-roster-codec");
+        let address = bft::FinalizerAddress::create(&key);
+        let member = RosterMember { pub_key: pk.0, voting_power: 42, txids: vec![StakeTxId { txid: [7; 32], zats: 42 }], finalizer_address: Some(address) };
+        let mut bytes = Vec::new();
+        member.write_to_vec(&mut bytes);
+        member.write_to_vec(&mut bytes);
+        assert_eq!(decode_roster_bytes(&bytes).unwrap(), vec![member.clone(), member.clone()]);
+
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        let roster = decode_roster_bytes(&bytes).unwrap();
+        assert_eq!(roster[0].finalizer_address, Some(address));
+        assert_eq!(roster[1].finalizer_address, None);
+        bytes.truncate(last);
+        assert!(decode_roster_bytes(&bytes).is_err());
+        bytes[last - 64] = 2;
+        assert!(decode_roster_bytes(&bytes).is_err());
     }
 }

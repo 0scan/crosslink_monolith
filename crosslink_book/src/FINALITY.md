@@ -312,13 +312,15 @@ The separately stated
 add:
 
 - **Linearity:** `snapshot(parent(B)) ⪯bc snapshot(B)`.
-- **Tail Confirmation:** `B.headers_bc` form the `σ`-block tail of a bc-valid chain.
+- **Tail Confirmation:** `B.headers_bc` form a `σ`-header proof-of-work tail on `snapshot(B)`.
 
 **Zebra Crosslink** enforces all five rules above, and so does the **current tree** (§6.2).
 
-Tail Confirmation is objective: `σ` consecutive headers ending at a bc-valid block are the tail
-of the chain that ends at that block, whatever the validator's own best chain. The Book
-separately defines what an honest proposer puts in that field.
+Tail Confirmation is objective: `σ` consecutive headers, each with valid proof of work, whose
+deepest extends a block the validator holds, whatever the validator's own best chain. Only the
+snapshot has to be held; the blocks behind the headers are never required, because a tail is the
+proposer's `bc_best` at proposal time and bc may orphan it afterwards, after which no node can
+serve it. The Book separately defines what an honest proposer puts in that field.
 
 **Honest proposal.** An
 [honest proposer](https://github.com/daira/tfl-book/blob/fe6e1d6f403f62da46c64e8f5a7db3cb188ffae2/src/design/crosslink/construction.md#L625-L633)
@@ -1008,12 +1010,14 @@ it departs from.
 - The Finality Depth rule and Stalled Mode are omitted by design (§3.3). The 512-block log
   threshold is diagnostic, not consensus.
 - BFT validation enforces Linearity and Tail Confirmation in `BftRunner::validate`. Tail
-  Confirmation is checked as the three things it is: exactly `σ` headers, each naming the one
-  below it, and the block at the topmost header known to this state — which, given the linkage,
-  carries the bc-validity of the whole tail, since a block the state holds has been validated
-  along with its ancestry. Linearity compares the parent bft-block's snapshot against this
-  block's through the same ancestry read. A block either check cannot resolve yet returns
-  `Indeterminate` with the hash it needs, as a missing snapshot already did.
+  Confirmation is checked as the four things it is: exactly `σ` headers, each naming the one
+  below it, the snapshot (the deepest header's parent) known to this state, and each header's
+  own proof of work — a well-formed difficulty threshold within PoWLimit, a hash under it, and a
+  valid Equihash solution (`header_pow_is_valid`). The blocks behind the headers are not
+  required and never requested. Linearity compares the parent bft-block's snapshot against this
+  block's through an ancestry read. A snapshot either check cannot resolve yet returns
+  `Indeterminate` with the hash it needs; the sync loop requests such hashes from peers directly
+  (`bft::missing_pow_blocks`), since they may lie outside every peer's near-tip window.
 - **The confirmation depth is enforced on inclusion.** A PoW block at height `P` may carry a
   fat pointer to a BFT block whose snapshot is at height `F` only when `P ≥ F + σ + 1`: the
   `σ` carried headers `F+1 ..= F+σ`, then the carrier. Admitting a PoW block therefore
@@ -1320,14 +1324,15 @@ stored, or consumed.
   reorg-depth commit. RPC, GUI, and notification readers take the persisted `fin`.
 - **Last Final Snapshot constrains block templates.** A template must cite a bft-block whose
   snapshot lies on the template's parent chain, or the mined block is invalid (§6.2).
-- **Tail Confirmation needs the whole tail.** Validation checks all `σ` carried headers and the
-  bc-validity of their blocks, which a validator may first have to download (§3.4).
-- **A `σ` window is a chain, and its top must be present.** Enforcing Tail Confirmation
-  invalidated two fixtures in `crosslink_test_basic_finality` that predate it: a window taken as
-  a slice of a block list that holds a fork carried two siblings rather than a chain, and the
-  last window's topmost header named a block the test never loaded, which now defers with
-  `NeedsBlock` instead of validating. Any test that builds a certificate from a slice has to
-  take its blocks from one branch and load the block at the top of the window.
+- **Tail Confirmation needs the headers, not the blocks.** Validation checks all `σ` carried
+  headers' linkage and proof of work, and requires only the snapshot to be held (§3.4).
+  Requiring the top block was a sync deadlock: a decided bft-block whose tail bc later orphaned
+  could never be validated by a catching-up node once every peer had pruned the orphan, and every
+  bc-block citing it stayed deferred.
+- **A `σ` window is a chain.** Enforcing Tail Confirmation invalidated a fixture in
+  `crosslink_test_basic_finality` that predates it: a window taken as a slice of a block list
+  that holds a fork carried two siblings rather than a chain. Any test that builds a certificate
+  from a slice has to take its blocks from one branch.
 - **Reward logic has three copies.** `Chain::push` with `update_bonds_with_pos_issuance`,
   `fixup_aggregated_stakes` in `stake_fixup.rs`, and the wallet projection in `lib.rs` must
   change together (§5.4).

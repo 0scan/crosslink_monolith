@@ -1189,7 +1189,7 @@ pub(crate) async fn handle_instr(
                 .write()
                 .unwrap()
                 .roster
-                .push(RosterMember { pub_key, voting_power: stake, txids: Vec::new() });
+                .push(RosterMember { pub_key, voting_power: stake, txids: Vec::new(), finalizer_address: None });
         }
     }
 }

@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
-use std::sync::{Arc, LazyLock, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 
 use tenderlink::{
     addr_string_to_stuff, BftAddressMap, BlockValue, ConsensusCounts, FinalizerPeerAddress,
@@ -26,7 +26,7 @@ use zcash_primitives::block::{
 };
 use zcash_primitives::transaction::RosterMember;
 use zebra_chain::block::{Hash, Header, Height};
-use zebra_chain::serialization::ZcashSerialize;
+use zebra_chain::serialization::{ZcashDeserialize, ZcashSerialize};
 
 use super::ReadState;
 use crate::service::finalized_state::bft::StoredDecision;
@@ -96,6 +96,25 @@ pub fn bft_chain() -> &'static RwLock<BftChain> {
     &BFT_CHAIN
 }
 
+/// PoW blocks needed to validate a received BFT proposal: its snapshot, or its parent's.
+///
+/// Tenderlink can deliver a proposal before the PoW synchronizer sees its snapshot. Keep the exact
+/// missing hashes here so the sync loop can request them directly instead of waiting for them to
+/// happen to appear in a peer's moving near-tip window.
+static MISSING_POW_BLOCKS: LazyLock<Mutex<HashSet<Hash>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn needs_pow_block(hash: Hash) -> (TMStatus, TMStatusReason) {
+    MISSING_POW_BLOCKS.lock().unwrap().insert(hash);
+    (TMStatus::Indeterminate, TMStatusReason::NeedsBlock { hash: hash.0 })
+}
+
+pub(super) fn missing_pow_blocks(read_state: &ReadState) -> Vec<Hash> {
+    let mut missing = MISSING_POW_BLOCKS.lock().unwrap();
+    missing.retain(|hash| read_state.known_block(*hash).is_none());
+    missing.iter().copied().collect()
+}
+
 static RECENCY_STATUS: LazyLock<tokio::sync::watch::Sender<TFLRecencyStatus>> =
     LazyLock::new(|| tokio::sync::watch::channel(TFLRecencyStatus::default()).0);
 
@@ -163,6 +182,29 @@ pub fn bc_hdr_to_lrz(header: &Header) -> BcBlockHeader {
     let mut bytes = Vec::new();
     header.zcash_serialize(&mut bytes).unwrap();
     BcBlockHeaderWrap::read_data(&*bytes).unwrap()
+}
+
+/// The context-free proof-of-work checks for a carried bc-header: a well-formed difficulty
+/// threshold within the network's PoWLimit, a block hash under that threshold, and a valid
+/// Equihash solution. These are the same checks Zebra's block verifier applies to a header before
+/// it has the block's ancestry.
+fn header_pow_is_valid(header: &BcBlockHeader, network: &zebra_chain::parameters::Network) -> Result<(), String> {
+    use zebra_chain::work::difficulty::ParameterDifficulty as _;
+    let mut bytes = Vec::new();
+    BcBlockHeaderWrap::write_data(header, &mut bytes).map_err(|e| e.to_string())?;
+    let header = Header::zcash_deserialize(&*bytes).map_err(|e| e.to_string())?;
+    let hash = header.hash();
+    let threshold = header
+        .difficulty_threshold
+        .to_expanded()
+        .ok_or_else(|| format!("invalid difficulty threshold {:?}", header.difficulty_threshold))?;
+    if threshold > network.target_difficulty_limit() {
+        return Err(format!("difficulty threshold {threshold:?} is above the network limit"));
+    }
+    if hash > threshold {
+        return Err(format!("hash {hash} does not meet difficulty threshold {threshold:?}"));
+    }
+    header.solution.check(&header).map_err(|e| e.to_string())
 }
 
 /// The set of finalizers terminated (blacklisted) by user-led hardforks at a given point, as a
@@ -941,10 +983,10 @@ impl BftRunner {
             .filter(|p| !p.headers.is_empty())
             .map(|p| Hash(p.snapshot_block_hash().0));
 
-        // Tail Confirmation (FINALITY.md §3.4): `headers_bc` is the sigma-block tail of a
-        // bc-valid chain. The rule is objective -- it says nothing about this validator's own
-        // best chain -- and has three parts: the count, the linkage, and the bc-validity of the
-        // blocks named.
+        // Tail Confirmation (FINALITY.md §3.4): `headers_bc` is a sigma-header proof-of-work
+        // tail on the snapshot. The rule is objective -- it says nothing about this validator's
+        // own best chain -- and has four parts: the count, the linkage, the snapshot being a
+        // block this state holds, and each header's own proof of work.
         let sigma = self.params.bc_confirmation_depth_sigma as usize;
         if new_block.headers.len() != sigma {
             tracing::warn!(
@@ -963,23 +1005,26 @@ impl BftRunner {
                 return fail;
             }
         }
-        // The headers are linked, so the topmost one carries the whole tail with it: a block
-        // this state holds has passed bc validation, and its ancestry is exactly these headers
-        // and then the snapshot. Checking the rest one by one would add lookups and no
-        // information.
-        if let Some(top_header) = new_block.headers.last() {
-            let top_hash = Hash(BlockHash::from_header_data(top_header).0);
-            if read_state.known_block(top_hash).is_none() {
-                // Not a violation: this node has simply not seen that bc-block yet.
-                return (TMStatus::Indeterminate, TMStatusReason::NeedsBlock { hash: top_hash.0 });
-            }
-        }
-
         // The `snapshot` this proposal finalizes: the parent of the deepest carried header.
         let new_final_hash = Hash(new_block.snapshot_block_hash().0);
         if read_state.known_block(new_final_hash).is_none() {
             tracing::warn!("Didn't have hash available for confirmation: {}", new_final_hash);
-            return (TMStatus::Indeterminate, TMStatusReason::NeedsBlock { hash: new_final_hash.0 });
+            return needs_pow_block(new_final_hash);
+        }
+
+        // The tail itself is checked from the headers alone: each extends the one below it
+        // (above), the deepest extends the snapshot (by definition of the snapshot), and each
+        // carries its own proof of work. The blocks behind the headers are never required. A
+        // tail is the proposer's `bc_best` at proposal time and bc can orphan it afterwards;
+        // nodes retain and serve only the blocks on their chains, so a node catching up on a
+        // decided bft-block could never download an orphaned tail, and every bc-block whose fat
+        // pointer names that bft-block would stay deferred.
+        let network = read_state.network();
+        for (i, header) in new_block.headers.iter().enumerate() {
+            if let Err(reason) = header_pow_is_valid(header, network) {
+                tracing::warn!("BFT block header {i} fails proof of work: {reason}");
+                return fail;
+            }
         }
 
         // Linearity (FINALITY.md §3.4): `snapshot(parent(B)) ⪯bc snapshot(B)`. With BFT Final
@@ -998,7 +1043,7 @@ impl BftRunner {
                     // One of the two is not placed on a chain here yet; ask again rather than
                     // reject, exactly as a missing snapshot does above.
                     None => {
-                        return (TMStatus::Indeterminate, TMStatusReason::NeedsBlock { hash: parent_snapshot_hash.0 });
+                        return needs_pow_block(parent_snapshot_hash);
                     }
                 }
             }
@@ -1097,7 +1142,7 @@ impl BftRunner {
         if !got_stakes.is_empty() {
             chain.roster = got_stakes
                 .into_iter()
-                .map(|s| RosterMember { pub_key: s.0, voting_power: s.1, txids: Vec::new() })
+                .map(|s| RosterMember { pub_key: s.0, voting_power: s.1, txids: Vec::new(), finalizer_address: None })
                 .collect();
         } else {
             // Zero aggregated stakes, having previously had real stake.
@@ -1242,7 +1287,7 @@ impl BftRunner {
                 if !stakes.is_empty() {
                     unsorted_roster = stakes
                         .into_iter()
-                        .map(|s| RosterMember { pub_key: s.0, voting_power: s.1, txids: Vec::new() })
+                        .map(|s| RosterMember { pub_key: s.0, voting_power: s.1, txids: Vec::new(), finalizer_address: None })
                         .collect();
                 }
             }

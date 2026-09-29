@@ -1129,6 +1129,23 @@ impl Service<ReadRequest> for ReadStateService {
                 crate::new_network::bft::bft_chain().read().unwrap().roster.clone(),
             )),
 
+            // The current BFT roster, each member paired with its verified finalizer address
+            // when the chain has revealed one. The roster is cloned once, so every returned
+            // address belongs to a member of that one roster; addresses are then resolved from
+            // a non-finalized snapshot taken before the finalized-state reads (see
+            // `read::delegation::finalizer_addresses` for why that order loses no block).
+            ReadRequest::CrosslinkRosterWithAddresses => {
+                let roster = crate::new_network::bft::bft_chain().read().unwrap().roster.clone();
+                let non_finalized_state = state.latest_non_finalized_state();
+                let keys: Vec<[u8; 32]> = roster.iter().map(|member| member.pub_key).collect();
+                let addresses =
+                    read::delegation::finalizer_addresses(&non_finalized_state, &state.db, &keys);
+
+                Ok(ReadResponse::CrosslinkRosterWithAddresses(
+                    roster.into_iter().zip(addresses).collect(),
+                ))
+            }
+
             ReadRequest::CrosslinkRecencyStatus => Ok(ReadResponse::CrosslinkRecencyStatus(
                 crate::new_network::bft::bft_recency_status(),
             )),

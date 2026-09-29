@@ -69,6 +69,10 @@ const DATABASE_FORMAT_VERSION: u64 = 31;
 /// - breaking changes with compatibility code in all supported Zebra versions.
 ///
 /// Version history:
+/// - 31.3.0: Adds the `finalizer_address_by_key` column family: finalizer public key -> the
+///   first verified `FinalizerAddress` carried by a finalized Create target or Retarget from/to
+///   address. Databases from 31.2.0 and earlier are backfilled by scanning the finalized blocks'
+///   staking actions (`AddFinalizerAddresses` format upgrade).
 /// - 31.0.0: Crosslink staking action signatures. The txid digest now zeroes a staking
 ///   action's signature fields, so every stored transaction carrying a staking action gets a
 ///   new txid and block hashes containing one change with it. Requires a resync.
@@ -87,7 +91,7 @@ const DATABASE_FORMAT_VERSION: u64 = 31;
 ///   the current width). New CFs are created and the wider records are read in place when the
 ///   database is opened, so this is a major bump that is restorable from the previous major
 ///   database format version (no resync, no data migration).
-const DATABASE_FORMAT_MINOR_VERSION: u64 = 2;
+const DATABASE_FORMAT_MINOR_VERSION: u64 = 3;
 
 /// The database format patch version, incremented each time the on-disk database format has a
 /// significant format compatibility fix.

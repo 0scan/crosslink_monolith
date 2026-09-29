@@ -22,6 +22,7 @@ use DbFormatChange::*;
 
 use crate::service::finalized_state::ZebraDb;
 
+pub(crate) mod add_finalizer_addresses;
 pub(crate) mod add_ironwood_tree;
 pub(crate) mod add_subtrees;
 pub(crate) mod block_info_and_address_received;
@@ -114,7 +115,10 @@ fn format_upgrades(
         // and the genesis Ironwood anchor is missing for NU6.3 anchor validation). This is a
         // major-version upgrade that is restorable from the previous major database format version.
         Box::new(add_ironwood_tree::Upgrade),
-    ] as [Box<dyn DiskFormatUpgrade>; 7])
+        // Backfills the finalizer public key -> verified finalizer address index from the
+        // staking actions of already-finalized blocks.
+        Box::new(add_finalizer_addresses::Upgrade),
+    ] as [Box<dyn DiskFormatUpgrade>; 8])
         .into_iter()
         .filter(move |upgrade| upgrade.version() > min_version())
 }

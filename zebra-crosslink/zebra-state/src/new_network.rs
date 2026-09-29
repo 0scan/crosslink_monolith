@@ -2071,6 +2071,7 @@ pub fn sync(
                 }
             }
             let prev_active_block_dls = active_block_dls;
+            let missing_bft_pow_blocks = bft::missing_pow_blocks(&read_state);
 
             // TODO: weight peers by observed quality
             const MAX_PEERS_TO_INIT_DLS_FROM: usize = 16;
@@ -2120,6 +2121,32 @@ pub fn sync(
                             block_downloads.insert(probe);
                         }
                         continue 'send_to_peers;
+                    }
+                }
+
+                // A BFT proposal can arrive before its PoW tail. Request those exact hashes from
+                // peers directly; waiting for a hash to reappear in a moving STATUS window can
+                // deadlock BFT validation and every PoW block whose fat pointer names it.
+                for &hash in &missing_bft_pow_blocks {
+                    if active_block_dls >= MAX_BANDWIDTH_BLOCKS_PER_RES {
+                        break;
+                    }
+                    let dups = requests_by_hash.entry(hash).or_insert(0);
+                    if *dups >= MAX_REQUEST_DUPLICATES_N {
+                        continue;
+                    }
+                    let request = HeightAndHashOr0 {
+                        // The hash is authoritative. The serving peer replaces this sentinel with
+                        // the block's coinbase height in its response.
+                        height: block::Height(u32::MAX),
+                        hash_or_0: hash,
+                    };
+                    if block_downloads.position(request).is_none()
+                        && block_downloads.insert(request).is_some()
+                    {
+                        tracing::debug!("Requesting PoW block {hash} needed by BFT validation from peer {connection_key:?}");
+                        active_block_dls += 1;
+                        *dups += 1;
                     }
                 }
 
@@ -2389,7 +2416,7 @@ pub fn sync(
                             offset,
                         }.write_to(&mut buf[o..]);
 
-                        if TRACE { tracing::info!("Requesting height {} hash {} offset {offset} from peer {connection_key:?}", dl.height_hash.height.0, dl.height_hash.hash_or_0); }
+                        tracing::debug!("Requesting height {} hash {} offset {offset} from peer {connection_key:?}", dl.height_hash.height.0, dl.height_hash.hash_or_0);
 
                         packets_to_send.push((*connection_key, Vec::from(&buf[..o])));
                     }
@@ -2592,6 +2619,15 @@ pub fn sync(
                     their_tree.branches.retain(|b| !b.is_empty());
                 }
 
+                tracing::debug!(
+                    "STATUS from {connection_address:?}: finalized {}, branches {:?}",
+                    their_tree.finalized_height,
+                    their_tree.branches.iter().map(|b| {
+                        let first = &b[0];
+                        let last = b.last().unwrap();
+                        format!("{}..{} ({}..{})", first.this_height, last.this_height, first.this_hash, last.this_hash)
+                    }).collect::<Vec<_>>(),
+                );
                 peer.their_tree = their_tree;
                 peer.their_queue = their_queue;
 
@@ -2608,9 +2644,18 @@ pub fn sync(
                     if let Some(hash) = read_state.best_chain_block_hash(height_hash.height) {
                         height_hash.hash_or_0 = hash;
                     }
+                } else if height_hash.height.0 == u32::MAX {
+                    // A by-hash request from BFT validation does not know the PoW height. Return
+                    // the real height so the receiver can apply its normal finalized/window checks.
+                    height_hash.height = read_state
+                        .block_from_any_chain(height_hash.hash_or_0.into())
+                        .and_then(|block| block.coinbase_height())
+                        .unwrap_or(block::Height(u32::MAX));
                 }
 
-                if height_hash.hash_or_0 != block::Hash([0;32]) {
+                if height_hash.hash_or_0 != block::Hash([0;32])
+                    && height_hash.height.0 != u32::MAX
+                {
                     blocks_to_send.push((connection_key, height_hash.hash_or_0, height_hash.height.0, request.offset as usize));
                 } else {
                     // by-height request for a block we don't have on the best chain; nothing to send
@@ -2620,6 +2665,7 @@ pub fn sync(
                 let Some(hdr) = some_or_kill!(PeerPowBlockResponseChunkHdr::read_from(&mut msg), "failed to read PoW chunk header") else {
                     continue 'process_packets;
                 };
+                tracing::debug!("BLOCK chunk @ {} {} offset {} from peer {connection_key:?}", hdr.height_hash.height.0, hdr.height_hash.hash_or_0, hdr.offset);
 
                 // @Todo: rate limit consumption
 
@@ -2637,6 +2683,10 @@ pub fn sync(
 
                 // @Note: for valid blocks the height can be computed from block data, so this is an early-out optimization.
                 let alleged_height = hdr.height_hash.height.0;
+                // A by-hash request made without knowing the height (BFT validation) uses
+                // `u32::MAX`. A peer may echo it back unchanged, so the height is only known once
+                // the block is deserialized; the height checks below run then instead.
+                let height_is_alleged = alleged_height != u32::MAX;
 
                 // @Note: Skip blocks older than the base of the window we advertise. Depending on
                 // whether NEAR_TIP_CHAIN_LEN is < or > Zebra's MAX_BLOCK_REORG_HEIGHT, being below
@@ -2647,14 +2697,14 @@ pub fn sync(
 
                 // if TRACE { tracing::info!("Block @ {alleged_height}, offset {}...", hdr.offset); }
 
-                if alleged_height < min_height {
+                if height_is_alleged && alleged_height < min_height {
                     warning!("Block at height {alleged_height} is below our near-tip-chain height {min_height}");
                     peer.block_downloads.remove(dl_i);
                     continue 'process_packets; // Deciding that it's "not even worth" sending to Zebra
                 }
 
                 let finalized_height = read_state.finalized_tip().map_or(0, |(h, _)| h.0);
-                if alleged_height <= finalized_height {
+                if height_is_alleged && alleged_height <= finalized_height {
                     warning!("Block at height {alleged_height} is already finalized");
                     peer.block_downloads.remove(dl_i);
                     continue 'process_packets; // Definitely already committed :)
@@ -2678,7 +2728,10 @@ pub fn sync(
                         continue 'process_packets;
                     }
                     let dl = &mut peer.block_downloads.slots[dl_i];
-                    if dl.height_hash.height != hdr.height_hash.height {
+                    if dl.height_hash.height.0 == u32::MAX {
+                        // by-hash request; adopt whatever height the peer reports, verified below
+                        dl.height_hash.height = hdr.height_hash.height;
+                    } else if dl.height_hash.height != hdr.height_hash.height {
                         kill!("the hash matches but the height doesn't");
                         continue 'process_packets;
                     }
@@ -2792,9 +2845,21 @@ pub fn sync(
                     continue 'process_packets;
                 };
 
-                if height != Height(alleged_height) {
+                if height_is_alleged && height != Height(alleged_height) {
                     kill!("Computed block height did not match advertised hash");
                     continue 'process_packets;
+                }
+
+                if !height_is_alleged {
+                    // Deferred height checks for a by-hash request (see `height_is_alleged`).
+                    if height.0 < min_height {
+                        warning!("Block at height {} is below our near-tip-chain height {min_height}", height.0);
+                        continue 'process_packets;
+                    }
+                    if height.0 <= finalized_height {
+                        warning!("Block at height {} is already finalized", height.0);
+                        continue 'process_packets;
+                    }
                 }
 
                 // Lite checkpoint: never commit a conflicting block at the pinned height. Just

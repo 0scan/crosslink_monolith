@@ -444,6 +444,16 @@ pub enum ReadResponse {
     /// Response to [`ReadRequest::CrosslinkRoster`].
     CrosslinkRoster(Vec<zcash_primitives::transaction::RosterMember>),
 
+    /// Response to [`ReadRequest::CrosslinkRosterWithAddresses`]: the roster in
+    /// [`ReadResponse::CrosslinkRoster`] order, each member with its verified finalizer address
+    /// if the chain has revealed one.
+    CrosslinkRosterWithAddresses(
+        Vec<(
+            zcash_primitives::transaction::RosterMember,
+            Option<zcash_primitives::bft::FinalizerAddress>,
+        )>,
+    ),
+
     /// Response to [`ReadRequest::CrosslinkRecencyStatus`].
     CrosslinkRecencyStatus(zcash_primitives::bft::TFLRecencyStatus),
 
@@ -762,6 +772,7 @@ impl TryFrom<ReadResponse> for Response {
             | ReadResponse::CrosslinkAggregatedStakes(_)
             | ReadResponse::CrosslinkFatPointerToBftChainTip(_)
             | ReadResponse::CrosslinkRoster(_)
+            | ReadResponse::CrosslinkRosterWithAddresses(_)
             | ReadResponse::CrosslinkRecencyStatus(_)
             | ReadResponse::CrosslinkFinalizedTip(_)
             | ReadResponse::CrosslinkFinalizedTipChange(_)

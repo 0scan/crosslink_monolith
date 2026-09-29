@@ -701,13 +701,15 @@ pub fn lightwalletd_spawn(ctx: Ctx, port: u16, ready_port: u16) -> std::thread::
                                                     match c
                                                         .read_state
                                                         .clone()
-                                                        .oneshot(ReadRequest::CrosslinkRoster)
+                                                        .oneshot(ReadRequest::CrosslinkRosterWithAddresses)
                                                         .await
                                                         .map_err(internal)?
                                                     {
-                                                        ReadResponse::CrosslinkRoster(roster) => {
+                                                        ReadResponse::CrosslinkRosterWithAddresses(roster) => {
                                                             let mut data = Vec::new();
-                                                            for member in &roster {
+                                                            for (member, address) in &roster {
+                                                                let mut member = member.clone();
+                                                                member.finalizer_address = *address;
                                                                 member.write_to_vec(&mut data);
                                                             }
                                                             Ok(Work::Items([enc(&Bytes { data })].into()))

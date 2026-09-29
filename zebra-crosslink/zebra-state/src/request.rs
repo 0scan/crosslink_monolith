@@ -1536,6 +1536,13 @@ pub enum ReadRequest {
     /// the last non-empty roster when those are empty.
     CrosslinkRoster,
 
+    /// The same roster as [`ReadRequest::CrosslinkRoster`], each member paired with the verified
+    /// finalizer address the chain has revealed for its public key, or `None` when no committed
+    /// staking action (finalized, or in a retained non-finalized block) has carried one. A raw
+    /// public key is never converted into an address. Roster and addresses come from one
+    /// request: the roster is cloned once and then each member's key is resolved.
+    CrosslinkRosterWithAddresses,
+
     /// Tenderlink.s latest round-state snapshot: what this node has heard from each finalizer
     /// at its current height.
     CrosslinkRecencyStatus,
@@ -1676,6 +1683,7 @@ impl ReadRequest {
             ReadRequest::CrosslinkIsAncestor { .. } => "crosslink_is_ancestor",
             ReadRequest::CrosslinkFatPointerToBftChainTip(_) => "crosslink_fat_pointer_to_bft_chain_tip",
             ReadRequest::CrosslinkRoster => "crosslink_roster",
+            ReadRequest::CrosslinkRosterWithAddresses => "crosslink_roster_with_addresses",
             ReadRequest::CrosslinkRecencyStatus => "crosslink_recency_status",
             ReadRequest::CrosslinkFinalizedTip => "crosslink_finalized_tip",
             ReadRequest::CrosslinkFinalizedTipChange => "crosslink_finalized_tip_change",
