@@ -3758,18 +3758,29 @@ where
                 .read_state
                 .clone()
                 .oneshot(ReadRequest::InvalidStakingActions { height, staking_actions })
-                .await
-                .map_misc_error()?;
-            let ReadResponse::InvalidStakingActions(invalid) = response else {
-                unreachable!("InvalidStakingActions request always responds with InvalidStakingActions")
+                .await;
+            // This check is a safety net, so it must not stop mining: if the state can't answer,
+            // the template goes out without its staking transactions rather than not at all.
+            let invalid: Vec<usize> = match response {
+                Ok(ReadResponse::InvalidStakingActions(invalid)) => {
+                    if !invalid.is_empty() {
+                        tracing::info!(
+                            invalid_count = invalid.len(),
+                            "leaving staking actions the block would be rejected for out of the template"
+                        );
+                    }
+                    invalid.into_iter().map(|i| staking_positions[i]).collect()
+                }
+                Ok(_) => unreachable!("InvalidStakingActions request always responds with InvalidStakingActions"),
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        staking_count = staking_positions.len(),
+                        "could not check the template's staking actions; leaving them all out"
+                    );
+                    staking_positions
+                }
             };
-            if !invalid.is_empty() {
-                tracing::info!(
-                    invalid_count = invalid.len(),
-                    "leaving staking actions the block would be rejected for out of the template"
-                );
-            }
-            let invalid: Vec<usize> = invalid.into_iter().map(|i| staking_positions[i]).collect();
             remove_with_dependents(mempool_txs, &invalid)
         };
 
