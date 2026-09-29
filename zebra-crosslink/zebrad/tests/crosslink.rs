@@ -212,6 +212,17 @@ const POW_FILE_IDX: [usize; REGTEST_BLOCK_BYTES_N] = [
 ];
 const POS_FILE_IDX: [usize; 7] = [5, 8, 11, 16, 20, 24, 27];
 
+/// The regtest network a scenario's node runs, for building that scenario's blocks. Consensus
+/// rules that depend on the Crosslink parameters must see the same ones on both sides: the staking
+/// share of the coinbase, for one, starts at the bootstrap activation height, or at genesis when
+/// BFT is supplied.
+fn regtest_network(params: &zcash_primitives::bft::ZcashCrosslinkParameters) -> Network {
+    Network::new_regtest(zebra_chain::parameters::testnet::RegtestParameters {
+        crosslink: Some(*params),
+        ..Default::default()
+    })
+}
+
 /// Rewrite the checked-in binaries in `crosslink-test-data` from the current block format.
 ///
 /// A tool rather than a test, so it is `#[ignore]`d like `read_from_file` and runs only when
@@ -231,7 +242,7 @@ fn regen_test_data() {
     let dir = PathBuf::from("../crosslink-test-data");
     assert!(dir.is_dir(), "expected {dir:?} relative to the zebrad crate dir");
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     // A second valid P2PKH miner: a different coinbase gives a different block hash, so the
     // sibling at height 3 actually competes.
@@ -371,7 +382,7 @@ fn crosslink_expect_pos_height_after_push() {
     set_test_name(function_name!());
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let nw = Network::new_regtest(Default::default());
+    let nw = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&nw, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen = BlockGen::init_at_genesis_plus_1(nw, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
 
@@ -402,7 +413,7 @@ fn crosslink_expect_pos_out_of_order() {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
 
-    let nw = Network::new_regtest(Default::default());
+    let nw = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&nw, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen = BlockGen::init_at_genesis_plus_1(nw, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
 
@@ -435,7 +446,7 @@ fn crosslink_expect_pos_push_same_block_twice_only_accepted_once() {
     set_test_name(function_name!());
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let nw = Network::new_regtest(Default::default());
+    let nw = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&nw, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen = BlockGen::init_at_genesis_plus_1(nw, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
 
@@ -501,7 +512,7 @@ fn crosslink_finality_reads_before_and_after_the_first_decision() {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
     let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -566,7 +577,7 @@ fn crosslink_test_basic_finality() {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
     let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -581,13 +592,28 @@ fn crosslink_test_basic_finality() {
     let mut pow = vec![gen.tip.clone()];
     let _side: Vec<Arc<Block>> = vec![];
     let mut genb = gen.clone();
+    let mut side_gen = None;
     for i2 in 1..n+1 {
         if i2 == 2 {
+            side_gen = Some(genb.clone());
             pow.push(genb.next_block(&miner_addr2));
         } else {
             pow.push(gen.next_block(&miner_addr));
         }
         genb = gen.clone()
+    }
+
+    // pow[2] and pow[3] are siblings of equal work, and the fork choice breaks that tie on the
+    // greater tip hash (Chain::cmp). The checks below expect pow[3] to win. Block hashes move with
+    // anything in the coinbase, so pick a side miner that makes pow[2] lose instead of relying on
+    // how the hashes happen to fall.
+    let mut side_miner_byte = 1u8;
+    while pow[2].hash().0 > pow[3].hash().0 {
+        side_miner_byte += 1;
+        let side_miner = zcash_keys::address::Address::Transparent(
+            zcash_transparent::address::TransparentAddress::PublicKeyHash([side_miner_byte; 20]),
+        );
+        pow[2] = side_gen.clone().expect("pow[2] is the side block").next_block(&side_miner);
     }
 
     // Nothing is loaded yet, so every one of these is a block this node does not hold, which
@@ -692,7 +718,7 @@ fn pos_from_headers(
 /// Genesis + `n` blocks from the standard test miner, each loaded into `tf` in order.
 /// `pow[i]` is the block at height `i + 1`, so `pow[4]` is P5.
 fn pow_chain_for(tf: &mut TF, n: usize) -> (BlockGen, Address, Vec<Arc<Block>>) {
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -782,7 +808,7 @@ fn crosslink_reject_fat_pointer_below_bootstrap_activation() {
     let mut tf = TF::new(&BOOTSTRAP_HARNESS_PARAMETERS);
 
     let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&BOOTSTRAP_HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -829,7 +855,7 @@ fn crosslink_test_pow_to_pos_link() {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
     let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -892,7 +918,7 @@ fn crosslink_reject_pow_chain_fork_that_is_competing_against_a_shorter_finalized
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
     let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -959,7 +985,7 @@ fn crosslink_pow_follows_the_heaviest_chain_until_fin_moves_to_the_decided_branc
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
     let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     // A second, distinct, valid transparent P2PKH miner (a different coinbase => different
     // block hashes, so the fork actually competes). Tex addresses are rejected by the
@@ -1068,7 +1094,7 @@ fn crosslink_reject_pow_block_citing_a_snapshot_off_its_own_chain() {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
     let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let miner_addr2 = zcash_keys::address::Address::Transparent(
         zcash_transparent::address::TransparentAddress::PublicKeyHash([1u8; 20]),
@@ -1354,7 +1380,7 @@ fn crosslink_gen_pow_fork() {
     set_test_name(function_name!());
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -1403,7 +1429,7 @@ fn crosslink_recv_pow_over_stp() {
     set_test_name(function_name!());
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -1551,7 +1577,7 @@ fn crosslink_pow_block_with_staking_tx() {
     set_test_name(function_name!());
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -1647,7 +1673,7 @@ fn crosslink_gen_pow_and_no_signature_no_roster_pos() {
     set_test_name(function_name!());
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -1701,7 +1727,7 @@ fn crosslink_add_newcomer_to_roster_via_pow() {
     // tf.push_instr_roster_force_include(pub_key, 42000, 0);
     // tf.push_instr_expect_roster_includes(pub_key, 42000, SHOULD_FAIL);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
 
     let (_, prv_key, pub_key) =
@@ -1820,7 +1846,7 @@ fn diagram_fork_miner() -> Address {
 fn diagram_scene_1() -> (TF, Vec<Arc<Block>>) {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -1878,7 +1904,7 @@ fn diagram_scene_1() -> (TF, Vec<Arc<Block>>) {
 fn diagram_scene_2() -> (TF, Vec<Arc<Block>>, Vec<Arc<Block>>) {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let fork_addr = diagram_fork_miner();
     let mut gen =
@@ -1953,7 +1979,7 @@ fn diagram_scene_2() -> (TF, Vec<Arc<Block>>, Vec<Arc<Block>>) {
 fn diagram_scene_3(fork_flags: u32) -> (TF, Vec<Arc<Block>>, Vec<Arc<Block>>) {
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let fork_addr = diagram_fork_miner();
     let mut gen =
@@ -2116,7 +2142,7 @@ fn crosslink_reject_pow_block_with_oversized_staking_amount() {
     set_test_name(function_name!());
     let mut tf = TF::new(&HARNESS_PARAMETERS);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&HARNESS_PARAMETERS);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let mut gen =
         BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
@@ -2150,9 +2176,10 @@ fn crosslink_reject_action_on_a_bond_after_it_unbonds_or_withdraws_in_the_block(
     // The shortest realistic calendar keeps the lifecycle to a few dozen blocks rather than 300.
     let params = HARNESS_PARAMETERS;
     let staking = short_staking(&params);
-    let mut tf = TF::new(&zcash_primitives::bft::ZcashCrosslinkParameters { staking, ..params });
+    let params = zcash_primitives::bft::ZcashCrosslinkParameters { staking, ..params };
+    let mut tf = TF::new(&params);
 
-    let network = Network::new_regtest(Default::default());
+    let network = regtest_network(&params);
     let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
     let finalizer = |seed: &[u8]| {
         zcash_primitives::bft::FinalizerAddress::create(&zebra_crosslink::rng_private_public_key_from_address(seed).1)
