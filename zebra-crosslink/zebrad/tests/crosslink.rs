@@ -1526,6 +1526,106 @@ fn crosslink_mine_from_template() {
     test_bytes(tf.write_to_bytes());
 }
 
+/// `block` with one byte of its first spend's unlock script flipped. Transaction ids leave out
+/// unlock scripts (ZIP-244), so the merkle root and the block hash stay the honest block's;
+/// only the auth data commitment, checked at commit, catches it.
+fn with_forged_signature(block: &Block) -> Block {
+    let mut forged = block.clone();
+    let spend_i = forged
+        .transactions
+        .iter()
+        .position(|tx| !tx.is_coinbase() && !tx.inputs().is_empty())
+        .expect("the block carries a transparent spend");
+    let mut tx = Transaction::clone(&forged.transactions[spend_i]);
+    let Transaction::VCrosslink { inputs, .. } = &mut tx else {
+        panic!("post-genesis regtest transactions are VCrosslink");
+    };
+    let zebra_chain::transparent::Input::PrevOut { unlock_script, .. } = &mut inputs[0] else {
+        panic!("a spend's input names a previous output");
+    };
+    let mut bytes = unlock_script.as_raw_bytes().to_vec();
+    bytes[8] ^= 1;
+    *unlock_script = zebra_chain::transparent::Script::new(&bytes);
+    forged.transactions[spend_i] = Arc::new(tx);
+    forged
+}
+
+/// A forged body under an honest block's hash is rejected, and must not stop the honest block
+/// with that hash from being fetched and committed afterwards (upstream zebra PR 11052: the
+/// rejected hash stayed "known" and the honest block was never downloaded).
+#[test]
+fn crosslink_honest_block_accepted_after_forged_body_with_its_hash() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let key = TestKey::new(b"crosslink test miner");
+    let miner = key.address();
+    let mut gen = BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    let mut chain_length = 2;
+
+    // a body that doesn't match the merkle root: from one peer, then the honest block from another
+    let honest = gen.next_block(&miner);
+    let mut forged = honest.as_ref().clone();
+    forged.transactions.push(forged.transactions[0].clone());
+    assert_eq!(forged.hash(), honest.hash());
+    tf.push_instr_recv_pow(&forged, 0, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("merkle", 0);
+    tf.push_instr_recv_pow(&honest, 1, 0);
+    chain_length += 1;
+    tf.push_instr_expect_pow_chain_length(chain_length, 0);
+
+    // the same, both from one peer
+    let honest = gen.next_block(&miner);
+    let mut forged = honest.as_ref().clone();
+    forged.transactions.push(forged.transactions[0].clone());
+    tf.push_instr_recv_pow(&forged, 0, SHOULD_FAIL);
+    tf.push_instr_recv_pow(&honest, 0, 0);
+    chain_length += 1;
+    tf.push_instr_expect_pow_chain_length(chain_length, 0);
+
+    // the same, through the local doorway
+    let honest = gen.next_block(&miner);
+    let mut forged = honest.as_ref().clone();
+    forged.transactions.push(forged.transactions[0].clone());
+    tf.push_instr_load_pow(&forged, SHOULD_FAIL);
+    tf.push_instr_load_pow(&honest, 0);
+    chain_length += 1;
+    tf.push_instr_expect_pow_chain_length(chain_length, 0);
+
+    // a forged signature: it passes every check keyed by the hash and fails only late
+    for (forged_peer, honest_peer) in [(2, 3), (2, 2)] {
+        while gen.mature_coinbase_for(&key).is_none() {
+            tf.push_instr_load_pow(&gen.next_block(&miner), 0);
+            chain_length += 1;
+        }
+        let spend = transparent_spend(&key, gen.mature_coinbase_for(&key).expect("matured above"));
+        let honest = gen.next_block_with_txs(&miner, &[spend]);
+        let forged = with_forged_signature(&honest);
+        assert_eq!(forged.hash(), honest.hash());
+        tf.push_instr_recv_pow(&forged, forged_peer, SHOULD_FAIL);
+        tf.push_instr_recv_pow(&honest, honest_peer, 0);
+        chain_length += 1;
+        tf.push_instr_expect_pow_chain_length(chain_length, 0);
+    }
+
+    // and through the local doorway
+    while gen.mature_coinbase_for(&key).is_none() {
+        tf.push_instr_load_pow(&gen.next_block(&miner), 0);
+        chain_length += 1;
+    }
+    let spend = transparent_spend(&key, gen.mature_coinbase_for(&key).expect("matured above"));
+    let honest = gen.next_block_with_txs(&miner, &[spend]);
+    tf.push_instr_load_pow(&with_forged_signature(&honest), SHOULD_FAIL);
+    tf.push_instr_load_pow(&honest, 0);
+    chain_length += 1;
+    tf.push_instr_expect_pow_chain_length(chain_length, 0);
+    tf.push_instr_expect_node_alive(0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
 #[test]
 fn crosslink_recv_pow_over_stp() {
     set_test_name(function_name!());
