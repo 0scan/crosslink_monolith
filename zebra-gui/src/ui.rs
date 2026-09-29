@@ -1360,9 +1360,9 @@ fn colour_from_hash(hash: &[u8; 32], is_online:bool) -> (u8, u8, u8, u8) {
 fn roster_member_identity(member: &WalletRosterMember) -> (&'static str, String, String, String) {
     if let Some(address) = member.finalizer_address.filter(|address| address.pub_key.0 == member.pub_key && address.verify()) {
         let full = address.encode();
-        let prefix = "[zfinv1";
+        let prefix = "zfinv1";
         let unique = &full["zfinv1".len()..];
-        let label = format!("{}..{}]", &unique[..10], &unique[unique.len() - 10..]);
+        let label = format!("{}..{}", &unique[..10], &unique[unique.len() - 10..]);
         let tooltip = format!("Finalizer address {full}");
         (prefix, label, full, tooltip)
     } else {
@@ -3792,7 +3792,7 @@ pub fn ui_right_pane(ui: &mut Context,
                             ..Decl
                         }) {
                             if !address_prefix.is_empty() {
-                                ui.text(frame_strf!(data, "{}", address_prefix), TextDecl { font: Mono, colour: text_colour, h: ui.scale(12.0), wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
+                                ui.text(frame_strf!(data, "{}", address_prefix), TextDecl { font: Mono, colour: text_colour, h: ui.scale(11.0), wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
                             }
                             ui.text(frame_strf!(data, "{}", address_label), TextDecl { font: Mono, colour: text_colour, h: info_h, wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
                         }
@@ -5333,8 +5333,8 @@ mod roster_identity_tests {
         let address = wallet::bft::FinalizerAddress::create(&key);
         let mut member = WalletRosterMember { pub_key: pk.0, voting_power: 1, txids: Vec::new(), finalizer_address: Some(address) };
         let (prefix, label, copy, tooltip) = roster_member_identity(&member);
-        assert_eq!(prefix, "[zfinv1");
-        assert!(label.ends_with(']'));
+        assert_eq!(prefix, "zfinv1");
+        assert!(!label.contains('[') && !label.contains(']'));
         assert_eq!(copy, address.encode());
         assert!(tooltip.contains(&copy));
 
