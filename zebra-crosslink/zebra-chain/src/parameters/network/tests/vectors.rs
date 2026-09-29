@@ -783,7 +783,12 @@ fn pos_subsidy_conserves_issuance() {
         let start = network.pos_issuance_start_height();
         assert_eq!(start.is_none(), network == Network::Mainnet, "only Mainnet has no staking share");
 
-        for height in (1..2_000).map(Height) {
+        let mut heights = (1..2_000).collect::<Vec<_>>();
+        if let Some(start) = start {
+            heights.extend([start.0 - 1, start.0, start.0 + 1]);
+        }
+
+        for height in heights.into_iter().map(Height) {
             let block_subsidy = block_subsidy(height, &network).unwrap();
             let founders = subsidy::founders_reward(&network, height);
             let streams = funding_stream_values(height, &network, block_subsidy)

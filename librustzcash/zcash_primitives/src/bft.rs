@@ -539,17 +539,17 @@ impl ZcashCrosslinkParameters {
 
 /// Crosslink parameters chosed for prototyping / testing
 ///
-/// `h0` is the second staking day (the first day of the calendar, at genesis, carries no staking
-/// actions); `h1` is the following day, after `h0`'s staking window has closed, so every bond from
-/// the first staking day counts; `h2` is the day after that.
+/// `h0` opens staking two periods after genesis. `h1` is the first block after the staking window
+/// in the following period has closed. `h2` is halfway through that same period.
 ///
 /// <div class="warning">No verification has been done on the security or performance of these parameters.</div>
 pub const PROTOTYPE_PARAMETERS: ZcashCrosslinkParameters = ZcashCrosslinkParameters {
     bc_confirmation_depth_sigma: 4,
     bootstrap: BftBootstrap::FromChain {
-        staking_height: crate::transaction::STAKING_PERIOD,
-        roster_height: 2 * crate::transaction::STAKING_PERIOD,
-        activation_height: 3 * crate::transaction::STAKING_PERIOD,
+        staking_height: 2 * crate::transaction::STAKING_PERIOD,
+        roster_height: 3 * crate::transaction::STAKING_PERIOD
+            + crate::transaction::STAKING_DAY_WINDOW,
+        activation_height: 7 * crate::transaction::STAKING_PERIOD / 2,
     },
     staking: PROTOTYPE_STAKING,
 };

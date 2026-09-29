@@ -33,7 +33,8 @@ pub fn shipped_hardforks() -> Vec<HardForkConfig> {
     };
 
     vec![HardForkConfig {
-        pow_activation_height: 225000,
+        // Slash activations must start a staking day; this is 22 prototype staking periods.
+        pow_activation_height: 228_096,
         bft_certificate_height: 2158,
         terminated_finalizers: vec![finalizer_from_hex("b8c5272fe6d34980ba6e8aa88d65a6cbf3daabaabea80bdd51a5a5d3bce30c9e")],
     }]

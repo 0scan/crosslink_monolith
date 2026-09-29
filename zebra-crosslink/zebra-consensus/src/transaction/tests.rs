@@ -513,9 +513,14 @@ async fn mempool_rejects_oversized_staking_amount() {
         }),
     };
 
-    // Height 10 is inside the first staking day window, so the window rule doesn't reject it first.
+    // Use the first enabled staking height, so the activation and window rules do not reject it first.
+    let staking_height = network
+        .crosslink_parameters()
+        .bootstrap
+        .staking_height()
+        .expect("regtest bootstraps BFT from the chain");
     let result = verifier
-        .oneshot(MempoolRequest { transaction: transaction.into(), height: Height(10) })
+        .oneshot(MempoolRequest { transaction: transaction.into(), height: Height(staking_height) })
         .await;
 
     assert!(

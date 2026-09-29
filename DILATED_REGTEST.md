@@ -3,7 +3,10 @@
 A two-node Crosslink regtest run under 90x time dilation, as a system test of a build: it
 funds a wallet, bonds stake to both finalizers, bootstraps BFT from the chain and checks that
 BFT keeps deciding while PoW runs. It exercises the node, the in-node wallet, the light-wallet
-server, tenderlink and the finality rules together, which no unit test does.
+server, tenderlink and the finality rules together, which no unit test does. Its node templates
+pin a short 150-block staking period and the 150/300/450 bootstrap heights, rather than using the
+real-network three-day calendar, and disable the shipped hardfork schedule so the system test
+remains practical.
 
     zebra-crosslink/dilated_regtest/run.sh [TARGET]
 

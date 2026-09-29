@@ -653,7 +653,7 @@ pub const HARNESS_PARAMETERS: ZcashCrosslinkParameters = ZcashCrosslinkParameter
 /// - an action delay one past the window, with room left in the period, so a withdrawal can
 ///   land early or late in a later window;
 /// - a period at least `2 * (sigma + FINALITY_LIVENESS_ALLOWANCE + 1)`, so roster and stake
-///   changes turn over slower than finality can reflect them, as they do at 150 blocks.
+///   changes turn over slower than finality can reflect them, as they do in the prototype calendar.
 ///
 /// A scenario that needs more, such as an edge further into the window, sets its own calendar.
 ///

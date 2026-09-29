@@ -443,15 +443,15 @@ FINALITY.md §4.3 records 999 as the intended value; the tree has 99 in
 
 Code facts: `ZcashCrosslinkParameters::bootstrap_is_valid` requires
 `activation_height − roster_height > MAX_BLOCK_REORG_HEIGHT`, and a `const _: () = assert!` on
-`PROTOTYPE_PARAMETERS` checks it while compiling; the prototype gap is 200 blocks, so 999 stops
-the workspace building until the bootstrap heights move with it. The wallet's `REWIND_DISTANCE`
-and `CHECKPOINTS_N` derive from the constant. zebra-chain has a separate constant of 1000, and
-comments at `zebra-state/src/request.rs` and `non_finalized_state.rs` say 1000. The
-non-finalized state holds up to that many blocks per chain in memory. The depth commit is the
-second floor under `fin` (FINALITY.md §8.1); a larger value makes stage 7's hold and stage 9's
-second state rarer, and is no longer the difference between recovering and needing a resync.
+`PROTOTYPE_PARAMETERS` checks it while compiling. The prototype gap is 1,728 blocks, so 999 now
+fits under that assertion. The wallet's `REWIND_DISTANCE` and `CHECKPOINTS_N` derive from the
+constant. zebra-chain has a separate constant of 1000, and comments at
+`zebra-state/src/request.rs` and `non_finalized_state.rs` say 1000. The non-finalized state holds
+up to that many blocks per chain in memory. The depth commit is the second floor under `fin`
+(FINALITY.md §8.1); a larger value makes stage 7's hold and stage 9's second state rarer, and is no
+longer the difference between recovering and needing a resync.
 
-No implementation stage changes the constant. The tree keeps 99 until the bootstrap heights that
-go with 999 exist, because raising it before then stops the workspace compiling.
+No implementation stage changes the constant. The tree still keeps 99; increasing it remains a
+separate policy change even though the new bootstrap gap can accommodate 999.
 
 To decide: those bootstrap heights, and which stage carries the change once they are chosen.

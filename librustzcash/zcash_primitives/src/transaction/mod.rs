@@ -1538,19 +1538,20 @@ mod roster_codec_tests {
 // shrinks the calendar is checked against these values.
 
 /// The number of blocks between the start of one staking day and the start of the next.
-/// A new staking day starts every N blocks.
-pub const STAKING_PERIOD: u32 = 150;
+/// A new staking day starts every N blocks. At 25 seconds per block, this is three days.
+pub const STAKING_PERIOD: u32 = 10_368;
 
 /// The window size within each staking day period where staking actions are allowed.
 /// Staking actions are only valid when `block_height % STAKING_PERIOD < STAKING_DAY_WINDOW`.
-pub const STAKING_DAY_WINDOW: u32 = 70;
+/// At 25 seconds per block, this is 24 hours.
+pub const STAKING_DAY_WINDOW: u32 = 3_456;
 
 /// The number of blocks a bond must wait after its last action before it can be unbonded (counted
 /// from its creation) or withdrawn (counted from its unbonding).
 /// @Todo: We probably don't really need this or want this. We can just check:
 ///        (last_action_height / STAKING_PERIOD) > (current_height / STAKING_PERIOD)
 ///        which is probably more robust.
-pub const STAKING_ACTION_DELAY: u32 = STAKING_DAY_WINDOW + 5;
+pub const STAKING_ACTION_DELAY: u32 = STAKING_DAY_WINDOW + 1;
 
 // It takes 2 staking periods to withdraw funds-at-stake into shielded, so currently
 // there is not much point to slashing bonds older than that; any smart attacker will

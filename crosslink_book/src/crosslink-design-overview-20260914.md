@@ -218,17 +218,17 @@ The BFT chain has no external genesis. It is started deterministically by every 
 
 ### Heights (as implemented)
 
-`BOOTSTRAP_STAKING_HEIGHT = 1 * STAKING_PERIOD` (call it `h0`)
+`BOOTSTRAP_STAKING_HEIGHT = 2 * STAKING_PERIOD` (call it `h0`)
 
-`BOOTSTRAP_ROSTER_HEIGHT = 2 * STAKING_PERIOD` (call it `h1`)
+`BOOTSTRAP_ROSTER_HEIGHT = 3 * STAKING_PERIOD + STAKING_DAY_WINDOW` (call it `h1`)
 
-`BOOTSTRAP_ACTIVATION_HEIGHT = 3 * STAKING_PERIOD` (call it `h2`)
+`BOOTSTRAP_ACTIVATION_HEIGHT = 7 * STAKING_PERIOD / 2` (call it `h2`)
 
-`h0`: The first PoW block that may carry a staking action, and the start of the first staking day. Any staking action in a block below `h0` is invalid. `h0` must be a multiple of `STAKING_PERIOD`, so that it opens a staking day on the calendar (which is anchored at genesis).
+`h0`: The first PoW block that may carry a staking action, and the start of the first enabled staking day. Any staking action in a block below `h0` is invalid. `h0` must be a multiple of `STAKING_PERIOD`, so that it opens a staking day on the calendar (which is anchored at genesis).
 
-`h1`: The PoW block whose staking state supplies the roster that votes on BFT height 0. It is the day after `h0`, so the whole first staking window has closed and every bond from it counts.
+`h1`: The first PoW block after the staking window beginning at `3 * STAKING_PERIOD` has closed. Its staking state supplies the roster that votes on BFT height 0, so every bond from that complete window counts.
 
-`h2`: The PoW height at which a node walks back, finalizes `h1`, and starts BFT. Every PoW block at or below `h2` must carry a nil fat pointer; the first non-nil pointer can appear only above `h2`.
+`h2`: The PoW height halfway through the period beginning at `3 * STAKING_PERIOD`. At this height a node walks back, finalizes `h1`, and starts BFT. Every PoW block at or below `h2` must carry a nil fat pointer; the first non-nil pointer can appear only above `h2`.
 
 ### Safety argument
 
@@ -238,7 +238,7 @@ This is the bootstrap instance of the general rule in section 16: the roster is 
 
 ### Relation to the three-height plan in the notes
 
-The rewards notes describe three heights: `H1` (staking transactions activate), `H2` (roster is determined), `H3` (first block that may point at a certificate), with `H2` and `H3` fixed in one governance decision and `H2` perhaps `H3` minus 100,000. The code's `h0`, `h1`, `h2` are the notes' `H1`, `H2`, `H3`. [TBC: confirm whether one-period gaps are a development value versus the ~100,000 suggested for mainnet.]
+The rewards notes describe three heights: `H1` (staking transactions activate), `H2` (roster is determined), `H3` (first block that may point at a certificate), with `H2` and `H3` fixed in one governance decision and `H2` perhaps `H3` minus 100,000. The code's `h0`, `h1`, `h2` are the notes' `H1`, `H2`, `H3`. [TBC: confirm whether the half-day gap between `h1` and `h2` is a development value versus the ~100,000 blocks suggested for mainnet.]
 
 At activation every block in [0, `h1`] becomes de facto finalized. Whether BFT genesis should point at the PoW genesis or at `h1` remains open.
 
@@ -379,7 +379,7 @@ A bond can be retargeted at any time. The transaction records both old and new t
 
 ### Withdrawing: unbond, then withdraw
 
-Two actions on two different staking days (section 13), so minimum exit is two weeks.
+Two actions on two different staking days (section 13), so exiting spans successive staking periods.
 
 1. Unbond. Value depends on which block it lands in; once landed, the bond has a fixed numeric value.
 2. Withdraw. The transaction must state that value explicitly and match the chain exactly, or it is invalid.
@@ -390,10 +390,10 @@ Two reasons. Accounting clarity: before funds re-enter ordinary Zcash transactio
 
 ## 13. STAKING DAYS
 
-One day per week is a staking day. Bond creation, unbond and withdraw are quantized to staking days.
+One 24-hour window every three days is a staking day. Bond creation, unbond and withdraw are quantized to staking days.
 
-- Privacy: batching activity into one day per week removes timing information that could link actions to users.
-- Security: unbond and withdraw on successive staking days gives the two-week minimum exit.
+- Privacy: batching activity into one window every three days removes timing information that could link actions to users.
+- Security: unbond and withdraw must land on successive staking days.
 
 The slash window (section 16) is also measured in staking days.
 

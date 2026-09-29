@@ -1367,8 +1367,8 @@ stored, or consumed.
 - **`MAX_BLOCK_REORG_HEIGHT` is asserted against the bootstrap gap.**
   `ZcashCrosslinkParameters::bootstrap_is_valid` requires
   `activation_height − roster_height > MAX_BLOCK_REORG_HEIGHT`, and a `const _: () = assert!` on
-  `PROTOTYPE_PARAMETERS` checks it while compiling. The prototype gap is 200 blocks, so raising
-  the constant past that stops the workspace building until the bootstrap heights move with it.
+  `PROTOTYPE_PARAMETERS` checks it while compiling. The prototype gap is 1,728 blocks, so raising
+  the constant to that or beyond stops the workspace building until the bootstrap heights move with it.
 - **Aborts kill the node.** The build uses `panic=abort`. The decide path unwraps
   `block_height_from_hash` on the decided header, so a decided block whose header is unknown to
   state terminates the process, as does every `assert!` on that path.

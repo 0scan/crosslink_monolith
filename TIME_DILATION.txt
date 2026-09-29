@@ -147,46 +147,57 @@ Also benchmark release builds only.  `[profile.dev] opt-level = 0` applies to
 every workspace crate, and a debug node is roughly ten times slower at this.
 
 
-WORKED EXAMPLE — the hardfork bond-burn test, in 12 minutes
------------------------------------------------------------
+WORKED EXAMPLE — the hardfork bond-burn test on a short calendar
+----------------------------------------------------------------
 
 The user-led hardfork burns every bond that was delegated to a terminated
-finalizer at any point in the 300-block window before activation.  Testing that
-means reaching an activation height with bonds of several shapes in place, which
-on an undilated chain is a long afternoon.  In tier 2 at 50x it is one coffee.
+finalizer at any point in the 240-block window before activation. Testing that
+means reaching an activation height with bonds of several shapes in place.
 
-Setup: both nodes carry
+Setup: both nodes carry a short test calendar, rather than the real-network
+three-day calendar, and the same hardfork rule. The hardfork height remains a
+multiple of the real-network period because `HardForkConfig` validates it while
+deserializing, before the node's shortened calendar is available:
+
+    [network.testnet_parameters.crosslink]
+    bootstrap_staking_height = 288
+    bootstrap_roster_height = 480
+    bootstrap_activation_height = 600
+    staking_period = 144
+    staking_day_window = 48
+    staking_action_delay = 49
 
     [[crosslink.hardforks]]
-    pow_activation_height  = 1500
+    pow_activation_height  = 20736
     bft_certificate_height = 30
     terminated_finalizers  = ["12db8198060e969700d35e6a7bfacfb76cab2e5fe1423245241d799bd1f85221"]
 
 That finalizer, "F", is a throwaway that never runs — its key is the ed25519 key
 for the seed [0x42; 32], so a `zfinv1` address can be minted for it offline and
-staked to without any node holding it.  Note the config wants the pubkey in
+staked to without any node holding it. Note the config wants the pubkey in
 *display* order, which is the raw key reversed; the `zfinv1` address carries the
-raw key.  (`PubKeyID`'s serde reverses; the "My root public key is ..." banner
+raw key. (`PubKeyID`'s serde reverses; the "My root public key is ..." banner
 does not.)
 
 The run, at 50x with PoW off and one node mining, ~0.5 s/block:
 
-    height  182  bond A created, staked to F
-    height  196  bond B created, staked to F
-    height  213  bond C created, staked to node one's finalizer
-    height 1217  bond B retargeted to node one — inside the window (1200, 1500]
-    height 1500  hardfork activates
+    height   300  bond A created, staked to F
+    height   320  bond B created, staked to F
+    height   330  bond C created, staked to node one's finalizer
+    height 20600  bond B retargeted to node one — inside the window [20497, 20736)
+    height 20736  hardfork activates
 
 Result, logged identically by both nodes:
 
-    hardfork slash burns at height 1500: burned 2 bond(s) for 1 terminated
+    hardfork slash burns at height 20736: burned 2 bond(s) for 1 terminated
     finalizer(s): ["8144cfcd...", "8151258a..."]
 
-which are bonds A and B.  A was a sitting duck; B fled inside the window and was
-caught by its Retarget's `from` field; C never touched F and survived.  Twelve
-real minutes from genesis, against roughly ten hours undilated.
+which are bonds A and B. A was a sitting duck; B fled inside the window and was
+caught by its Retarget's `from` field; C never touched F and survived. At roughly
+0.5 seconds per block, the run reaches activation in about three hours rather
+than the six days implied by 25-second blocks.
 
 The one thing to be careful of is that the *retarget* has to land inside the
-window.  Do it too early and B legitimately does not burn, and you have tested
-nothing.  Poll `getblockchaininfo` for the height and fire the retarget when it
+window. Do it too early and B legitimately does not burn, and you have tested
+nothing. Poll `getblockchaininfo` for the height and fire the retarget when it
 is in range, rather than sleeping a wall-clock guess.
