@@ -1154,9 +1154,9 @@ pub fn main_thread_run_program(wallet_state: Arc<Mutex<wallet::WalletState>>, fa
     // softer_gui's back buffer. One tile-hash set per buffer, plus the generation
     // they belong to, so a realloc drops both.
     let mut tile_cache_generation = u64::MAX;
-    // One damage cache per back buffer: softer_gui rotates up to three.
-    let mut tile_hashes: [Vec<u64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    let mut whole_screen_hash = [0u64; 3];
+    // One damage cache per back buffer: softer_gui rotates two.
+    let mut tile_hashes: [Vec<u64>; 2] = [Vec::new(), Vec::new()];
+    let mut whole_screen_hash = [0u64; 2];
     let mut did_window_resize = true;
 
     // staking day cosmetics
@@ -1459,14 +1459,14 @@ pub fn main_thread_run_program(wallet_state: Arc<Mutex<wallet::WalletState>>, fa
 
                         // Back buffers rotate, so "this tile is unchanged" has to mean unchanged
                         // relative to what THIS buffer already holds, not to the last frame drawn.
-                        // `fb.key` is (generation << 2 | index) and is stable per buffer until a
+                        // `fb.key` is (generation << 1 | index) and is stable per buffer until a
                         // realloc, which is exactly the identity the tile cache needs.
-                        let fb_index = (fb.key & 3) as usize;
-                        let fb_generation = fb.key >> 2;
+                        let fb_index = (fb.key & 1) as usize;
+                        let fb_generation = fb.key >> 1;
                         if tile_cache_generation != fb_generation || tile_hashes[fb_index].len() != tiles_wide*tiles_wide {
                             tile_cache_generation = fb_generation;
-                            tile_hashes = [vec![0u64; tiles_wide*tiles_wide], vec![0u64; tiles_wide*tiles_wide], vec![0u64; tiles_wide*tiles_wide]];
-                            whole_screen_hash = [0; 3];
+                            tile_hashes = [vec![0u64; tiles_wide*tiles_wide], vec![0u64; tiles_wide*tiles_wide]];
+                            whole_screen_hash = [0; 2];
                         }
                         let saved_tile_hashes = &mut tile_hashes[fb_index];
 

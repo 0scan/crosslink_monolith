@@ -282,16 +282,18 @@ impl ZebradConfig {
         Self {
             crosslink: zebra_crosslink::config::Config {
                 bft_peers: vec![
-                    "45.32.186.234:12301".to_owned(), // @chainsaw @Nightly
-                    "64.177.122.73:12301".to_owned(), // @chainsaw @Nightly
+                    "45.63.75.9:12301".to_owned(),
+                    "70.34.220.94:12301".to_owned(),
+                    "64.177.44.176:12301".to_owned(),
                 ],
                 ..Default::default()
             },
 
             state: zebra_state::config::Config {
                 network_initial_peers: vec![
-                    "[::ffff:45.32.186.234]:12001:1fgEw5Nx:dUhGUdCw0vhbhDOKINxDDkk93RHBRRuJuW2EY0zJHyU".to_owned(), // @chainsaw @Nightly
-                    "[::ffff:64.177.122.73]:12001:1fgEw5Nx:_DrOHtqUAEtbYadBv2Dt5OzNqbtT07tDZ9iyddSqFgw".to_owned(), // @chainsaw @Nightly
+                    "[::ffff:45.63.75.9]:12001:1fgEw5Nx:-w4ArAa4esTUBjgig6xIQJ4N8DlwL5aufGMcDPGzPE4".to_owned(),
+                    "[::ffff:70.34.220.94]:12001:1fgEw5Nx:CgjQzIjxFknQOJfxKP4H5adl3uzGfAN1D0219Q3JSyw".to_owned(),
+                    "[::ffff:64.177.44.176]:12001:1fgEw5Nx:jY7963HX-GzMkOhi1c7kxmeKXC4juGhwY2l4NlQheBs".to_owned(),
                 ],
                 ..Default::default()
             },
@@ -299,8 +301,9 @@ impl ZebradConfig {
             network: zebra_network::config::Config {
                 initial_testnet_peers: {
                     let mut peers = indexmap::IndexSet::new();
-                    peers.insert("45.32.186.234:8233".to_owned()); // @chainsaw @Nightly
-                    peers.insert("64.177.122.73:8233".to_owned()); // @chainsaw @Nightly
+                    peers.insert("45.63.75.9:8233".to_owned());
+                    peers.insert("70.34.220.94:8233".to_owned());
+                    peers.insert("64.177.44.176:8233".to_owned());
                     peers
                 },
 
