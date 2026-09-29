@@ -797,6 +797,46 @@ fn mouse_mask(button: u32) -> usize {
     }
 }
 
+// A press that starts a window-frame gesture (resize edge, title-bar move) is not ours, and
+// on macOS it cannot be tracked as ours: softer_gui records the mouse-down, then hands the
+// event to AppKit, whose resize/move tracking loop dequeues the matching mouse-up itself.
+// softer_gui never sees that up, so its snapshots report the button held until the next
+// real click -- and the viz, which claims any unclaimed press, pans with every movement.
+// (softer_gui 3.0.2, mac.rs `pump_once`.)
+//
+// `frame_owned` is the set of such buttons. They are withdrawn from `mouse_down` without a
+// release edge -- a cancel, so a widget that acts on release is not clicked -- and stay
+// hidden while the snapshots keep carrying them, so an unrelated key snapshot cannot bring
+// them back as a fresh press. They become ours again once a snapshot shows them up.
+// Our softer_gui patch repairs a missing up before delivering the next real mouse-down,
+// so that same click clears this mask and starts a normal interaction.
+
+/// Fold one absolute mouse-button snapshot into edges and held state.
+/// `window_size` is in the pointer's units (physical pixels); (0, 0) means not yet known.
+fn apply_mouse_snapshot(input: &mut InputCtx, was_mouse: &mut usize, frame_owned: &mut usize, now: usize, window_size: (usize, usize)) {
+    *frame_owned &= now;
+    let raw_pressed = now & !*was_mouse;
+    *was_mouse = now;
+
+    let (x, y) = input.this_mouse_pos;
+    let (w, h) = (window_size.0 as isize, window_size.1 as isize);
+    let outside = w > 0 && h > 0 && (x < 0 || y < 0 || x >= w || y >= h);
+    if outside { *frame_owned |= raw_pressed; }
+
+    let now = now & !*frame_owned;
+    input.mouse_pressed  |= now & !input.mouse_down;
+    input.mouse_released |= input.mouse_down & !now;
+    input.mouse_down = now;
+}
+
+/// The window's size changed under held buttons: the press went to a resize the window
+/// frame is tracking, whose button-up softer_gui will not report.
+fn cancel_mouse_to_window_frame(input: &mut InputCtx, frame_owned: &mut usize) {
+    *frame_owned |= input.mouse_down;
+    input.mouse_pressed &= !input.mouse_down;   // a press not yet read this frame is withdrawn too
+    input.mouse_down = 0;
+}
+
 /// Split an evdev code into which of the two 128-bit halves holds it and the bit
 /// within that half. Codes at or past 256 (the `BTN_*` block starts at 0x110)
 /// have no bit here; the mouse mask tracks those separately.
@@ -852,40 +892,40 @@ impl InputCtx {
     }
 
     fn get_from_clipboard(&self) -> String {
-        // Try xclip first (works reliably on X11), then xsel. softer_gui reports the
-        // copy/paste *intent* only, so fetching the selection stays our job.
-        if let Ok(output) = std::process::Command::new("xclip").args(["-selection", "clipboard", "-o"]).output() {
-            if output.status.success() {
-                return String::from_utf8_lossy(&output.stdout).into_owned();
-            }
-        }
-        if let Ok(output) = std::process::Command::new("xsel").args(["--clipboard", "--output"]).output() {
-            if output.status.success() {
-                return String::from_utf8_lossy(&output.stdout).into_owned();
+        // An APE is built for cosmo even when it runs on macOS; try both clipboard
+        // families there. Native Linux keeps X11 first.
+        for (program, args) in [
+            ("pbpaste", &[][..]),
+            ("xclip", &["-selection", "clipboard", "-o"][..]),
+            ("xsel", &["--clipboard", "--output"][..]),
+        ] {
+            if program == "pbpaste" && !cfg!(any(target_os = "macos", cosmo)) { continue; }
+            if let Ok(output) = std::process::Command::new(program).args(args).output() {
+                if output.status.success() {
+                    return String::from_utf8_lossy(&output.stdout).into_owned();
+                }
             }
         }
         return String::new();
     }
 
     fn send_to_clipboard(&self, text: &str) -> bool {
-        // Try xclip first (works reliably on X11), then xsel. softer_gui reports the
-        // copy/paste *intent* only, so fetching the selection stays our job.
-        if let Ok(mut child) = std::process::Command::new("xclip").args(["-selection", "clipboard"]).stdin(std::process::Stdio::piped()).spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            if let Ok(status) = child.wait() {
-                if status.success() { return true; }
-            }
-        }
-        if let Ok(mut child) = std::process::Command::new("xsel").args(["--clipboard", "--input"]).stdin(std::process::Stdio::piped()).spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            if let Ok(status) = child.wait() {
-                if status.success() { return true; }
+        use std::io::Write;
+
+        for (program, args) in [
+            ("pbcopy", &[][..]),
+            ("xclip", &["-selection", "clipboard"][..]),
+            ("xsel", &["--clipboard", "--input"][..]),
+        ] {
+            if program == "pbcopy" && !cfg!(any(target_os = "macos", cosmo)) { continue; }
+            if let Ok(mut child) = std::process::Command::new(program).args(args).stdin(std::process::Stdio::piped()).spawn() {
+                let wrote = match child.stdin.take() {
+                    Some(mut stdin) => stdin.write_all(text.as_bytes()).is_ok(),
+                    None => false,
+                };
+                if let Ok(status) = child.wait() {
+                    if wrote && status.success() { return true; }
+                }
             }
         }
         return false;
@@ -1278,7 +1318,8 @@ pub fn main_thread_run_program(wallet_state: Arc<Mutex<wallet::WalletState>>, fa
     // The last absolute button snapshot, so a new one can be diffed into edges.
     // Keys are evdev codes under 256; the BTN_* block sits above that and is
     // tracked in the mouse mask instead.
-    let (mut was_down1, mut was_down2, mut was_mouse) = (0u128, 0u128, 0usize);
+    // Mouse buttons whose press went to the window frame; see apply_mouse_snapshot.
+    let (mut was_down1, mut was_down2, mut was_mouse, mut frame_owned_mouse) = (0u128, 0u128, 0usize, 0usize);
 
     'app: loop {
         // A timeout, not a plain wait: the business layer (new blocks, wallet
@@ -1373,10 +1414,7 @@ pub fn main_thread_run_program(wallet_state: Arc<Mutex<wallet::WalletState>>, fa
                     for code in [BTN_LEFT, BTN_MIDDLE, BTN_RIGHT] {
                         if ev.button(code) { now_mouse |= mouse_mask(code); }
                     }
-                    input_ctx.mouse_pressed  |= now_mouse & !was_mouse;
-                    input_ctx.mouse_released |= was_mouse & !now_mouse;
-                    input_ctx.mouse_down = now_mouse;
-                    was_mouse = now_mouse;
+                    apply_mouse_snapshot(&mut input_ctx, &mut was_mouse, &mut frame_owned_mouse, now_mouse, last_window_size);
                 }
 
                 EVENT_RENDER => {
@@ -1385,6 +1423,7 @@ pub fn main_thread_run_program(wallet_state: Arc<Mutex<wallet::WalletState>>, fa
                     if ev.width as usize != last_window_size.0 || ev.height as usize != last_window_size.1 {
                         last_window_size = (ev.width as usize, ev.height as usize);
                         did_window_resize = true;
+                        cancel_mouse_to_window_frame(&mut input_ctx, &mut frame_owned_mouse);
                     }
                     if gui.take_full_redraw() { did_window_resize = true; }
 
@@ -2329,6 +2368,129 @@ mod tests {
 
     #[test]
     fn it_works() {
+    }
+
+    const WIN: (usize, usize) = (800, 600);
+
+    /// The frame's reader clears edges after it has run; do the same between steps.
+    fn end_frame(input: &mut InputCtx) {
+        input.mouse_pressed  = 0;
+        input.mouse_released = 0;
+    }
+
+    #[test]
+    fn mouse_snapshot_edges_inside_window() {
+        let mut input = InputCtx { this_mouse_pos: (100, 100), ..Default::default() };
+        let (mut was, mut owned) = (0usize, 0usize);
+
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        assert!(input.mouse_pressed(BTN_LEFT) && input.mouse_held(BTN_LEFT));
+        end_frame(&mut input);
+
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, 0, WIN);
+        assert!(input.mouse_released(BTN_LEFT) && !input.mouse_held(BTN_LEFT));
+        end_frame(&mut input);
+
+        // Press and release inside one frame both survive.
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, 0, WIN);
+        assert!(input.mouse_pressed(BTN_LEFT) && input.mouse_released(BTN_LEFT) && !input.mouse_held(BTN_LEFT));
+        assert_eq!(owned, 0);
+    }
+
+    /// The reported bug, as softer_gui's macOS backend delivers it: the resize-edge press
+    /// arrives, its release never does, and every later snapshot still carries the button.
+    #[test]
+    fn resize_under_held_button_does_not_stick() {
+        let mut input = InputCtx { this_mouse_pos: (799, 300), ..Default::default() };
+        let (mut was, mut owned) = (0usize, 0usize);
+
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        assert!(input.mouse_held(BTN_LEFT));
+        end_frame(&mut input);
+
+        // RENDER reports a new size: the press belongs to the resize. Cancelled, not released.
+        cancel_mouse_to_window_frame(&mut input, &mut owned);
+        assert!(!input.mouse_held(BTN_LEFT) && !input.mouse_released(BTN_LEFT));
+        end_frame(&mut input);
+
+        // A key snapshot still carries the stale button: it must not come back as a press.
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        assert!(!input.mouse_pressed(BTN_LEFT) && !input.mouse_held(BTN_LEFT));
+
+        // The patched backend repairs the old up BEFORE publishing the next real down.
+        // This is one physical press, not an extra click to clear the stale state.
+        input.this_mouse_pos = (400, 300);
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, 0, WIN);
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        assert!(input.mouse_pressed(BTN_LEFT) && input.mouse_held(BTN_LEFT));
+        assert!(!input.mouse_released(BTN_LEFT)); // the cancelled resize must not activate a widget
+        assert_eq!(owned, 0);
+        end_frame(&mut input);
+
+        input.last_mouse_pos = input.this_mouse_pos;
+        input.this_mouse_pos = (420, 310);
+        assert!(input.mouse_held(BTN_LEFT));
+        assert_eq!(input.mouse_delta(), (20, 10));
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, 0, WIN);
+        assert!(input.mouse_released(BTN_LEFT) && !input.mouse_held(BTN_LEFT));
+    }
+
+    #[test]
+    fn resize_withdraws_an_unread_press() {
+        let mut input = InputCtx { this_mouse_pos: (0, 300), ..Default::default() };
+        let (mut was, mut owned) = (0usize, 0usize);
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        cancel_mouse_to_window_frame(&mut input, &mut owned);
+        assert!(!input.mouse_pressed(BTN_LEFT) && !input.mouse_held(BTN_LEFT) && !input.mouse_released(BTN_LEFT));
+    }
+
+    #[test]
+    fn press_outside_content_is_the_window_frames() {
+        // Title bar (above the content) and the outer resize border.
+        for pos in [(400, -10), (-3, 300), (800, 300), (400, 600)] {
+            let mut input = InputCtx { this_mouse_pos: pos, ..Default::default() };
+            let (mut was, mut owned) = (0usize, 0usize);
+
+            apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+            assert!(!input.mouse_pressed(BTN_LEFT) && !input.mouse_held(BTN_LEFT), "{pos:?}");
+
+            // Moving back inside with the stale button still carried changes nothing.
+            input.this_mouse_pos = (400, 300);
+            apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+            assert!(!input.mouse_pressed(BTN_LEFT) && !input.mouse_held(BTN_LEFT), "{pos:?}");
+
+            apply_mouse_snapshot(&mut input, &mut was, &mut owned, 0, WIN);
+            assert!(!input.mouse_released(BTN_LEFT) && owned == 0, "{pos:?}");
+
+            apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+            assert!(input.mouse_pressed(BTN_LEFT) && input.mouse_held(BTN_LEFT), "{pos:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_window_size_does_not_hide_presses() {
+        let mut input = InputCtx { this_mouse_pos: (-5, -5), ..Default::default() };
+        let (mut was, mut owned) = (0usize, 0usize);
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, (0, 0));
+        assert!(input.mouse_pressed(BTN_LEFT) && input.mouse_held(BTN_LEFT));
+    }
+
+    #[test]
+    fn frame_owned_button_leaves_the_others_alone() {
+        let mut input = InputCtx { this_mouse_pos: (400, 300), ..Default::default() };
+        let (mut was, mut owned) = (0usize, 0usize);
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        cancel_mouse_to_window_frame(&mut input, &mut owned);
+        end_frame(&mut input);
+
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT | MOUSE_RIGHT, WIN);
+        assert!(input.mouse_pressed(BTN_RIGHT) && input.mouse_held(BTN_RIGHT));
+        assert!(!input.mouse_pressed(BTN_LEFT) && !input.mouse_held(BTN_LEFT));
+        end_frame(&mut input);
+
+        apply_mouse_snapshot(&mut input, &mut was, &mut owned, MOUSE_LEFT, WIN);
+        assert!(input.mouse_released(BTN_RIGHT) && !input.mouse_released(BTN_LEFT));
     }
 
     fn approx_eq(a: u8, b: u8) -> bool {

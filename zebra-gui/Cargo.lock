@@ -2941,9 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "softer_gui"
-version = "3.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f4e04674167f7ccf9bc540254410508c588cd4c7f85b6737d938c3c774cf91a"
+version = "3.0.1"
 
 [[package]]
 name = "spin"

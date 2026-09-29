@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-softer_gui = "3"
+# Local macOS mouse-state repair; keep until the fix is available upstream.
+softer_gui = { version = "3", path = "../patches/softer_gui-3.0.1" }
 num_cpus = "1.17.0"
 ahash = "0.8.12"
 rand = "0.9.2"
