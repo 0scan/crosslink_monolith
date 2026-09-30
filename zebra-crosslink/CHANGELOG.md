@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- Crosslink node shutdown now stops new work, drains in-flight database writes, and
+  joins node, wallet, lightwallet server, and GUI workers before exiting. Ctrl-C and
+  window close share this path in native and APE builds.
+- APE startup on Windows no longer requires `/proc/self/exe` or Unix-domain socket
+  pairs. Final exit runs on a database-free main thread to avoid RocksDB's duplicate
+  TLS cleanup under Cosmopolitan.
+
 - `getblocksubsidy` now returns NU6-era funding stream metadata (recipient names and
   specification URLs) for NU6.1 and later upgrades. Amounts and addresses were never
   affected ([#11172](https://github.com/ZcashFoundation/zebra/pull/11172)).

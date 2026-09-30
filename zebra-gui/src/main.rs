@@ -96,5 +96,5 @@ fn main() {
         eprintln!("could not open a window");
         std::process::exit(1);
     };
-    zebra_gui::main_thread_run_program(window, wallet_state, true);
+    zebra_gui::main_thread_run_program(window, wallet_state, true, || false);
 }

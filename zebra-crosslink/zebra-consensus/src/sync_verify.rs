@@ -236,6 +236,29 @@ pub fn block_verify_expensive(
     cheap: &CheapBlockChecks,
     lookup_utxo: &dyn Fn(&transparent::OutPoint) -> Option<transparent::Utxo>,
 ) -> Result<HashMap<transparent::OutPoint, transparent::OrderedUtxo>, BlockVerifyError> {
+    block_verify_expensive_with_shutdown(block, network, cheap, lookup_utxo, &zebra_chain::shutdown::is_shutting_down)
+}
+
+fn block_verify_expensive_with_shutdown(
+    block: &Block,
+    network: &Network,
+    cheap: &CheapBlockChecks,
+    lookup_utxo: &dyn Fn(&transparent::OutPoint) -> Option<transparent::Utxo>,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<HashMap<transparent::OutPoint, transparent::OrderedUtxo>, BlockVerifyError> {
+    // Only pure verification is cancellable. The caller checks shutdown again before
+    // entering the writer and must not report this as a peer/consensus rejection.
+    let check_shutdown = || {
+        if should_stop() {
+            Err(BlockVerifyError {
+                msg: "verification cancelled for shutdown".to_string(),
+                misbehavior_score: 0,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    check_shutdown()?;
     let transaction_error = |err: TransactionError| BlockVerifyError::from(VerifyBlockError::Transaction(err));
 
     let nu = NetworkUpgrade::current(network, cheap.height);
@@ -251,6 +274,7 @@ pub fn block_verify_expensive(
     let mut block_miner_fees = Amount::<NonNegative>::zero();
 
     for tx in block.transactions.iter() {
+        check_shutdown()?;
         tx::check_block_transaction(tx, cheap.height, block.header.time, network).map_err(transaction_error)?;
 
         // Resolve the outputs this transaction spends. Coinbase inputs have a null prevout and
@@ -302,6 +326,7 @@ pub fn block_verify_expensive(
 
         let items = tx::transaction_crypto_items(tx, nu, cached).map_err(transaction_error)?;
 
+        check_shutdown()?;
         items.verify_unbatched().map_err(transaction_error)?;
 
         if let Some(bundle) = items.sapling_bundle {
@@ -309,7 +334,9 @@ pub fn block_verify_expensive(
         }
 
         for (bundle, circuit) in items.orchard_bundles {
+            check_shutdown()?;
             let key = circuit.verifying_key();
+            check_shutdown()?;
             let batch = match orchard_batches.iter().position(|(batch_key, _)| std::ptr::eq(*batch_key, key)) {
                 Some(index) => &mut orchard_batches[index].1,
                 None => {
@@ -346,11 +373,14 @@ pub fn block_verify_expensive(
     )
     .map_err(VerifyBlockError::from)?;
 
-    // One flush per verifying key for the whole block. No timer, no channel, no executor.
+    // A crypto batch itself is indivisible: finish it, then observe cancellation.
+    // No state write has started, and the writer must still check before committing.
+    check_shutdown()?;
     if !sapling_bundles.is_empty() {
         let mut validator = sapling_crypto::BatchValidator::new();
 
         for (bundle, sighash) in sapling_bundles {
+            check_shutdown()?;
             // check_bundle does the structural/queueing half and can reject immediately.
             if !validator.check_bundle(bundle, sighash.into()) {
                 return Err(transaction_error(TransactionError::SaplingVerificationFailed));
@@ -358,17 +388,20 @@ pub fn block_verify_expensive(
         }
 
         let (spend_vk, output_vk) = SAPLING.verifying_keys();
+        check_shutdown()?;
         if !validator.validate(&spend_vk, &output_vk, thread_rng()) {
             return Err(transaction_error(TransactionError::SaplingVerificationFailed));
         }
     }
 
     for (_key, validator) in orchard_batches {
+        check_shutdown()?;
         if !validator.validate(thread_rng()) {
             return Err(transaction_error(TransactionError::Halo2VerificationFailed));
         }
     }
 
+    check_shutdown()?;
     Ok(known_utxos)
 }
 
@@ -376,6 +409,35 @@ pub fn block_verify_expensive(
 mod tests {
     use super::*;
     use zebra_chain::serialization::ZcashDeserialize;
+
+    #[test]
+    fn shutdown_cancels_before_utxo_lookup_or_crypto() {
+        let network = Network::Mainnet;
+        let canopy_height = NetworkUpgrade::Canopy.activation_height(&network).unwrap();
+        let (_, bytes) = zebra_test::vectors::MAINNET_BLOCKS.iter()
+            .find(|(height, _)| Height(**height) >= canopy_height)
+            .expect("post-Canopy vector exists");
+        let block = Block::zcash_deserialize(&bytes[..]).expect("valid block vector");
+        let cheap = block_check_cheap(&block, &network, block.header.time, true).unwrap();
+        let lookup = |_: &transparent::OutPoint| panic!("cancelled verification must not read state");
+
+        let err = block_verify_expensive_with_shutdown(&block, &network, &cheap, &lookup, &|| true)
+            .expect_err("shutdown must cancel before expensive checks");
+        assert_eq!(err.misbehavior_score, 0);
+        assert_eq!(err.msg, "verification cancelled for shutdown");
+
+        // A request arriving after setup must also stop at the first transaction.
+        let checks = std::cell::Cell::new(0);
+        let should_stop = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 2
+        };
+        let err = block_verify_expensive_with_shutdown(&block, &network, &cheap, &lookup, &should_stop)
+            .expect_err("shutdown must be checked between transactions");
+        assert_eq!(checks.get(), 2);
+        assert_eq!(err.misbehavior_score, 0);
+        assert_eq!(err.msg, "verification cancelled for shutdown");
+    }
 
     /// The cheap checks must accept every known-good mainnet block vector the semantic path
     /// can verify. Heights below Canopy activation are excluded: `subsidy_is_valid` has an

@@ -12,8 +12,7 @@ use crate::*;
 /// node when there is not.
 ///
 /// `node` is the node's whole life. With a window it runs on a thread of its own, because the
-/// window owns this one (AppKit will only run on the main thread), and the wallet gets a thread
-/// of its own too. Without a window -- `headless` was asked for, or there is no display --
+/// window owns this one (AppKit will only run on the main thread), and the wallet shares the node runtime. Without a window -- `headless` was asked for, or there is no display --
 /// `node` just runs here, and the node starts the headless wallet the way any CLI node does.
 ///
 /// The window is opened before any of the node exists, since whether it opens decides which
@@ -24,25 +23,31 @@ pub fn run_node(headless: bool, node: impl FnOnce() + Send + 'static) {
         if !headless {
             eprintln!("no display to open the visualizer on; running headless (--headless skips the attempt)");
         }
-        node();
+        // Keep RocksDB's thread-local state off the final-exit thread in both
+        // modes. C++ TLS cleanup runs when this joined node thread returns.
+        std::thread::spawn(node).join().expect("node thread panicked");
         return;
     };
     GUI_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let wallet_state = Arc::new(Mutex::new(wallet::WalletState::new()));
-    let wallet_state2 = wallet_state.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_time()
-            .enable_io()
-            .build()
-            .unwrap();
-        rt.block_on(wallet::wallet_main(wallet_state2));
+    *GUI_WALLET_STATE.lock().unwrap() = Some(wallet_state.clone());
+    // The wallet runs on the node's runtime, not a detached runtime which can
+    // still call node services after they have shut down.
+    let node_thread = std::thread::spawn(node);
+    zebra_gui::main_thread_run_program(window, wallet_state, false, || {
+        zebra_chain::shutdown::is_shutting_down() || node_thread.is_finished()
     });
+    zebra_chain::shutdown::set_shutting_down();
+    node_thread.join().expect("node thread panicked");
+    *GUI_WALLET_STATE.lock().unwrap() = None;
+}
 
-    let tokio_root_thread_handle = std::thread::spawn(node);
-    viz_main(Some(tokio_root_thread_handle), wallet_state, window);
+static GUI_WALLET_STATE: Mutex<Option<Arc<Mutex<wallet::WalletState>>>> = Mutex::new(None);
+
+/// The window's wallet; started and cancelled by the node alongside its other tasks.
+pub fn gui_wallet_state() -> Option<Arc<Mutex<wallet::WalletState>>> {
+    GUI_WALLET_STATE.lock().unwrap().clone()
 }
 
 fn open_window() -> Option<zebra_gui::Window> {
@@ -60,18 +65,6 @@ fn open_window() -> Option<zebra_gui::Window> {
     }
 
     zebra_gui::open_window()
-}
-
-fn viz_main(tokio_root_thread_handle: Option<std::thread::JoinHandle<()>>, wallet_state: Arc<Mutex<wallet::WalletState>>, window: zebra_gui::Window) {
-    // loop {
-    //     if let Some(ref thread_handle) = tokio_root_thread_handle {
-    //         if thread_handle.is_finished() {
-    //             return;
-    //         }
-    //     }
-    // }
-
-    zebra_gui::main_thread_run_program(window, wallet_state, false);
 }
 
 
@@ -398,6 +391,17 @@ impl VizScene {
 }
 
 /// Bridge between tokio & viz code
+pub(crate) static VIZ_SERVICE_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+
+/// Drain the dedicated visualizer service while the node runtime is still
+/// alive. It owns an async loop on a blocking thread and must not outlive Tokio.
+pub async fn finish_service() {
+    let task = VIZ_SERVICE_TASK.lock().unwrap().take();
+    if let Some(task) = task {
+        task.await.expect("visualizer service panicked during shutdown");
+    }
+}
+
 pub async fn service_viz_requests(
     tfl_handle: crate::TFLServiceHandle,
     params: crate::ZcashCrosslinkParameters,
@@ -432,7 +436,7 @@ pub async fn service_viz_requests(
     let mut view_reset = false;
     let mut live_reset = false;
 
-    loop {
+    while !zebra_chain::shutdown::is_shutting_down() {
         let request_queue = zebra_gui::REQUESTS_TO_ZEBRA.lock().unwrap();
         let response_queue = zebra_gui::RESPONSES_FROM_ZEBRA.lock().unwrap();
         if request_queue.is_none() || response_queue.is_none() {
@@ -441,7 +445,7 @@ pub async fn service_viz_requests(
         let request_queue = request_queue.as_ref().unwrap();
         let response_queue = response_queue.as_ref().unwrap();
 
-        'main_loop: loop {
+        'main_loop: while !zebra_chain::shutdown::is_shutting_down() {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
             // Viewing a file answers from the file alone: the node may be on an unrelated

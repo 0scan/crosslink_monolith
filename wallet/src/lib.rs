@@ -409,6 +409,22 @@ impl BuildPrep {
 }
 
 
+/// Await pure proof work and join it on every normal return, propagating worker panics.
+///
+/// Cancellation drops the receiver and thread handle without waiting. The worker may
+/// therefore own only proof inputs, never a wallet, database, client, or runtime handle.
+/// Do not use Tokio's blocking pool here: runtime shutdown waits for that pool.
+async fn await_wallet_proof<T>(
+    receiver: tokio::sync::oneshot::Receiver<T>,
+    worker: std::thread::JoinHandle<()>,
+) -> T {
+    let result = receiver.await;
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+    result.expect("wallet proof worker exited without sending a result")
+}
+
 struct ProposedTx {
     pub tx: WalletTx,
     pub prep: Option<BuildPrep>,
@@ -1595,7 +1611,17 @@ impl ManualWallet {
         wallet_tx.is_on_bc()
     }
 
-    fn build_tx_from_prep<P: Parameters>(&mut self, network: P, tx: &mut ProposedTx, prep: BuildPrep) -> bool {
+    async fn build_tx_from_prep_async<P: Parameters + Send + 'static>(network: P, prep: BuildPrep) -> Option<TxBuildResult> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // These owned inputs are the entire worker state: no wallet/DB/client/runtime.
+        let worker = std::thread::Builder::new().name("wallet-proof".to_string()).spawn(move || {
+            let result = Self::build_tx_from_prep(network, prep);
+            let _ = sender.send(result); // Cancellation intentionally discards the proof.
+        }).expect("unable to start pure wallet proof worker");
+        await_wallet_proof(receiver, worker).await
+    }
+
+    fn build_tx_from_prep<P: Parameters>(network: P, prep: BuildPrep) -> Option<TxBuildResult> {
         let tz = Timer::scope_("build_tx_from_prep", DUMP_TX_SEND | DUMP_TX_BUILD);
         let prep_fee = prep.fee_required();
 
@@ -1618,28 +1644,28 @@ impl ManualWallet {
         for ProposedTransparentOutput{ dst, zats } in t_outputs {
             if let Err(err) = txb.add_transparent_output(&dst, zats) {
                 if DUMP_TX_BUILD { println!("constructing transparent output: {err:?}"); }
-                return false;
+                return None;
             }
         }
 
         for ProposedOrchardSpend{ fvk, note, witness_merkle_path } in o_inputs {
             if let Err(err) = txb.add_ironwood_spend::<zip317::FeeError>(fvk, note.note, witness_merkle_path) {
                 if DUMP_TX_BUILD { println!("constructing orchard spend: {err:?}"); }
-                return false;
+                return None;
             }
         }
 
         for ProposedOrchardOutput{ ovk, dst, zats, memo: spend_memo } in o_outputs {
             if let Err(err) = txb.add_ironwood_output::<zip317::FeeError>(ovk, dst, zats, spend_memo) {
                 if DUMP_TX_BUILD { println!("constructing orchard output: {err:?}"); }
-                return false;
+                return None;
             }
         }
 
         if let Some(staking_action) = staking_action {
             if let Err(err) = txb.put_staking_action(staking_action) {
                 if DUMP_TX_BUILD { println!("constructing staking action: {err:?}"); }
-                return false;
+                return None;
             }
         }
 
@@ -1667,22 +1693,11 @@ impl ManualWallet {
             prover,
             &zip317::FeeRule::standard(),
         ) {
-            Ok(tx_res) => {
-                let expiry_h = BlockHeight::from(tx_res.transaction().expiry_height());
-                tx.tx = WalletTx {
-                    txid: tx_res.transaction().txid(),
-                    expiry_h: if expiry_h.0 == 0 { None } else { Some(expiry_h) },
-                    h: BlockHeight::BUILT,
-                    status: TxStatus::OnBc,
-                    ..tx.tx
-                };
-                tx.tx_res = Some(tx_res);
-                true
-            }
+            Ok(tx_res) => Some(tx_res),
 
             Err(err) => {
                 println!("tx build error: {err:?}");
-                false
+                None
             }
         }
     }
@@ -5074,7 +5089,7 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
         //-- INCREMENTALLY SEND TXS
         // (we want to skip this slow work to send tx data to UI while this is still single-threaded to show the started tx immediately)
         if ! just_init_new_tx {
-            async fn continue_proposed_tx<P: Parameters>(wallet: &mut ManualWallet, network: P, tx: &mut ProposedTx, client: &mut CompactTxStreamerClient<Channel>, desc: &str, loud: bool) -> WalletTx {
+            async fn continue_proposed_tx<P: Parameters + Send + 'static>(wallet: &mut ManualWallet, network: P, tx: &mut ProposedTx, client: &mut CompactTxStreamerClient<Channel>, desc: &str, loud: bool) -> WalletTx {
                 let pre_mined_h = tx.tx.h;
                 match tx.tx.h {
                     BlockHeight::PROPOSED => {
@@ -5085,7 +5100,19 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
                         {
                             println!("tx build error: total values are too large to be represented by Zatoshis");
                         } else if let Some(prep) = tx.prep.take() {
-                            ok = wallet.build_tx_from_prep(network, tx, prep);
+                            if let Some(tx_res) = ManualWallet::build_tx_from_prep_async(network, prep).await {
+                                // Apply the result only after the cancellable proof work has joined.
+                                let expiry_h = BlockHeight::from(tx_res.transaction().expiry_height());
+                                tx.tx = WalletTx {
+                                    txid: tx_res.transaction().txid(),
+                                    expiry_h: if expiry_h.0 == 0 { None } else { Some(expiry_h) },
+                                    h: BlockHeight::BUILT,
+                                    status: TxStatus::OnBc,
+                                    ..tx.tx
+                                };
+                                tx.tx_res = Some(tx_res);
+                                ok = true;
+                            }
                         } else {
                             println!("unexpectedly no prep ready for build");
                         };
@@ -5094,7 +5121,7 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
                             tx.tx.status = TxStatus::HardFail(tx.tx.h, ErrBuf::from_str("failed to build"));
                             tx.tx.h = wallet.sync_h;
                         } else {
-                            // A failed build has no txid (only build_tx_from_prep assigns one);
+                            // A failed build has no txid (only a successful proof assigns one);
                             // recording it would file every failed build under the all-zero id and
                             // merge their parts into one phantom entry. Same guard as the faucet
                             // user-copy below.
@@ -5252,6 +5279,71 @@ impl ServerCertVerifier for DerVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wallet_proof_cancellation_does_not_wait_for_worker() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+            // The cancelled receiver must discard the result, not apply wallet updates.
+            finished_sender.send(sender.send(42).is_err()).unwrap();
+        });
+        ready_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut proof = Box::pin(await_wallet_proof(receiver, worker));
+        runtime.block_on(std::future::poll_fn(|cx| {
+            assert!(proof.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        }));
+        let start = Instant::now();
+        drop(proof);
+        drop(runtime);
+        assert!(start.elapsed() < Duration::from_millis(250));
+        assert!(matches!(finished_receiver.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        // Release and observe completion so the test leaves no blocked background work.
+        release_sender.send(()).unwrap();
+        assert!(finished_receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn wallet_proof_success_joins_worker() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_finished = finished.clone();
+        let worker = std::thread::spawn(move || {
+            sender.send(42).unwrap();
+            worker_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert_eq!(await_wallet_proof(receiver, worker).await, 42);
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "synthetic wallet proof panic")]
+    async fn wallet_proof_panic_is_propagated() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _sender = sender;
+            panic!("synthetic wallet proof panic");
+        });
+        await_wallet_proof(receiver, worker).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "synthetic wallet proof panic after result")]
+    async fn wallet_proof_received_result_still_joins_worker() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            sender.send(42).unwrap();
+            panic!("synthetic wallet proof panic after result");
+        });
+        // Deterministically detects skipping the join when a result is already available.
+        await_wallet_proof(receiver, worker).await;
+    }
 
     #[test]
     fn confirmations_count_the_tip_block() {

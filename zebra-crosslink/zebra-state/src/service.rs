@@ -379,7 +379,7 @@ impl StateService {
             );
         }
         let _skip_backup_task = config.debug_skip_non_finalized_state_backup_task;
-        let (non_finalized_state, non_finalized_state_sender, non_finalized_state_receiver) =
+        let (non_finalized_state, non_finalized_state_sender, non_finalized_state_receiver, backup_task) =
             NonFinalizedState::new(network, config.hardfork_schedule.clone())
                 .with_backup(
                     backup_dir_path.clone(),
@@ -409,6 +409,7 @@ impl StateService {
             non_finalized_state,
             chain_tip_sender,
             non_finalized_state_sender,
+            backup_task,
         );
 
         let read_service =

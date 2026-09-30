@@ -145,6 +145,7 @@ const RENDER_TILE_SIZE: usize = 1 << RENDER_TILE_SHIFT;
 const RENDER_TILE_INTRA_MASK: usize = RENDER_TILE_SIZE.wrapping_sub(1);
 
 struct ThreadContext {
+    stop: AtomicBool,
     wake_up_gate: AtomicU32,
     workers_that_have_passed_the_wake_up_gate: AtomicU32,
     wake_up_barrier: Barrier,
@@ -160,12 +161,35 @@ struct ThreadContext {
 }
 type WideWorkFn = fn(thread_id: usize, work_id: usize, work_count: usize, user_pointer: usize);
 
+// Joined before ThreadContext is freed: workers carry pointers to it. Every
+// frame finishes its jobs before the event loop checks stop/close, so workers
+// are parked at the barrier and no framebuffer is still being written.
+struct RenderWorkers {
+    context: usize,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for RenderWorkers {
+    fn drop(&mut self) {
+        unsafe {
+            let context = &*(self.context as *const ThreadContext);
+            context.stop.store(true, Ordering::Release);
+            context.wake_up_barrier.wait();
+        }
+        for handle in self.handles.drain(..) {
+            handle.join().expect("render worker panicked");
+        }
+    }
+}
+
+
 fn worker_thread_loop(thread_id: usize, p_thread_context: usize) {
     unsafe {
         let p_thread_context = p_thread_context as *mut ThreadContext;
         // let thread_count = (*p_thread_context).thread_count;
         loop {
             (*p_thread_context).wake_up_barrier.wait();
+            if (*p_thread_context).stop.load(Ordering::Acquire) { return; }
             while (*p_thread_context).wake_up_gate.load(Ordering::Acquire) == 0 { spin_loop(); }
             (*p_thread_context).workers_that_have_passed_the_wake_up_gate.fetch_add(1, Ordering::Relaxed);
 
@@ -1162,7 +1186,7 @@ pub fn open_window() -> Option<Window> {
     softer_gui::open(&title, "org.zfnd.crosslink_visualizer", 1600, 900)
 }
 
-pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::WalletState>>, fake_data: bool) {
+pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::WalletState>>, fake_data: bool, should_stop: impl Fn() -> bool) {
 
     let mut viz_state = viz_gui_init(fake_data);
 
@@ -1182,7 +1206,8 @@ pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::
     let mut frame_is_actually_queued_by_us = false;
     let mut wayland_dropped_a_frame_on_purpose_counter = 0usize;
 
-    let mut s_thread_context = ThreadContext {
+    let mut s_thread_context = Box::new(ThreadContext {
+        stop: AtomicBool::new(false),
         wake_up_gate: AtomicU32::new(0),
         workers_that_have_passed_the_wake_up_gate: AtomicU32::new(num_cpus::get_physical() as u32 - 1),
         wake_up_barrier: Barrier::new(num_cpus::get_physical()),
@@ -1195,15 +1220,15 @@ pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::
         work_unit_complete: AtomicU32::new(0),
         work_user_pointer: 0,
         work_user_function: |_,_,_,_| {},
-    };
-    let p_thread_context: *mut ThreadContext = &mut s_thread_context as *mut ThreadContext;
+    });
+    let p_thread_context: *mut ThreadContext = &mut *s_thread_context;
+    let mut render_workers = RenderWorkers { context: p_thread_context as usize, handles: Vec::new() };
 
     for thread_id in 1..unsafe { (*p_thread_context).thread_count as usize } {
         let magic_int = p_thread_context as usize;
-        let _ = std::thread::spawn(move || {
-            // println!("Started worker thread#{}...", thread_id);
+        render_workers.handles.push(std::thread::spawn(move || {
             worker_thread_loop(thread_id, magic_int);
-        });
+        }));
     }
 
     // No render target of our own any more: the tiles are rasterised straight into
@@ -1329,6 +1354,7 @@ pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::
     let (mut was_down1, mut was_down2, mut was_mouse, mut frame_owned_mouse) = (0u128, 0u128, 0usize, 0usize);
 
     'app: loop {
+        if should_stop() { break; }
         // A timeout, not a plain wait: the business layer (new blocks, wallet
         // updates) is polled, not pushed, so a parked pace chain still has to
         // come back and look. 16 ms matches the old ControlFlow::Poll cadence.
@@ -1344,6 +1370,7 @@ pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::
         if last_render.elapsed() > Duration::from_millis(32) { gui.request_frame(); }
 
         while gui.next_event(&mut ev) {
+            if should_stop() { break 'app; }
             match ev.kind {
                 EVENT_CLOSE => break 'app,
 
@@ -2367,6 +2394,7 @@ pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::
             }
         }
     }
+    drop(render_workers);
 }
 
 #[cfg(test)]
@@ -2374,7 +2402,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn render_workers_join_before_context_is_freed() {
+        for frames in [0, 3] {
+            let mut context = Box::new(ThreadContext {
+                stop: AtomicBool::new(false),
+                wake_up_gate: AtomicU32::new(0),
+                workers_that_have_passed_the_wake_up_gate: AtomicU32::new(3),
+                wake_up_barrier: Barrier::new(4),
+                is_last_time: false,
+                thread_count: 4,
+                begin_work_gate: AtomicU32::new(0),
+                workers_at_job_site: AtomicU32::new(0),
+                work_unit_count: 0,
+                work_unit_take: AtomicU32::new(0),
+                work_unit_complete: AtomicU32::new(0),
+                work_user_pointer: 0,
+                work_user_function: |_, _, _, _| {},
+            });
+            let ptr = &mut *context as *mut ThreadContext;
+            let mut workers = RenderWorkers { context: ptr as usize, handles: Vec::new() };
+            for id in 1..4 {
+                let address = ptr as usize;
+                workers.handles.push(std::thread::spawn(move || worker_thread_loop(id, address)));
+            }
+            let count = AtomicU32::new(0);
+            for _ in 0..frames {
+                while context.workers_that_have_passed_the_wake_up_gate.load(Ordering::Acquire) != 3 {
+                    std::thread::yield_now();
+                }
+                context.workers_that_have_passed_the_wake_up_gate.store(0, Ordering::Relaxed);
+                context.wake_up_gate.store(0, Ordering::Relaxed);
+                context.wake_up_barrier.wait();
+                context.begin_work_gate.store(0, Ordering::Relaxed);
+                context.wake_up_gate.store(1, Ordering::Release);
+                dennis_parallel_for(ptr, true, 64, &count as *const AtomicU32 as usize,
+                    |_, _, _, address| unsafe {
+                        (*(address as *const AtomicU32)).fetch_add(1, Ordering::Relaxed);
+                    });
+            }
+            drop(workers);
+            assert_eq!(count.load(Ordering::Relaxed), frames * 64);
+            assert_eq!(context.workers_at_job_site.load(Ordering::Relaxed), 0);
+        }
     }
 
     const WIN: (usize, usize) = (800, 600);

@@ -6,7 +6,7 @@
 use std::{env, fmt::Write as _, io::Write as _, process, sync::Arc};
 
 use abscissa_core::{
-    application::{self, AppCell},
+    application,
     config::CfgCell,
     status_err,
     terminal::{component::Terminal, stderr, stdout, ColorChoice},
@@ -34,8 +34,33 @@ fn fatal_error(app_name: String, err: &dyn std::error::Error) -> ! {
     process::exit(1)
 }
 
-/// Application state
-pub static APPLICATION: AppCell<ZebradApp> = AppCell::new();
+/// Application state, initialized once before the command runs.
+///
+/// Abscissa's AppCell can only be initialized by its run(), which exits the
+/// process on the command thread. This cell lets the main thread own final exit
+/// after both the command and GUI have finished.
+pub struct ZebradAppCell(std::sync::OnceLock<ZebradApp>);
+
+impl ZebradAppCell {
+    fn set_once(&self, app: ZebradApp) {
+        assert!(self.0.set(app).is_ok(), "application can only be initialized once");
+    }
+}
+
+impl std::ops::Deref for ZebradAppCell {
+    type Target = ZebradApp;
+
+    fn deref(&self) -> &ZebradApp {
+        self.0.get().expect("application initialized before running commands")
+    }
+}
+
+/// The running application.
+pub static APPLICATION: ZebradAppCell = ZebradAppCell(std::sync::OnceLock::new());
+
+/// Carry a root-task error to final exit on the main thread, after worker cleanup.
+pub(crate) static COMMAND_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 lazy_static::lazy_static! {
     /// The last log event that occurred in the application.
@@ -173,6 +198,21 @@ pub struct ZebradApp {
 }
 
 impl ZebradApp {
+    /// Initialize and run the command without exiting its thread. The caller
+    /// joins node/GUI workers before invoking application shutdown on main.
+    pub fn run_command<I, T>(app_cell: &'static ZebradAppCell, args: I)
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use abscissa_core::{Command, Runnable};
+        let command = EntryPoint::parse_args(args);
+        let mut app = Self::default();
+        app.init(&command).unwrap_or_else(|error| fatal_error(app.name().to_string(), &error));
+        app_cell.set_once(app);
+        command.run();
+    }
+
     /// Returns the git commit for this build, if available.
     ///
     ///
@@ -192,6 +232,55 @@ impl ZebradApp {
 pub static CROSSLINK_TEST_CONFIG_OVERRIDE: std::sync::Mutex<Option<Arc<ZebradConfig>>> =
     std::sync::Mutex::new(None);
 
+// APE's Rust target is Linux even when it is running on Windows. std::env::current_exe()
+// therefore reads /proc/self/exe, which does not exist there. Ask Cosmopolitan instead.
+#[cfg(cosmo)]
+#[allow(unsafe_code)]
+mod cosmo_paths {
+    use abscissa_core::path::{AbsPath, AbsPathBuf, ExePath, RootPath, SecretsPath};
+    use std::{ffi::CStr, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    unsafe extern "C" {
+        fn GetProgramExecutableName() -> *mut std::ffi::c_char;
+    }
+
+    #[derive(Debug)]
+    pub struct CosmoPaths {
+        exe: AbsPathBuf,
+        root: AbsPathBuf,
+        secrets: Option<AbsPathBuf>,
+    }
+
+    impl Default for CosmoPaths {
+        fn default() -> Self {
+            let name = unsafe { GetProgramExecutableName() };
+            assert!(!name.is_null(), "Cosmopolitan did not provide the executable path");
+            // The runtime owns a NUL-terminated pathname valid for the life of the process.
+            let name = unsafe { CStr::from_ptr(name) }.to_bytes().to_vec();
+            let name = PathBuf::from(std::ffi::OsString::from_vec(name));
+            let exe = AbsPathBuf::canonicalize(name)
+                .expect("Cosmopolitan's executable path must resolve to the running program");
+            let root = exe.parent().expect("the executable must have a parent directory");
+            let secrets = root.join("secrets").ok();
+            Self { exe, root, secrets }
+        }
+    }
+
+    impl ExePath for CosmoPaths {
+        fn exe(&self) -> &AbsPath { self.exe.as_ref() }
+    }
+
+    impl RootPath for CosmoPaths {
+        fn root(&self) -> &AbsPath { self.root.as_ref() }
+    }
+
+    impl SecretsPath for CosmoPaths {
+        fn secrets(&self) -> &AbsPath {
+            self.secrets.as_ref().expect("secrets directory does not exist").as_ref()
+        }
+    }
+}
+
 impl Application for ZebradApp {
     /// Entrypoint command for this application.
     type Cmd = EntryPoint;
@@ -200,7 +289,10 @@ impl Application for ZebradApp {
     type Cfg = ZebradConfig;
 
     /// Paths to resources within the application.
+    #[cfg(not(cosmo))]
     type Paths = StandardPaths;
+    #[cfg(cosmo)]
+    type Paths = cosmo_paths::CosmoPaths;
 
     /// Accessor for application configuration.
     fn config(&self) -> Arc<ZebradConfig> {
@@ -577,7 +669,7 @@ impl Application for ZebradApp {
 /// Boot the given application, parsing subcommand and options from
 /// command-line arguments, and terminating when complete.
 // <https://docs.rs/abscissa_core/0.7.0/src/abscissa_core/application.rs.html#174-178>
-pub fn boot(app_cell: &'static AppCell<ZebradApp>) -> ! {
+pub fn boot(app_cell: &'static ZebradAppCell) -> ! {
     let args = EntryPoint::process_cli_args(env::args_os().collect()).unwrap_or_else(|err| err.exit());
 
     use clap::Parser;
@@ -595,12 +687,21 @@ pub fn boot(app_cell: &'static AppCell<ZebradApp>) -> ! {
         })
         .unwrap_or((false, true));
 
+    // Abscissa's default run() exits on the command thread. Join it first:
+    // GUI workers must finish, and Cosmopolitan runs pthread TLS destructors
+    // before C++ atexit handlers. RocksDB's atexit handler would otherwise
+    // free its already-freed TLS data again. Keep DB work off final-exit main.
+    let run_command = move || ZebradApp::run_command(app_cell, args);
     if is_start {
-        // Opens the window if there is a display for it, and otherwise runs the node right here.
-        zebra_crosslink::viz2::run_node(headless, move || ZebradApp::run(app_cell, args));
+        zebra_crosslink::viz2::run_node(headless, run_command);
     } else {
-        ZebradApp::run(app_cell, args);
+        std::thread::spawn(run_command).join().expect("command thread panicked");
     }
 
-    process::exit(0);
+    let shutdown = if COMMAND_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
+        Shutdown::Forced
+    } else {
+        Shutdown::Graceful
+    };
+    app_cell.shutdown(shutdown);
 }

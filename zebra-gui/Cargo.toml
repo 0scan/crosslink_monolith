@@ -47,7 +47,7 @@ ape = ["dep:cosmo-build"]
 [target.'cfg(cosmo)'.dependencies]
 # Translates the libc entry points std calls, whose constants rustc bakes in for
 # Linux but cosmopolitan resolves at load time.
-cosmo-compat = "5"
+cosmo-compat = { version = "5", path = "../patches/cosmo-compat-5.0.2" }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(cosmo)'] }

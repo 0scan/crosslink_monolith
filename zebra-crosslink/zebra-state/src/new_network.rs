@@ -1174,6 +1174,52 @@ pub struct VerifyFns {
     >,
 }
 
+/// Wait for CPU-only work, joining it unless shutdown discards the result.
+///
+/// The worker must own only immutable verification inputs: no database handles,
+/// writer, chain/BFT locks, or runtime references. Dropping its handle on shutdown
+/// leaves at most one read-only proof/key calculation until process exit, just as
+/// the process-lifetime Rayon workers do. Database writes are never run here.
+fn await_cpu_verification<T>(
+    receiver: std::sync::mpsc::Receiver<T>,
+    worker: std::thread::JoinHandle<()>,
+    should_stop: impl Fn() -> bool,
+) -> Option<T> {
+    loop {
+        if should_stop() { return None; }
+        match receiver.recv_timeout(std::time::Duration::from_millis(5)) {
+            Ok(result) => {
+                if let Err(panic) = worker.join() { std::panic::resume_unwind(panic); }
+                return Some(result);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {},
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if let Err(panic) = worker.join() { std::panic::resume_unwind(panic); }
+                panic!("verification worker exited without sending a result");
+            }
+        }
+    }
+}
+
+fn verify_expensive_cancellable(
+    verify_fns: VerifyFns,
+    block: std::sync::Arc<Block>,
+    network: zebra_chain::parameters::Network,
+    cheap: CheapBlockChecks,
+    spent_utxos: std::collections::HashMap<zebra_chain::transparent::OutPoint, zebra_chain::transparent::Utxo>,
+) -> Option<Result<
+    std::collections::HashMap<zebra_chain::transparent::OutPoint, zebra_chain::transparent::OrderedUtxo>,
+    BlockVerifyError,
+>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new().name("block-verifier".to_string()).spawn(move || {
+        let lookup = |outpoint: &zebra_chain::transparent::OutPoint| spent_utxos.get(outpoint).cloned();
+        let result = (verify_fns.verify_expensive)(&block, &network, &cheap, &lookup);
+        let _ = sender.send(result);
+    }).expect("unable to start CPU-only verification worker");
+    await_cpu_verification(receiver, worker, zebra_chain::shutdown::is_shutting_down)
+}
+
 // ---------------------------------------------------------------------------
 // Block ingest: the doorway for everything that is NOT new_network's own downloads.
 //
@@ -1576,8 +1622,9 @@ pub fn sync(
         short.to_string()
     };
 
-    // Main sync loop
-    loop {
+    // Stop only between writes. A commit and its chain/BFT bookkeeping finish
+    // together on this thread; dropping it mid-commit is never a shutdown path.
+    while !zebra_chain::shutdown::is_shutting_down() {
         let loop_start = std::time::Instant::now();
 
         bft_runner.tick(&read_state, &mut block_writer);
@@ -2941,6 +2988,7 @@ pub fn sync(
         // @Temporary: just pull one and wait to commit it.
         let mut any_blocks_in_the_queue_can_make_progress = false;
         blocks_to_commit.retain(|(hash, block_arc)| {
+            if zebra_chain::shutdown::is_shutting_down() { return true; }
             let hash = *hash;
             let block_arc = block_arc.clone();
 
@@ -3035,8 +3083,26 @@ pub fn sync(
                             // `pos_payout` travels with the block to `Chain::push`: the gate is the
                             // only place that resolves the certificate and what it finalizes.
                             Some(crate::CrosslinkVerdict::Accept { pos_payout }) => {
-                                let lookup = |outpoint: &zebra_chain::transparent::OutPoint| read_state.any_chain_utxo(outpoint);
-                                match (verify_fns.verify_expensive)(&block_arc, &network, &cheap, &lookup) {
+                                // Snapshot on the writer thread before giving pure crypto work
+                                // to the worker. Same-block outputs are still resolved by the
+                                // verifier itself; it never receives a ReadState or DB handle.
+                                let mut spent_utxos = std::collections::HashMap::new();
+                                for tx in &block_arc.transactions {
+                                    if zebra_chain::shutdown::is_shutting_down() { return true; }
+                                    for input in tx.inputs() {
+                                        if let zebra_chain::transparent::Input::PrevOut { outpoint, .. } = input {
+                                            if !spent_utxos.contains_key(outpoint) {
+                                                if let Some(utxo) = read_state.any_chain_utxo(outpoint) {
+                                                    spent_utxos.insert(*outpoint, utxo);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let Some(result) = verify_expensive_cancellable(
+                                    verify_fns, block_arc.clone(), network, cheap.clone(), spent_utxos,
+                                ) else { return true; };
+                                match result {
                                     Err(err) => Err(("expensive", err.msg, false)),
                                     Ok(new_outputs) => Ok((cheap, new_outputs, pos_payout)),
                                 }
@@ -3045,6 +3111,11 @@ pub fn sync(
                     }
                 }
             };
+
+            // Shutdown is not a verification failure: keep the block and its pending
+            // reply for teardown rather than reporting a bad peer or starting a write.
+            // Once handle_commit starts, it and all bookkeeping below must finish.
+            if zebra_chain::shutdown::is_shutting_down() { return true; }
 
             // The sync path now GATES the commit: a rejection here means the block is never
             // submitted. The old route (verifier router -> StateService -> queue_and_commit ->
@@ -3165,13 +3236,68 @@ pub fn sync(
         let _ = any_blocks_in_the_queue_can_make_progress;
 
         // The remainder of the tick goes to BFT requests, so a round does not wait out the tick.
-        bft_runner.wait(loop_start + tick_duration, &read_state, &mut block_writer);
+        if !zebra_chain::shutdown::is_shutting_down() {
+            bft_runner.wait(loop_start + tick_duration, &read_state, &mut block_writer);
+        }
     }
+    rt.block_on(block_writer.finish_backup());
+    tracing::info!("NewNet: writer stopped after completing in-flight commits");
 }
 
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn cpu_verification_shutdown_does_not_wait_for_worker() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+            let _ = sender.send(42);
+            finished_sender.send(()).unwrap();
+        });
+        ready_receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let checks = std::cell::Cell::new(0);
+        let start = std::time::Instant::now();
+        let result = await_cpu_verification(receiver, worker, || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 2
+        });
+        assert_eq!(result, None, "cancelled result must not reach the commit path");
+        assert!(start.elapsed() < std::time::Duration::from_millis(250));
+        assert!(matches!(finished_receiver.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        // Release and observe completion so this test leaves no background worker.
+        release_sender.send(()).unwrap();
+        finished_receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn cpu_verification_success_joins_worker() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_finished = finished.clone();
+        let worker = std::thread::spawn(move || {
+            sender.send(42).unwrap();
+            worker_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert_eq!(await_cpu_verification(receiver, worker, || false), Some(42));
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    #[should_panic(expected = "synthetic verification panic")]
+    fn cpu_verification_panic_is_propagated() {
+        let (sender, receiver) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _sender = sender;
+            panic!("synthetic verification panic");
+        });
+        let _ = await_cpu_verification(receiver, worker, || false);
+    }
 
     #[test]
     fn create_packet_from_block_hashes() {

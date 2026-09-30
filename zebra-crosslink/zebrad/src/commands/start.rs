@@ -262,13 +262,16 @@ impl StartCmd {
 
         let config = APPLICATION.config();
 
-        // With the window up, `viz2::run_node` already gave the wallet a thread of its own.
-        if !zebra_crosslink::gui_active() {
-            if config.crosslink.disable_the_headless_wallet == false {
-                let wallet_state = Arc::new(std::sync::Mutex::new(wallet::WalletState::new()));
-                tokio::spawn(zebra_crosslink::wallet::wallet_main(wallet_state));
-            }
-        }
+        // Keep the GUI wallet on this runtime as well: an independent wallet
+        // must not keep calling services on a runtime already being torn down.
+        let wallet_task_handle = if let Some(wallet_state) = zebra_crosslink::viz2::gui_wallet_state() {
+            Some(tokio::spawn(zebra_crosslink::wallet::wallet_main(wallet_state)))
+        } else if !config.crosslink.disable_the_headless_wallet {
+            let wallet_state = Arc::new(std::sync::Mutex::new(wallet::WalletState::new()));
+            Some(tokio::spawn(zebra_crosslink::wallet::wallet_main(wallet_state)))
+        } else {
+            None
+        };
         *zebra_crosslink::wallet::GUI_ENABLE_MINE.lock().unwrap() = config.mining.internal_miner;
 
         let is_regtest = config.network.network.is_regtest();
@@ -595,9 +598,9 @@ impl StartCmd {
         let tfl_service = BoxService::new(tfl_handle);
         let tfl_service = ServiceBuilder::new().buffer(1).service(tfl_service);
 
-        // new_network is the block pipeline, not an option: every block entering this node
-        // goes through it, so there is nothing to gate.
-        {
+        // Retain the sole writer's handle: shutdown must wait for its current
+        // commit to finish before releasing state or shutting down the runtime.
+        let new_network_task_handle = {
 
             let config = Arc::clone(&config);
             let sync_read_state = read_only_state_service.clone();
@@ -649,8 +652,8 @@ impl StartCmd {
                     verify_expensive: zebra_consensus::sync_verify::block_verify_expensive,
                 };
                 zebra_state::new_network::sync(&config.state, sync_read_state, tokio::runtime::Handle::current(), verify_fns, Some(bft_launch), block_writer, genesis_block_for_new_network)
-            });
-        }
+            })
+        };
 
         // Launch RPC server
         let (rpc_impl, mut rpc_tx_queue_handle) = RpcImpl::new(
@@ -945,7 +948,7 @@ impl StartCmd {
         // Lightwalletd gRPC server, served straight from the read state
         // service and mempool. This is lightwallet_server; it takes over the
         // legacy port, and the wallet connects to it unchanged.
-        {
+        let lightwalletd_thread_handle = {
             let zebra_port_base = config.network.listen_addr.port();
             let lwd_port = zebra_port_base + 10001;
             let lwd_ctx = crate::lightwalletd::Ctx {
@@ -957,15 +960,18 @@ impl StartCmd {
                 mempool_events: mempool_transaction_subscriber.clone(),
                 network: config.network.network.clone(),
             };
-            crate::lightwalletd::lightwalletd_spawn(lwd_ctx, lwd_port, zebra_port_base + 10000);
+            let thread = crate::lightwalletd::lightwalletd_spawn(lwd_ctx, lwd_port, zebra_port_base + 10000);
             *zebra_crosslink::wallet::wallet_main_lightwalletd_port.lock().unwrap() = lwd_port;
-        }
+            thread
+        };
 
         // Wait for tasks to finish
         let exit_status = loop {
             let mut exit_when_task_finishes = true;
 
             let result = select! {
+                biased;
+                _ = zebra_chain::shutdown::shutdown_requested() => break Ok(()),
                 rpc_join_result = &mut rpc_task_handle => {
                     let rpc_server_result = rpc_join_result
                         .expect("unexpected panic in the rpc task");
@@ -1076,7 +1082,19 @@ impl StartCmd {
             }
         };
 
-        info!("exiting Zebra because an ongoing task exited: asking other tasks to stop");
+        zebra_chain::shutdown::set_shutting_down();
+        info!("exiting Zebra: stopping new work and draining in-flight writes");
+
+        if let Some(wallet_task_handle) = wallet_task_handle {
+            // Abort is observed only when the task yields, never during a
+            // synchronous write. Await cancellation before closing services.
+            wallet_task_handle.abort();
+            let _ = wallet_task_handle.await;
+        }
+        tokio::task::spawn_blocking(move || lightwalletd_thread_handle.join())
+            .await.expect("lightwallet server join task panicked")
+            .expect("lightwallet server panicked during shutdown");
+        new_network_task_handle.await.expect("block writer panicked during shutdown");
 
         // ongoing tasks
         rpc_task_handle.abort();
@@ -1089,6 +1107,10 @@ impl StartCmd {
         mempool_queue_checker_task_handle.abort();
         tx_gossip_task_handle.abort();
         tfl_service_task_handle.abort();
+        if !tfl_service_task_handle.is_finished() {
+            let _ = tfl_service_task_handle.await;
+        }
+        zebra_crosslink::viz2::finish_service().await;
         progress_task_handle.abort();
         end_of_support_task_handle.abort();
         miner_task_handle.abort();

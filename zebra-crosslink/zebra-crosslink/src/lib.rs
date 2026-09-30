@@ -399,9 +399,10 @@ async fn tfl_service_main_loop(internal_handle: TFLServiceHandle) -> Result<(), 
     if gui_active() {
         let rt = tokio::runtime::Handle::current();
         let viz_tfl_handle = internal_handle.clone();
-        tokio::task::spawn_blocking(move || {
+        let task = tokio::task::spawn_blocking(move || {
             rt.block_on(viz2::service_viz_requests(viz_tfl_handle, params))
         });
+        *viz2::VIZ_SERVICE_TASK.lock().unwrap() = Some(task);
 
         *wallet::RECENCY_REQUEST.lock().unwrap() = Some(wallet::RecencyRequestClosure(Arc::new(move || {
             serde_json::to_string_pretty(&zebra_state::new_network::bft::bft_recency_status()).ok()

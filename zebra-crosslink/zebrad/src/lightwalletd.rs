@@ -234,6 +234,14 @@ struct Conn {
     dead: bool,
 }
 
+impl Drop for Conn {
+    fn drop(&mut self) {
+        // Sessions retain stream callbacks pointing into Conn; destroy them
+        // before streams and socket, including the server's shutdown path.
+        unsafe { ng::nghttp2_session_del(self.session) };
+    }
+}
+
 // -------------------------------------------------------------------------
 // Server loop
 
@@ -276,7 +284,7 @@ pub fn lightwalletd_spawn(ctx: Ctx, port: u16, ready_port: u16) -> std::thread::
 
             let mut conns: Vec<Box<Conn>> = Vec::new();
 
-            loop {
+            while !zebra_chain::shutdown::is_shutting_down() {
                 let mut progress = false;
 
                 // readiness probe endpoint: 200 any complete HTTP request
@@ -1781,12 +1789,7 @@ pub fn lightwalletd_spawn(ctx: Ctx, port: u16, ready_port: u16) -> std::thread::
                         }
                     };
                 }
-                conns.retain(|c| {
-                    if c.dead {
-                        unsafe { ng::nghttp2_session_del(c.session) };
-                    }
-                    !c.dead
-                });
+                conns.retain(|c| !c.dead);
 
                 if !progress {
                     std::thread::sleep(std::time::Duration::from_millis(2));

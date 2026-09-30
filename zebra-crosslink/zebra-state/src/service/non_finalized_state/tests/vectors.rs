@@ -1,6 +1,6 @@
 //! Fixed test vectors for the non-finalized state.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use zebra_chain::{
     amount::{Amount, DeferredPoolBalanceChange, NonNegative},
@@ -23,7 +23,7 @@ use crate::{
     request::ContextuallyVerifiedBlock,
     service::{
         finalized_state::{calculate_deferred_pool_balance_change, FinalizedState},
-        non_finalized_state::{Chain, NonFinalizedState, MIN_DURATION_BETWEEN_BACKUP_UPDATES},
+        non_finalized_state::{Chain, NonFinalizedState},
     },
     tests::FakeChainHelper,
     Config, SemanticallyVerifiedBlock,
@@ -656,7 +656,7 @@ async fn non_finalized_state_writes_blocks_to_and_restores_blocks_from_backup_ca
         .expect("temporary directory is created successfully")
         .keep();
 
-    let (mut non_finalized_state, non_finalized_state_sender, _receiver) =
+    let (mut non_finalized_state, non_finalized_state_sender, _receiver, backup_task) =
         NonFinalizedState::new(&network, Default::default())
             .with_backup(
                 Some(backup_dir_path.clone()),
@@ -687,10 +687,10 @@ async fn non_finalized_state_writes_blocks_to_and_restores_blocks_from_backup_ca
         .send(non_finalized_state.clone())
         .expect("backup task should have a receiver, channel should be open");
 
-    // Wait for the minimum update time
-    tokio::time::sleep(Duration::from_secs(1) + MIN_DURATION_BETWEEN_BACKUP_UPDATES).await;
+    // Final shutdown flush bypasses the periodic backup delay.
+    backup_task.expect("backup task was enabled").finish().await;
 
-    let (non_finalized_state, _sender, _receiver) = NonFinalizedState::new(&network, Default::default())
+    let (non_finalized_state, _sender, _receiver, _backup_task) = NonFinalizedState::new(&network, Default::default())
         .with_backup(Some(backup_dir_path), &finalized_state.db, true, false)
         .await;
 

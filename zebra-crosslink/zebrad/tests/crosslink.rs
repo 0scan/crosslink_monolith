@@ -25,7 +25,6 @@ use zebra_crosslink::test_format::*;
 use zebra_state::crosslink::*;
 use zebrad::application::CROSSLINK_TEST_CONFIG_OVERRIDE;
 use zebrad::config::ZebradConfig;
-use zebrad::prelude::Application;
 
 macro_rules! function_name {
     () => {{
@@ -111,7 +110,7 @@ pub fn test_start() {
     // Any non-empty ZEBRA_TEST_GUI opens the window, and then a failed test stays on screen
     // instead of aborting.
     let headless = std::env::var_os("ZEBRA_TEST_GUI").map_or(true, |v| v.is_empty());
-    zebra_crosslink::viz2::run_node(headless, move || ZebradApp::run(&APPLICATION, args));
+    zebra_crosslink::viz2::run_node(headless, move || ZebradApp::run_command(&APPLICATION, args));
 }
 
 /// The harness parameters with the prototype's from-chain bootstrap instead of `Supplied`, for

@@ -78,13 +78,14 @@ pub(super) fn restore_backup(
 /// `backup_blocks` should be the current contents of the backup directory, obtained by
 /// calling [`list_backup_dir_entries`] before the non-finalized state was updated.
 ///
-/// This function performs blocking I/O and should be called from a blocking context,
-/// or wrapped in [`tokio::task::spawn_blocking`].
+/// Returns whether all file operations succeeded. This function performs blocking I/O
+/// and must run in a blocking context or in [`tokio::task::spawn_blocking`].
 pub(super) fn update_non_finalized_state_backup(
     backup_dir_path: &Path,
     non_finalized_state: &NonFinalizedState,
     mut backup_blocks: HashMap<block::Hash, PathBuf>,
-) {
+) -> bool {
+    let mut saved = true;
     for block in non_finalized_state
         .chain_iter()
         .flat_map(|chain| chain.blocks.values())
@@ -93,25 +94,52 @@ pub(super) fn update_non_finalized_state_backup(
     {
         // This loop will typically iterate only once, but may write multiple blocks if it misses
         // some non-finalized state changes while waiting for I/O ops.
-        write_backup_block(backup_dir_path, block);
+        if let Err(err) = write_backup_block(backup_dir_path, block) {
+            saved = false;
+            tracing::warn!(?err, "failed to write non-finalized state backup block");
+        }
     }
 
-    // Remove any backup blocks that are not present in the non-finalized state
+    // Remove any backup blocks that are not present in the non-finalized state.
     for (_, outdated_backup_block_path) in backup_blocks {
         if let Err(delete_error) = std::fs::remove_file(outdated_backup_block_path) {
+            saved = false;
             tracing::warn!(?delete_error, "failed to delete backup block file");
         }
     }
+    saved
 }
 
 /// Updates the non-finalized state backup cache whenever the non-finalized state changes,
 /// deleting any outdated backup files and writing any blocks that are in the non-finalized
 /// state but missing in the backup cache.
-pub(super) async fn run_backup_task(
+/// An owned backup worker. Finish after the block writer stops, before dropping Tokio.
+#[derive(Debug)]
+pub struct BackupTask {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl BackupTask {
+    pub(super) fn spawn(receiver: WatchReceiver<NonFinalizedState>, path: PathBuf) -> Self {
+        let (shutdown, stop) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_backup_task(receiver, path, stop));
+        Self { shutdown, task }
+    }
+
+    /// Write the latest snapshot, without waiting for the normal rate limit.
+    pub(crate) async fn finish(self) {
+        let _ = self.shutdown.send(());
+        self.task.await.expect("non-finalized backup worker panicked during shutdown");
+    }
+}
+
+async fn run_backup_task(
     mut non_finalized_state_receiver: WatchReceiver<NonFinalizedState>,
     backup_dir_path: PathBuf,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let err = loop {
+    loop {
         let rate_limit = tokio::time::sleep(MIN_DURATION_BETWEEN_BACKUP_UPDATES);
         let backup_blocks: HashMap<block::Hash, PathBuf> = {
             let backup_dir_path = backup_dir_path.clone();
@@ -121,28 +149,37 @@ pub(super) async fn run_backup_task(
                 .collect()
         };
 
-        if let (Err(err), _) = tokio::join!(non_finalized_state_receiver.changed(), rate_limit) {
-            break err;
+        let final_snapshot = tokio::select! {
+            biased;
+            _ = &mut shutdown => true,
+            changed = async {
+                let result = non_finalized_state_receiver.changed().await;
+                rate_limit.await;
+                result
+            } => changed.is_err(),
         };
 
         let latest_non_finalized_state = non_finalized_state_receiver.cloned_watch_data();
 
         let backup_dir_path = backup_dir_path.clone();
-        tokio::task::spawn_blocking(move || {
+        let saved = tokio::task::spawn_blocking(move || {
             update_non_finalized_state_backup(
                 &backup_dir_path,
                 &latest_non_finalized_state,
                 backup_blocks,
-            );
+            )
         })
         .await
         .expect("failed to join blocking task when writing in backup task");
-    };
-
-    tracing::warn!(
-        ?err,
-        "got recv error waiting on non-finalized state change, is Zebra shutting down?"
-    )
+        if final_snapshot {
+            if saved {
+                tracing::info!("non-finalized backup saved latest committed state for shutdown");
+            } else {
+                tracing::error!("non-finalized backup could not save latest committed state for shutdown");
+            }
+            break;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,17 +257,30 @@ impl NonFinalizedBlockBackup {
 }
 
 /// Writes a block to a file in the provided non-finalized state backup cache directory path.
-fn write_backup_block(backup_dir_path: &Path, block: &ContextuallyVerifiedBlock) {
-    let backup_block_file_name: String = block.hash.encode_hex();
-    let backup_block_file_path = backup_dir_path.join(backup_block_file_name);
-    let non_finalized_block_backup: NonFinalizedBlockBackup = block.into();
+fn write_backup_block(backup_dir_path: &Path, block: &ContextuallyVerifiedBlock) -> io::Result<()> {
+    let name: String = block.hash.encode_hex();
+    let backup: NonFinalizedBlockBackup = block.into();
+    write_backup_bytes(backup_dir_path, &name, &backup.as_bytes())
+}
 
-    if let Err(err) = std::fs::write(
-        backup_block_file_path,
-        non_finalized_block_backup.as_bytes(),
-    ) {
-        tracing::warn!(?err, "failed to write non-finalized state backup block");
+fn write_backup_bytes(backup_dir_path: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let path = backup_dir_path.join(name);
+    let temporary = backup_dir_path.join(format!(".{name}.tmp"));
+    let result = (|| {
+        // Publish only a complete, flushed block. A failed write must not leave
+        // a hash-named partial file that future snapshots mistake for a backup.
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
     }
+    result
 }
 
 /// Reads blocks from the provided non-finalized state backup directory path.
@@ -363,4 +413,28 @@ fn process_backup_dir_entry(entry: DirEntry) -> Option<(block::Hash, PathBuf)> {
     };
 
     Some((block_hash, entry.path()))
+}
+
+#[cfg(test)]
+mod atomic_backup_tests {
+    use super::write_backup_bytes;
+
+    #[test]
+    fn backup_publishes_complete_bytes_and_removes_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        write_backup_bytes(directory.path(), "block", b"complete block").unwrap();
+        assert_eq!(std::fs::read(directory.path().join("block")).unwrap(), b"complete block");
+        assert!(!directory.path().join(".block.tmp").exists());
+    }
+
+    #[test]
+    fn failed_publication_keeps_old_entry_and_removes_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("block");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("sentinel"), b"existing").unwrap();
+        assert!(write_backup_bytes(directory.path(), "block", b"new block").is_err());
+        assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"existing");
+        assert!(!directory.path().join(".block.tmp").exists());
+    }
 }

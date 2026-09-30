@@ -30,8 +30,8 @@ use crate::{
 mod backup;
 mod chain;
 
-#[cfg(test)]
-pub(crate) use backup::MIN_DURATION_BETWEEN_BACKUP_UPDATES;
+pub use backup::BackupTask;
+
 
 #[cfg(test)]
 mod tests;
@@ -181,6 +181,7 @@ impl NonFinalizedState {
         Self,
         watch::Sender<NonFinalizedState>,
         WatchReceiver<NonFinalizedState>,
+        Option<BackupTask>,
     ) {
         let with_watch_channel = |non_finalized_state: NonFinalizedState| {
             let (sender, receiver) = watch::channel(non_finalized_state.clone());
@@ -188,7 +189,8 @@ impl NonFinalizedState {
         };
 
         let Some(backup_dir_path) = backup_dir_path else {
-            return with_watch_channel(self);
+            let (state, sender, receiver) = with_watch_channel(self);
+            return (state, sender, receiver, None);
         };
 
         if !should_restore_backup {
@@ -230,9 +232,8 @@ impl NonFinalizedState {
 
         let (non_finalized_state, sender, receiver) = with_watch_channel(non_finalized_state);
 
-        if !skip_backup_task {
-            tokio::spawn(backup::run_backup_task(receiver.clone(), backup_dir_path));
-        }
+        let backup_task = (!skip_backup_task)
+            .then(|| BackupTask::spawn(receiver.clone(), backup_dir_path));
 
         if !non_finalized_state.is_chain_set_empty() {
             let num_blocks_restored = non_finalized_state
@@ -248,7 +249,7 @@ impl NonFinalizedState {
             tracing::info!("no blocks were restored from the non-finalized backup cache");
         }
 
-        (non_finalized_state, sender, receiver)
+        (non_finalized_state, sender, receiver, backup_task)
     }
 
     /// Is the internal state of `self` the same as `other`?

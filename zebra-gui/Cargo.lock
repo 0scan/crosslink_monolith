@@ -563,8 +563,6 @@ dependencies = [
 [[package]]
 name = "cosmo-compat"
 version = "5.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "608a1b303eedbb1bbe69083704656192561c78ca2c4916a7325023fa17a7e2af"
 
 [[package]]
 name = "cpufeatures"

@@ -121,6 +121,7 @@ pub struct WriteBlockWorkerTask {
     pub(crate) non_finalized_state: NonFinalizedState,
     chain_tip_sender: ChainTipSender,
     non_finalized_state_sender: watch::Sender<NonFinalizedState>,
+    backup_task: Option<super::non_finalized_state::BackupTask>,
 
     // Carried across messages. These were locals inside `run()`; they became fields so the
     // per-message work could be extracted into methods without changing what it does.
@@ -155,16 +156,26 @@ impl WriteBlockWorkerTask {
         non_finalized_state: NonFinalizedState,
         chain_tip_sender: ChainTipSender,
         non_finalized_state_sender: watch::Sender<NonFinalizedState>,
+        backup_task: Option<super::non_finalized_state::BackupTask>,
     ) -> WriteBlockWorkerTask {
         WriteBlockWorkerTask {
             finalized_state,
             non_finalized_state,
             chain_tip_sender,
             non_finalized_state_sender,
+            backup_task,
             prev_finalized_note_commitment_trees: None,
             parent_error_map: IndexMap::new(),
             last_best_tip: None,
             conflict_abandoned: None,
+        }
+    }
+
+    /// Finish the last non-finalized backup after all commits have completed.
+    /// The runtime must stay alive until this returns; no backup is detached.
+    pub(crate) async fn finish_backup(&mut self) {
+        if let Some(task) = self.backup_task.take() {
+            task.finish().await;
         }
     }
 

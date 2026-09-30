@@ -41,6 +41,12 @@ mod cosmo_missing {
 
 /// Process entry point for `zebrad`
 fn main() {
+    #[cfg(cosmo)]
+    if let Err(error) = zebrad::components::tokio::install_portable_signal_handlers() {
+        eprintln!("failed to install shutdown signal handlers: {error}");
+        std::process::exit(1);
+    }
+
     // Enable backtraces by default for zebrad, but allow users to override it.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         std::env::set_var("RUST_BACKTRACE", "1");
