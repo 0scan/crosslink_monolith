@@ -18,6 +18,27 @@ use zebrad::application::{boot, APPLICATION};
 #[cfg(cosmo)]
 extern crate cosmo_compat as _;
 
+/// libc symbols the cosmo link asks for and cosmopolitan does not provide.
+#[cfg(cosmo)]
+#[allow(unsafe_code)]
+mod cosmo_missing {
+    /// tokio's signal registry sizes its table with libc::SIGRTMAX(), which on
+    /// target_os = "linux" is a call to glibc's `__libc_current_sigrtmax`.
+    /// Linux's value; the table only has to cover the signals tokio is asked for.
+    #[unsafe(no_mangle)]
+    extern "C" fn __libc_current_sigrtmax() -> std::ffi::c_int {
+        64
+    }
+
+    /// rocksdb's trace replayer calls `std::llround`; cosmopolitan's libm has
+    /// `lround` and `round` but not the `long long` one. Both round half away
+    /// from zero, as `f64::round` does; out of range is unspecified in C.
+    #[unsafe(no_mangle)]
+    extern "C" fn llround(x: f64) -> std::ffi::c_longlong {
+        x.round() as std::ffi::c_longlong
+    }
+}
+
 /// Process entry point for `zebrad`
 fn main() {
     // Enable backtraces by default for zebrad, but allow users to override it.

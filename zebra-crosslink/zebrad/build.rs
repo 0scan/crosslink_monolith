@@ -147,6 +147,36 @@ fn apeify() {
         }
     }
 
+    // librocksdb-sys names its C++ runtime by triple: `stdc++` for anything
+    // containing "linux", otherwise `c++`, set with cpp_link_stdlib, which beats
+    // CXXSTDLIB. `*-unknown-cosmo` lands on `c++`, and cosmocc has no libc++.a:
+    // its driver links libcxx.a on its own, and its libstdc++.a is an empty
+    // archive so that `-lstdc++` (libzcash_script's) resolves to nothing. An
+    // empty libc++.a on the search path does the same for `-lc++`.
+    //
+    // mio picks epoll and eventfd for target_os = "linux", which the cosmo
+    // targets claim, but cosmopolitan has neither (it has poll and pipes on
+    // every host). mio's own escape hatches select its poll(2) selector and pipe
+    // waker instead; cosmo-compat has no epoll shim to fall back on.
+    let cxx_stub = PathBuf::from(env::var("OUT_DIR").unwrap()).join("cosmo-cxx-stub");
+    fs::create_dir_all(&cxx_stub).unwrap();
+    fs::write(cxx_stub.join("libc++.a"), b"!<arch>\n").unwrap();
+    let rustflags = env::var("COSMO_RUSTFLAGS").unwrap_or_default();
+    // Safety: build scripts are single-threaded here; nothing else in this
+    // process reads the environment concurrently.
+    #[allow(unsafe_code)]
+    unsafe {
+        env::set_var(
+            "COSMO_RUSTFLAGS",
+            format!(
+                "{rustflags} -L native={} --cfg mio_unsupported_force_poll_poll \
+                 --cfg mio_unsupported_force_waker_pipe",
+                cxx_stub.display()
+            )
+            .trim(),
+        )
+    };
+
     // The nested build gets a fresh feature set, so anything the outer build
     // turned on that changes the binary would have to be named again. Nothing
     // does now: the GUI is in every build, and whether it shows is decided at

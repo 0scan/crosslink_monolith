@@ -310,9 +310,8 @@ derive-new.workspace = true
 # tikv-jemallocator = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] } # memory profiling
 
 # Translates the libc entry points std calls, whose constants rustc bakes in for
-# Linux but cosmopolitan resolves at load time. The APE link additionally needs
-# epoll/eventfd shims for tokio's reactor, which cosmo-compat 5.0.1 does not
-# carry yet.
+# Linux but cosmopolitan resolves at load time. tokio's reactor runs on mio's
+# poll(2) selector there (build.rs), since cosmopolitan has no epoll/eventfd.
 [target.'cfg(cosmo)'.dependencies]
 cosmo-compat = "5"
 
