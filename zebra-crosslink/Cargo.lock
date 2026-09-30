@@ -1216,8 +1216,6 @@ checksum = "4df6f98652d30167eaeea34d77b730e07c8caba6df17bd4551842b9b8da01deb"
 [[package]]
 name = "cosmo-build"
 version = "5.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb5e8db85adc50a8fc816e223d1b0c777bad8e1ab420bb2d11ad2276bc28d67"
 dependencies = [
  "ureq",
  "zip",
