@@ -262,8 +262,8 @@ impl StartCmd {
 
         let config = APPLICATION.config();
 
-        #[cfg(not(feature = "viz_gui"))]
-        {
+        // With the window up, `viz2::run_node` already gave the wallet a thread of its own.
+        if !zebra_crosslink::gui_active() {
             if config.crosslink.disable_the_headless_wallet == false {
                 let wallet_state = Arc::new(std::sync::Mutex::new(wallet::WalletState::new()));
                 tokio::spawn(zebra_crosslink::wallet::wallet_main(wallet_state));
@@ -890,14 +890,12 @@ impl StartCmd {
 
         */
 
-        #[cfg(all(feature = "internal-miner", feature = "viz_gui"))]
-        let miner_task_handle = {
-            info!("spawning Zcash miner");
-            components::miner::spawn_init(&config.network.network, &config.mining, rpc_impl)
-        };
-
-        #[cfg(all(feature = "internal-miner", not(feature = "viz_gui")))]
-        let miner_task_handle = if config.mining.is_internal_miner_enabled() {
+        // With the window up the miner always runs, and the GUI's mining toggle
+        // (`GUI_ENABLE_MINE`) decides whether it does anything.
+        #[cfg(feature = "internal-miner")]
+        let miner_task_handle = if zebra_crosslink::gui_active()
+            || config.mining.is_internal_miner_enabled()
+        {
             info!("spawning Zcash miner");
             components::miner::spawn_init(&config.network.network, &config.mining, rpc_impl)
         } else {

@@ -1146,7 +1146,23 @@ pub static DEV_WIN32_WINDOW_RIGHT: AtomicBool = AtomicBool::new(false);
 /// Overrides the window title when set before the window is created (e.g. "TEST: <name>").
 pub static WINDOW_TITLE: Mutex<String> = Mutex::new(String::new());
 
-pub fn main_thread_run_program(wallet_state: Arc<Mutex<wallet::WalletState>>, fake_data: bool) {
+/// The visualizer's window, open but not yet drawn into.
+pub type Window = softer_gui::Gui;
+
+/// Open the visualizer's window, or None when this machine has no display to put one on (no
+/// Wayland or X server, a Windows service session, a macOS host without AppKit). Call it on the
+/// main thread: macOS needs AppKit there, and that is where `main_thread_run_program` runs.
+/// Nothing else about the program has started yet when this is asked, so a None can still
+/// become an ordinary headless run.
+pub fn open_window() -> Option<Window> {
+    let title = {
+        let t = WINDOW_TITLE.lock().unwrap();
+        if t.is_empty() { "Zcash Crosslink Visualizer".to_string() } else { t.clone() }
+    };
+    softer_gui::open(&title, "org.zfnd.crosslink_visualizer", 1600, 900)
+}
+
+pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::WalletState>>, fake_data: bool) {
 
     let mut viz_state = viz_gui_init(fake_data);
 
@@ -1283,18 +1299,9 @@ pub fn main_thread_run_program(wallet_state: Arc<Mutex<wallet::WalletState>>, fa
     // Resize is a size change on the RENDER event, not an event of its own.
     let mut last_window_size: (usize, usize) = (0, 0);
 
-    #[allow(deprecated)]
     // softer_gui delivers one totally ordered stream of input and frame
     // boundaries. A submitted frame's completion is the RENDER for the next, so
     // there is no deadline to chase, nothing to sleep on, and no separate vsync.
-    let title = {
-        let t = WINDOW_TITLE.lock().unwrap();
-        if t.is_empty() { "Zcash Crosslink Visualizer".to_string() } else { t.clone() }
-    };
-    let mut gui = match softer_gui::open(&title, "org.zfnd.crosslink_visualizer", 1600, 900) {
-        Some(gui) => gui,
-        None => { eprintln!("could not open a window"); return; }
-    };
     if let Some((side, argb)) = window_icon_argb() {
         if let Some(image) = softer_gui::icon::IconImage::new(side, &argb) {
             gui.set_icon(&[image]);

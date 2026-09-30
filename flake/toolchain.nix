@@ -5,7 +5,7 @@
 # `cargo metadata` install step, both look for `Cargo.toml`/`Cargo.lock`
 # right at `${src}`, with no way to point them at a nested manifest). So
 # `crateSrc` here is rooted at `zebra-crosslink/` itself. But the GUI
-# binary (`zebrad` built with the `viz_gui` feature) has path-dependencies
+# binary (`zebrad`, which always carries the GUI) has path-dependencies
 # on sibling directories (`zebra-gui`, `clay-rs`, `librustzcash`,
 # `tenderlink`, `patches`) that live *outside* that workspace. `postUnpack`
 # copies those into place next to the unpacked source before cargo ever
@@ -81,9 +81,9 @@
         sed -i -E 's#^\[source\."(https?://)#[source."git+\1#' "$out/config.toml"
       '';
 
-      # Native libraries needed to *build* zebrad(viz_gui): rocksdb/protobuf
-      # for the node, and the X11/GL stack the `winit`/`softbuffer`-based
-      # GUI links against.
+      # Native libraries needed to *build* zebrad: rocksdb/protobuf for the
+      # node. (The GUI links against nothing: softer_gui speaks X11/Wayland
+      # over their sockets and dlopens ALSA.)
       crateCommonArgs = {
         src = crateSrc;
         strictDeps = true;

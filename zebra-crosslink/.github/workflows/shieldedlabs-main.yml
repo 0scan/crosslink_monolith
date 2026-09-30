@@ -26,9 +26,6 @@ jobs:
           - cargo_flags: ""
             artifact_title: "zebra-crosslink (Ubuntu)"
             artifact_filename: "zebra-crosslink-ubuntu"
-          - cargo_flags: "--features viz_gui"
-            artifact_title: "zebra-crosslink-viz (Ubuntu)"
-            artifact_filename: "zebra-crosslink-viz-ubuntu"
     runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
@@ -69,9 +66,6 @@ jobs:
           - cargo_flags: ""
             artifact_title: "zebra-crosslink (Arch)"
             artifact_filename: "zebra-crosslink-arch"
-          - cargo_flags: "--features viz_gui"
-            artifact_title: "zebra-crosslink-viz (Arch)"
-            artifact_filename: "zebra-crosslink-viz-arch"
     runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
@@ -137,9 +131,6 @@ jobs:
           - cargo_flags: ""
             artifact_title: "zebra-crosslink (MacOS)"
             artifact_filename: "zebra-crosslink-macos"
-          - cargo_flags: "--features viz_gui"
-            artifact_title: "zebra-crosslink-viz (MacOS)"
-            artifact_filename: "zebra-crosslink-viz-macos"
     runs-on: macos-15-xlarge
     steps:
       - uses: actions/checkout@v4
@@ -208,16 +199,10 @@ jobs:
             Assets:
             - zebra-crosslink-ubuntu
             - zebra-crosslink-ubuntu.sha256
-            - zebra-crosslink-viz-ubuntu
-            - zebra-crosslink-viz-ubuntu.sha256
             - zebra-crosslink-arch
             - zebra-crosslink-arch.sha256
-            - zebra-crosslink-viz-arch
-            - zebra-crosslink-viz-arch.sha256
             - zebra-crosslink-macos
             - zebra-crosslink-macos.sha256
-            - zebra-crosslink-viz-macos
-            - zebra-crosslink-viz-macos.sha256
           files: ${{ steps.list_assets.outputs.files }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -50,6 +50,16 @@ pub struct EntryPoint {
                 then exit"
     )]
     fixup_db_stake: bool,
+
+    /// Run without the visualizer window. `start` opens one whenever there is a display for it
+    /// and falls back to headless when there is not; this skips the attempt. Accepted before or
+    /// after the subcommand.
+    #[clap(
+        long,
+        global = true,
+        help = "don't open the visualizer window, even when there is a display"
+    )]
+    pub headless: bool,
 }
 
 impl EntryPoint {

@@ -64,14 +64,13 @@ static_assertions = { workspace = true }
 hex = { version = "0.4.3", features = ["serde"] }
 
 tenderlink = { workspace = true }
-zebra-gui = { workspace = true, optional = true }
+zebra-gui = { workspace = true, features = ["audio"] }
 
 [dev-dependencies]
 zebra-test = { path = "../zebra-test", version = "4.0.0" }
 
 [features]
 default = []
-viz_gui = ["zebra-gui", "zebra-gui/audio"]
 
 [build-dependencies]
 prost-build = "0.13"

@@ -580,44 +580,27 @@ impl Application for ZebradApp {
 pub fn boot(app_cell: &'static AppCell<ZebradApp>) -> ! {
     let args = EntryPoint::process_cli_args(env::args_os().collect()).unwrap_or_else(|err| err.exit());
 
-    #[cfg(feature = "viz_gui")]
-    {
-        use clap::Parser;
+    use clap::Parser;
 
-        // The visualization owns the main thread, so it only opens for the
-        // `start` command; utility commands (generate, tip-height,
-        // fixup-db-stake, copy-state) run headless. `process_cli_args` already
-        // exited on unparseable args, and always appends the subcommand.
-        let is_start = EntryPoint::try_parse_from(&args)
-            .map(|entry_point| matches!(entry_point.cmd, Some(crate::commands::ZebradCmd::Start(_))))
-            .unwrap_or(false);
+    // The visualization owns the main thread, so it only opens for the `start`
+    // command; utility commands (generate, tip-height, fixup-db-stake,
+    // copy-state) run headless. `process_cli_args` already exited on
+    // unparseable args, and always appends the subcommand.
+    let (is_start, headless) = EntryPoint::try_parse_from(&args)
+        .map(|entry_point| {
+            (
+                matches!(entry_point.cmd, Some(crate::commands::ZebradCmd::Start(_))),
+                entry_point.headless,
+            )
+        })
+        .unwrap_or((false, true));
 
-        if is_start {
-            let wallet_state = Arc::new(std::sync::Mutex::new(wallet::WalletState::new()));
-            let wallet_state2 = wallet_state.clone();
-
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_time()
-                    .enable_io()
-                    .build()
-                    .unwrap();
-
-                rt.block_on(zebra_crosslink::wallet::wallet_main(wallet_state2));
-            });
-
-            let tokio_root_thread_handle = std::thread::spawn(move || {
-                ZebradApp::run(app_cell, args);
-            });
-
-            zebra_crosslink::viz2::viz_main(Some(tokio_root_thread_handle), wallet_state);
-        } else {
-            ZebradApp::run(app_cell, args);
-        }
+    if is_start {
+        // Opens the window if there is a display for it, and otherwise runs the node right here.
+        zebra_crosslink::viz2::run_node(headless, move || ZebradApp::run(app_cell, args));
+    } else {
+        ZebradApp::run(app_cell, args);
     }
-    #[cfg(not(feature = "viz_gui"))]
-    ZebradApp::run(app_cell, args);
 
     process::exit(0);
 }

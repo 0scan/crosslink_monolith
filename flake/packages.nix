@@ -1,7 +1,7 @@
 # `nix build` outputs.
 #
 # The default package is a unix-like tree: `./result/bin/` holds the GUI
-# binary (`zebrad`, built with the `viz_gui` feature), and `./result/doc/`
+# binary (`zebrad`, which opens the visualizer unless run `--headless`), and `./result/doc/`
 # holds the rendered book.
 { ... }:
 {
@@ -15,14 +15,14 @@
     let
       zebrad-meta = craneLib.crateNameFromCargoToml { cargoToml = ../zebra-crosslink/zebrad/Cargo.toml; };
 
-      # The GUI binary: `zebrad` built with the `viz_gui` feature enables the
-      # embedded visualizer (see `zebra-crosslink/giorun.sh`: `cargo run -F viz_gui`).
+      # The GUI binary: every `zebrad` embeds the visualizer and opens it when
+      # there is a display; `--headless` runs it as a plain node.
       zebrad = craneLib.buildPackage (
         crateCommonArgs
         // {
           pname = zebrad-meta.pname;
           version = zebrad-meta.version;
-          cargoExtraArgs = "-p zebrad --features viz_gui";
+          cargoExtraArgs = "-p zebrad";
 
           # `buildPackage` otherwise auto-runs `buildDepsOnly` (see
           # `../flake/toolchain.nix` for why that's incompatible here).

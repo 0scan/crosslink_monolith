@@ -92,6 +92,9 @@ fn main() {
         ];
     }
 
-    zebra_gui::main_thread_run_program(wallet_state, true);
-    // zebra_gui::main_thread_run_program(wallet_state, false);
+    let Some(window) = zebra_gui::open_window() else {
+        eprintln!("could not open a window");
+        std::process::exit(1);
+    };
+    zebra_gui::main_thread_run_program(window, wallet_state, true);
 }

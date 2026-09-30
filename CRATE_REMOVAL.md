@@ -61,9 +61,9 @@ FINALITY.md sections before changing code, and the node tests and the dilated tw
 Deletes: `TFLServiceInternal`, `TFLServiceHandle`, `TFLServiceCalls`, `spawn_new_tfl_service`,
 `tfl_service_main_loop`, the tower service over `TFLServiceRequest` and the request and response
 types themselves, the `zebra-crosslink/zebra-crosslink` crate with its workspace membership and
-its optional `zebra-gui` dependency, and every `use zebra_crosslink::` in the tree. `zebrad`'s
-`viz_gui` feature survives while the window still runs in the node's process, pointing at the
-crate that hosts the feed rather than at the removed one.
+its `zebra-gui` dependency, and every `use zebra_crosslink::` in the tree. `viz2::run_node`
+(open the window if there is a display, else run headless) moves with the feed, to the crate
+that hosts it rather than the removed one.
 
 Done when the workspace builds with no `zebra-crosslink` crate, the crosslink node tests pass
 from their new home, and the dilated regtest passes.

@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug zebrad (viz_gui)",
+      "name": "Debug zebrad",
       "type": "lldb",
       "request": "launch",
 
@@ -11,8 +11,6 @@
           "run",
           "--manifest-path",
           "${workspaceFolder}/zebra-crosslink/Cargo.toml",
-          "--features",
-          "viz_gui",
           "--bin",
           "zebrad"
         ]
@@ -31,7 +29,7 @@
       "sourceLanguages": ["rust"]
     },
     {
-      "name": "Debug zebrad (viz_gui) without args",
+      "name": "Debug zebrad without args",
       "type": "lldb",
       "request": "launch",
 
@@ -40,8 +38,6 @@
           "run",
           "--manifest-path",
           "${workspaceFolder}/zebra-crosslink/Cargo.toml",
-          "--features",
-          "viz_gui",
           "--bin",
           "zebrad"
         ]
@@ -55,7 +51,7 @@
       "sourceLanguages": ["rust"]
     },
     {
-      "name": "Debug viz_gui with fake data",
+      "name": "Debug zebra-gui with fake data",
       "type": "lldb",
       "request": "launch",
 

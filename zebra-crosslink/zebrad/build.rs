@@ -148,23 +148,21 @@ fn apeify() {
     }
 
     // The nested build gets a fresh feature set, so anything the outer build
-    // turned on has to be named again. Only the ones that change the binary.
+    // turned on that changes the binary would have to be named again. Nothing
+    // does now: the GUI is in every build, and whether it shows is decided at
+    // run time (`viz2::run_node`), so one APE serves desktops and servers alike.
     //
     // `panic=unwind` is not a preference: cosmo-build compiles std with
     // -Zbuild-std and only the panic_unwind runtime, so this workspace's
     // `panic = "abort"` leaves rustc looking for a `panic_abort` crate that was
     // never built. Cosmopolitan ships the whole `_Unwind_*` ABI, so unwinding is
     // the supported choice there rather than a fallback.
-    let mut args: Vec<&str> = vec![
+    let args: Vec<&str> = vec![
         "--bin",
         "zebrad",
         "--config",
         "profile.release.panic=\"unwind\"",
     ];
-    if env::var_os("CARGO_FEATURE_VIZ_GUI").is_some() {
-        args.push("--features");
-        args.push("viz_gui");
-    }
     cosmo_build::apeify_with(&args);
 }
 

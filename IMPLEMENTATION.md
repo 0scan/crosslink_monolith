@@ -43,14 +43,12 @@ the same test files, and stages 3 and 4 depend on stage 1.
 - No stage pushes anything. An agent that believes a stage needs a push has misread it.
 - Tests run through `phest.bat zebra-crosslink`, with a test-name filter as the fourth
   argument: `phest.bat zebra-crosslink Debug Win64 <filter>`. Never call `cargo` directly.
-  `phargo.bat` enables `viz_gui` for `zebra-crosslink`, which puts winit on the main thread.
-  The node tests in `zebrad/tests/crosslink.rs` run headless, on the crate's
-  `cfg(not(feature = "viz_gui"))` path (FINALITY.md §8.1), so they run with
-  `PH_NO_VIZ_GUI=1` set, which leaves the feature out of an otherwise identical build.
+  The node tests in `zebrad/tests/crosslink.rs` run headless (FINALITY.md §8.1); a non-empty
+  `ZEBRA_TEST_GUI` opens the visualizer window for them instead.
   Each node test boots a zebrad in the test process and ends it with `process::exit`, so a
   test run is one process per test, and the harness's capture is turned off so the
   runner's per-instruction dump survives an abort:
-  `$env:PH_NO_VIZ_GUI=1; $env:RUST_TEST_THREADS=1; $env:RUST_TEST_NOCAPTURE=1; .\phest.bat zebra-crosslink Debug Win64 -p zebrad --test crosslink <test name>`.
+  `$env:RUST_TEST_THREADS=1; $env:RUST_TEST_NOCAPTURE=1; .\phest.bat zebra-crosslink Debug Win64 -p zebrad --test crosslink <test name>`.
   Both settings are environment variables because `phargo.bat` forwards `%4` through
   `%9` and splits `--test-threads=1` at the `=`, so a trailing `-- --nocapture
   --test-threads=1` never reaches the harness.

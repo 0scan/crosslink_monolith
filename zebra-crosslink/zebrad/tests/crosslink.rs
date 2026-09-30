@@ -106,33 +106,12 @@ pub fn test_start() {
     ];
     // println!("args: {:?}", args);
 
-    #[cfg(feature = "viz_gui")]
-    {
-        // Mirrors the GUI path in `zebrad::application::boot`: the visualization owns the
-        // main thread, so zebrad and the wallet each get one of their own.
-        let wallet_state = Arc::new(std::sync::Mutex::new(zebra_crosslink::wallet::WalletState::new()));
-        let wallet_state2 = wallet_state.clone();
-
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_time()
-                .enable_io()
-                .build()
-                .unwrap();
-
-            rt.block_on(zebra_crosslink::wallet::wallet_main(wallet_state2));
-        });
-
-        let tokio_root_thread_handle = std::thread::spawn(move || {
-            ZebradApp::run(&APPLICATION, args);
-        });
-
-        zebra_crosslink::viz2::viz_main(Some(tokio_root_thread_handle), wallet_state);
-    }
-
-    #[cfg(not(feature = "viz_gui"))]
-    ZebradApp::run(&APPLICATION, args);
+    // Mirrors `zebrad::application::boot`, except that tests are headless unless asked: they
+    // run unattended, several at once, and a test thread is not the main thread macOS wants.
+    // Any non-empty ZEBRA_TEST_GUI opens the window, and then a failed test stays on screen
+    // instead of aborting.
+    let headless = std::env::var_os("ZEBRA_TEST_GUI").map_or(true, |v| v.is_empty());
+    zebra_crosslink::viz2::run_node(headless, move || ZebradApp::run(&APPLICATION, args));
 }
 
 /// The harness parameters with the prototype's from-chain bootstrap instead of `Supplied`, for

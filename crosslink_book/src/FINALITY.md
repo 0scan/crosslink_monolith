@@ -1399,10 +1399,10 @@ stored, or consumed.
   `crosslink_reject_pos_block_that_regresses_the_snapshot`,
   `crosslink_reject_pos_block_with_lt_sigma_headers` and
   `crosslink_reject_pos_block_with_unlinked_headers`.
-- **Crosslink node tests and `viz_gui`.** Tests run through `phest.bat zebra-crosslink`, and
-  `phargo.bat` enables `viz_gui` for that project, which puts winit on the main thread. The
-  node tests in `zebrad/tests/crosslink.rs` run headless, so they run with `PH_NO_VIZ_GUI` set,
-  which leaves the feature out of an otherwise identical build.
+- **Crosslink node tests and the visualizer.** Every `zebrad` build carries the GUI and opens
+  its window when there is a display, unless `--headless` is passed. The node tests in
+  `zebrad/tests/crosslink.rs` run headless unless `ZEBRA_TEST_GUI` is set to something
+  non-empty.
 
 ## 9. Open decisions
 

@@ -8,15 +8,44 @@ use std::cmp::max;
 
 use crate::*;
 
-pub fn viz_main(tokio_root_thread_handle: Option<std::thread::JoinHandle<()>>, wallet_state: Arc<Mutex<wallet::WalletState>>) {
-    // loop {
-    //     if let Some(ref thread_handle) = tokio_root_thread_handle {
-    //         if thread_handle.is_finished() {
-    //             return;
-    //         }
-    //     }
-    // }
+/// Run the node with the visualizer window when there is a display for one, and as a plain CLI
+/// node when there is not.
+///
+/// `node` is the node's whole life. With a window it runs on a thread of its own, because the
+/// window owns this one (AppKit will only run on the main thread), and the wallet gets a thread
+/// of its own too. Without a window -- `headless` was asked for, or there is no display --
+/// `node` just runs here, and the node starts the headless wallet the way any CLI node does.
+///
+/// The window is opened before any of the node exists, since whether it opens decides which
+/// of those two shapes the process takes; `GUI_ACTIVE` carries the answer to the node.
+pub fn run_node(headless: bool, node: impl FnOnce() + Send + 'static) {
+    let window = if headless { None } else { open_window() };
+    let Some(window) = window else {
+        if !headless {
+            eprintln!("no display to open the visualizer on; running headless (--headless skips the attempt)");
+        }
+        node();
+        return;
+    };
+    GUI_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
 
+    let wallet_state = Arc::new(Mutex::new(wallet::WalletState::new()));
+    let wallet_state2 = wallet_state.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .enable_io()
+            .build()
+            .unwrap();
+        rt.block_on(wallet::wallet_main(wallet_state2));
+    });
+
+    let tokio_root_thread_handle = std::thread::spawn(node);
+    viz_main(Some(tokio_root_thread_handle), wallet_state, window);
+}
+
+fn open_window() -> Option<zebra_gui::Window> {
     let test_name: &'static str = *TEST_NAME.lock().unwrap();
     if test_name != "‰‰TEST_NAME_NOT_SET‰‰" {
         *zebra_gui::WINDOW_TITLE.lock().unwrap() = format!("TEST: {}", test_name);
@@ -30,7 +59,19 @@ pub fn viz_main(tokio_root_thread_handle: Option<std::thread::JoinHandle<()>>, w
         zebra_gui::DEV_WIN32_WINDOW_RIGHT.store(bottom_right, std::sync::atomic::Ordering::Relaxed);
     }
 
-    zebra_gui::main_thread_run_program(wallet_state, false);
+    zebra_gui::open_window()
+}
+
+fn viz_main(tokio_root_thread_handle: Option<std::thread::JoinHandle<()>>, wallet_state: Arc<Mutex<wallet::WalletState>>, window: zebra_gui::Window) {
+    // loop {
+    //     if let Some(ref thread_handle) = tokio_root_thread_handle {
+    //         if thread_handle.is_finished() {
+    //             return;
+    //         }
+    //     }
+    // }
+
+    zebra_gui::main_thread_run_program(window, wallet_state, false);
 }
 
 

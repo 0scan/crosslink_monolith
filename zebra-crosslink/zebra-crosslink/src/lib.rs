@@ -35,6 +35,14 @@ pub static TEST_INSTR_BYTES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 pub static TEST_INSTRS: Mutex<Vec<test_format::TFInstr>> = Mutex::new(Vec::new());
 pub static TEST_SHUTDOWN_FN: Mutex<fn()> = Mutex::new(|| ());
 pub static TEST_NAME: Mutex<&'static str> = Mutex::new("‰‰TEST_NAME_NOT_SET‰‰");
+/// Whether this process has the visualizer window. Decided once, by `viz2::run_node`, before the
+/// node starts, and never changed after: every binary carries the GUI, and whether it shows
+/// depends on `--headless` and on there being a display to open a window on.
+pub static GUI_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// See `GUI_ACTIVE`.
+pub fn gui_active() -> bool {
+    GUI_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
 /// The last check the running instruction made: (condition, message). Read after each
 /// instruction for its timing row and outcome.
 pub static TEST_LAST_CHECK: Mutex<Option<(bool, String)>> = Mutex::new(None);
@@ -180,7 +188,6 @@ pub mod config {
 pub mod test_format;
 pub mod test_timing;
 
-#[cfg(feature = "viz_gui")]
 pub mod viz2;
 
 use crate::service::{TFLServiceCalls, TFLServiceHandle};
@@ -374,8 +381,10 @@ pub fn run_tfl_test(internal_handle: TFLServiceHandle) {
             eprintln!("\n\nInstruction sequence:");
             dump_test_instrs();
 
-            #[cfg(not(feature = "viz_gui"))]
-            std::process::abort();
+            // With a window, a failed test stays on screen to be looked at.
+            if !gui_active() {
+                std::process::abort();
+            }
         }
     }));
 
@@ -387,8 +396,7 @@ async fn tfl_service_main_loop(internal_handle: TFLServiceHandle) -> Result<(), 
     let config = internal_handle.config.clone();
     let params = internal_handle.params;
 
-    #[cfg(feature = "viz_gui")]
-    {
+    if gui_active() {
         let rt = tokio::runtime::Handle::current();
         let viz_tfl_handle = internal_handle.clone();
         tokio::task::spawn_blocking(move || {
