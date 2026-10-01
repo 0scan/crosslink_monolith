@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Local macOS mouse-state repair; keep until the fix is available upstream.
-softer_gui = { version = "3", path = "../patches/softer_gui-3.0.1" }
+softer_gui = "4"
 num_cpus = "1.17.0"
 ahash = "0.8.12"
 rand = "0.9.2"
@@ -28,7 +27,7 @@ lewton = { version = "0.10.2", optional = true, default-features = false }
 [build-dependencies]
 png = "0.17"
 # Only fetched, compiled or run when -F ape is on.
-cosmo-build = { version = "5", optional = true }
+cosmo-build = { version = "6", optional = true }
 
 # Host-gated rather than target-gated: cross-building a Windows binary from another OS
 # would need this unconditionally, which no build here does.
@@ -47,7 +46,7 @@ ape = ["dep:cosmo-build"]
 [target.'cfg(cosmo)'.dependencies]
 # Translates the libc entry points std calls, whose constants rustc bakes in for
 # Linux but cosmopolitan resolves at load time.
-cosmo-compat = { version = "5", path = "../patches/cosmo-compat-5.0.2" }
+cosmo-compat = "6"
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(cosmo)'] }
