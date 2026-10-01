@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.74"
 name = "cosmo-build"
-version = "5.0.2"
+version = "6.0.0"
 build = false
 include = [
     "src/**",

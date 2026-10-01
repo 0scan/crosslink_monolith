@@ -1,11 +1,13 @@
-# Code review status: all 21 findings
+# Code review status: 22 reported findings and 15 test-format leads
 
-Tracking table. One row per finding, named by its report file. Two reviews feed it:
+Tracking table. One row per finding. Four sources feed it:
 
 - **Consensus review** (`C` rows): 11 reports in `crosslink-e99404e3de7cc-review/`, validated at `dev` @ `e99404e3de7cc`.
 - **GUI review** (`G` rows): 10 reports in `crosslink-d00b6a44ef594-gui-review/`, validated at `dev` @ `d00b6a44ef594`.
+- **Sync follow-up** (`S` row): 1 report in `crosslink-e56e35f85a98f-sync-review/`, a lead raised while re-checking commit `e56e35f8` and validated at `dev` @ `e56e35f85a98f`.
+- **Test-format review** (`F` and `T` rows): 15 leads on `test_format.rs` and `zebrad/tests/crosslink.rs`, raised at `dev` @ `8ea4db1f`. They have no report files and no severity. The two sessions that own that code checked them and disputed none; see the section below.
 
-Status is assessed against `dev` @ `d00b6a44ef594` on 2026-10-01. Every assessment is from reading code. Nothing was built or run for either review or for this table. Narrative, quotes and fix plans are in the report files. The structure every report follows, and the row formats used below, are in [`SECURITY-ISSUE-TEMPLATE.md`](SECURITY-ISSUE-TEMPLATE.md).
+Status is assessed against `dev` @ `e56e35f85` on 2026-10-01. Every assessment is from reading code. Nothing was built or run for any review or for this table. Narrative, quotes and fix plans are in the report files. The structure every report follows, and the row formats used below, are in [`SECURITY-ISSUE-TEMPLATE.md`](SECURITY-ISSUE-TEMPLATE.md).
 
 `C` numbers are the ones the consensus reports use to cross-reference each other, so they are kept as they are and the rows are sorted by severity.
 
@@ -69,22 +71,60 @@ No finding is covered by any of them today, so every row shows a route not yet t
 | G9 | [Chain view reacts under panes and modals](crosslink-d00b6a44ef594-gui-review/low/chain-view-pans-and-recenters-while-the-pointer-is-over-a-pane-or-modal.md) | low | all | any | CLEAR | none | gui | Fires most often of the three input findings: every touchpad scroll over a pane. Three one-line gates |
 | G10 | [Esc dead after textbox focus; Jump gives no feedback](crosslink-d00b6a44ef594-gui-review/low/esc-cannot-close-a-modal-after-textbox-focus-and-jump-gives-no-feedback.md) | low | all | any | CLEAR | unit | gui | After one Tab, Esc is dead in all eight modals. Half of a two-stage Esc: the clearing handler is commented out |
 
+## Sync follow-up (1)
+
+Raised by the "crosslink spreadsheet triage" session while reading `e56e35f8`, then validated by tracing the code. The Fires column uses the consensus values.
+
+| # | Finding | Sev | Fires | Gate | Status | Test | Owner | Notes |
+|-|-|-|-|-|-|-|-|-|
+| S1 | [Rejected-block backoff is keyed by hash alone](crosslink-e56e35f85a98f-sync-review/low/rejected-block-backoff-is-keyed-by-hash-alone-so-one-peer-can-delay-an-honest-block-for-every-peer.md) | low | adversary | any | CLEAR | intg | node | Partially confirmed. Each forged copy a peer gets queued under an honest hash stops new requests for that hash to every peer for 1 s doubling to 64 s. One dishonest connection among honest peers normally loses to the honest copy; sustained delay needs most of the node's connections. A regression against `e56e35f8^`, where a forgery cost about one 500 ms pass. The trade-off was weighed in the commit's comments; the existing forged-body test covers one strike only |
+
+## Test-format review (15 leads)
+
+Raised by `/code-review xhigh` on 2026-10-01 against the binary test format and its scenario tests. These rows have no report file, so the Notes column carries the whole lead. `F` rows are about the format and harness in `zebra-crosslink/zebra-crosslink/src/test_format.rs`; `T` rows are about the scenarios in `zebra-crosslink/zebrad/tests/crosslink.rs`.
+
+**Checked by**: `yes` = the session that owns the code confirmed it against `dev` @ `8ea4db1f` · `part` = confirmed with a part it did not verify, named in Notes.
+
+**Owner**: `format` = the "Crosslink binary test format" session · `tests` = the "crosslink spreadsheet triage" session · `node` = the fix is in `zebra-state` · `review` = the "crosslink code review" session, which maintains this file.
+
+| # | Lead | Where | Checked by | Status | Owner | Notes |
+|-|-|-|-|-|-|-|
+| F1 | `SHOULD_FAIL` passes when the harness gets no answer | `test_format.rs:1263` | yes | **PARTIAL** `e56e35f8` | format | In progress: the format session started on F1, then F5 and F6, F3 and F4, and F7, on 2026-10-01. A block with an unknown parent is now answered at once as `Pending`, so the 30 s wait is gone. `ingest_pow` still maps `Pending`, a harness timeout and an unparseable `RECV_POW` to the same "failed" as a real rejection. A test can now pin a deferral by its reason text, as the commit's new test does. Three distinct outcomes are still missing |
+| T1 | 14 fork-refusal assertions pass by timeout, not by a refusal | `crosslink.rs:957`, `:1069`, `:2386` | yes | **PARTIAL** `e56e35f8` | tests | Read, not re-run: the 13 orphan blocks and the closing one now get an immediate `Pending`, so about 420 s of waiting goes away. The assertions are unchanged. They still pass because the parent is unknown, and say nothing about the fork-choice floor |
+| T2 | First generated PoS block is always invalid; two tests are vacuous | `crosslink.rs:260`, `:361`, `:481` | yes | CLEAR | tests | `regen_test_data` builds it over the two sibling blocks at height 3. Six other PoS files are unused and unloadable |
+| F2 | `EXPECT_REJECTION_REASON` cannot say which rule rejected | `test_format.rs:938` | yes | CLEAR | review | Assigned to the review session on 2026-10-01. **On hold: the user's instruction is not to touch real consensus code at the moment**, and the fix is in `validate` and `admit_fat_pointer`. Not started. Every failing exit of `validate` returns `(Fail, None)`. Five PoS tests record identical text. Five `admit_fat_pointer` rules still share one message. `e56e35f8` splits the PoW reason into `header` and `body`, which does not reach these |
+| F9 | `LOAD_POS` cannot express a certificate test | `test_format.rs:936` | part | DECIDE | node | A bad signature panics in `decide()` at `bft.rs:1079` instead of returning a rejection; zero signatures are accepted. The format owner did not verify the roster and quorum half, and reads the panic as a node robustness issue. Rides on the C7 decision and on C6.3 |
+| F3 | `EXPECT_MEMPOOL_REJECTED` is true for a mined transaction | `test_format.rs:1470` | yes | CLEAR | format | Seen live by the format owner. Five instruction builders have no caller in any test |
+| F4 | `EXPECT_POW_BLOCK_FINALITY` has no timeout, and `None` is ambiguous | `test_format.rs:1143` | part | CLEAR | format | Both reads are unbounded and errors map to `None`. Not verified: that an unknown block answers `CantBeFinalized` |
+| F5 | The instruction dump panics on odd blocks and can deadlock | `test_format.rs:185` | yes | CLEAR | format | A passing test can hang in the panic hook. The same function runs when the GUI views a file |
+| F6 | `read_from_bytes` panics on malformed files and checks no magic | `test_format.rs:568` | yes | CLEAR | format | A wrong file picked in the GUI aborts a running node |
+| F7 | Files are not self-describing: calendar omitted, payload unversioned | `test_format.rs:643` | yes | CLEAR | format | Stored scenes changed meaning silently at `00565513`. The owner will fold "always write the calendar" and a version bump into its planned `SET_PARAMS` work |
+| F8 | Conformance mode can no longer finish | `test_format.rs:666` | part | CLEAR | format + tests | Same lead as T4. About 20,740 blocks at about 92 ms each against a 360 s limit. The block arithmetic was not re-derived by the owner. Needs a batched block load |
+| F10 | Missing instructions | `test_format.rs:77` | yes | CLEAR | format | A hardfork or slash schedule; `fin` and the best tip by hash; restart; an eventual expectation; a handle on a template-mined block; one peer identity across `RECV_TX` and STP. Restart and the schedule were already planned |
+| T3 | The scene test rewrites three tracked files on every run | `crosslink.rs:2423` | yes | CLEAR | tests | Another test binary reads them at `viz2.rs:1072`, `:1108`, `:1130`. Compare against the checked-in bytes instead |
+| T5 | The bond lifecycle test never asserts bond state | `crosslink.rs:2572` | yes | CLEAR | tests | Only block acceptance and chain length. The one `EXPECT_BOND` ignores the amount |
+| T6 | Enforced consensus rules with no scenario | `crosslink.rs:2460` | yes | CLEAR | tests | Twelve named cases, from a null pointer after a non-null parent to the node's own template moving `fin`. Several wait on F9 and F10. The owner will take the ones today's format can express, plus C10's ghost roster |
+
+Status of these 15: **2 PARTIAL**, **1 DECIDE**, **12 CLEAR**. Line numbers are from the review at `8ea4db1f`; `e56e35f8` added 38 lines to `crosslink.rs` at `:1653`, so every later citation there moves down by that much.
+
 ---
 
 ## Roll-up
+
+The tables in this section count the 22 reported findings. The test-format leads are counted above.
 
 | Status | High | Medium | Low | Total |
 |-|-|-|-|-|
 | FIXED | 0 | 0 | 0 | **0** |
 | PARTIAL | 0 | 0 | 0 | 0 |
-| CLEAR (obvious fix, pending) | 2 | 6 | 8 | **16** |
+| CLEAR (obvious fix, pending) | 2 | 6 | 9 | **17** |
 | DECIDE | 3 | 1 | 0 | **4** |
 | MEASURE | 0 | 0 | 1 | 1 |
-| total | 5 | 7 | 9 | **21** |
+| total | 5 | 7 | 10 | **22** |
 
-By trigger, consensus rows: **6 honest**, **4 adversary**, **1 config**. All 10 GUI rows fire in ordinary use.
+By trigger, consensus rows: **6 honest**, **4 adversary**, **1 config**. All 10 GUI rows fire in ordinary use. The sync row needs a dishonest peer.
 
-By gate: **3 fork** (C2, C7, C11), **8 launch** (C1, C3, C4, C6, C10, G1, G2, G3), **10 any**.
+By gate: **3 fork** (C2, C7, C11), **8 launch** (C1, C3, C4, C6, C10, G1, G2, G3), **11 any**.
 
 By test route, what CI would actually catch on a bad push:
 
@@ -93,15 +133,17 @@ By test route, what CI would actually catch on a bad push:
 | `test-format`, `dilated`, `cargo` | 0 | n/a |
 | **covered subtotal** | **0** | |
 | `unit` (easy, unwritten) | 11 | no |
-| `intg` (easy, unwritten) | 6 | no |
+| `intg` (easy, unwritten) | 7 | no |
 | `hard` | 3 | no |
 | `none` | 1 | never |
 
-**0 of 21 are covered by something that runs automatically.** 17 of them have a cheap route.
+**0 of 22 are covered by something that runs automatically.** 18 of them have a cheap route.
 
 ## What the table makes obvious
 
-- **Nothing is fixed, and 16 of 21 are waiting on effort, not on a decision.** No recommendation from either review has landed, apart from filing C11 as its own report.
+- **Nothing is fixed, and 17 of 22 are waiting on effort, not on a decision.** No recommendation from the consensus or GUI review has landed, apart from filing C11 as its own report.
+- **The only movement since the last assessment is on the test side.** `e56e35f8` answers every queued block, which removes the 30 s timeouts behind F1 and T1. It does not make those tests assert what they claim.
+- **The test suite cannot yet protect most consensus fixes.** C7 needs F9, C1 and C4 need a restart instruction from F10, and C8 needs a template-on-named-parent instruction.
 - **All four decisions are consensus design.** C2 and C11 share one of them: how a header carried in a BFT proposal proves its pointer binding.
 - **Three findings have a hard deadline** (C2, C7, C11). The deadline moved in their favour: activation went from height 275 to 36,288, about 10.5 days after genesis at 25 second blocks.
 - **Five consensus findings are one piece of startup design**, not five fixes: C1, C4, C6, C10's stake default and C3's re-fetch all meet in `restore()`.
@@ -113,7 +155,7 @@ By test route, what CI would actually catch on a bad push:
 
 # Recommendation-level evaluation
 
-The table above tracks the 21 **findings**. This one tracks the 78 individual **recommendations** inside them. A finding moves to PARTIAL when some of these land and others do not, and the ones that do not are where the remaining work is.
+The table above tracks the 22 **findings**. This one tracks the 81 individual **recommendations** inside them. A finding moves to PARTIAL when some of these land and others do not, and the ones that do not are where the remaining work is.
 
 Numbering follows each report's own Recommendations section, so `C6.3` is item 3 in the C6 report. Items that only list rejected alternatives or rollout timing are left out; rollout is the Gate column above. `T` marks a report's unnumbered test list.
 
@@ -126,8 +168,8 @@ Numbering follows each report's own Recommendations section, so `C6.3` is item 3
 | DONE | 1 |
 | PARTIAL | 0 |
 | SUPERSEDED / DECLINED | 0 |
-| **OPEN** | **77** |
-| total | **78** |
+| **OPEN** | **80** |
+| total | **81** |
 
 ## Consensus findings
 
@@ -217,11 +259,19 @@ Numbering follows each report's own Recommendations section, so `C6.3` is item 3
 | G10.3 | `parse_jump_height(text, tip)`; disable Jump and show a warning for bad or out-of-range input | OPEN | |
 | G10.4 | Unit test for `parse_jump_height`; seven manual steps | OPEN | |
 
+## Sync finding
+
+| # | Recommendation | Verdict | Note |
+|-|-|-|-|
+| S1.1 | Key the backoff by hash and connection: pass the serving peer when recording a strike and the candidate peer when checking | OPEN | The honest peers stay eligible while the peer that served the failed copy waits |
+| S1.2 | Run the merkle check at receipt, before the block takes the queue slot for its hash | OPEN | Stops a merkle-mismatched body from shadowing the honest copy. The code already has an `@Todo` for it. The shadowing predates `e56e35f8` |
+| S1.4 | Tests: six forged `RECV_POW` from one peer, then the honest block from another; a parent-missing variant; a unit test of the two pure functions | OPEN | At `e56e35f85` the sixth strike sets a 32 s wait, longer than the harness's 30 s answer wait. Inferred, not run |
+
 ---
 
 # How the recommendations interact
 
-The recommendations are not independent. Treating the 77 open ones as a flat backlog loses the pairs that must land together and the orderings that prevent a regression.
+The recommendations are not independent. Treating the 80 open ones as a flat backlog loses the pairs that must land together and the orderings that prevent a regression.
 
 ## Must land together (splitting them causes harm)
 
@@ -297,7 +347,24 @@ The consensus reports were written at `e99404e3de7cc`. Eight commits later, at `
 | C5 | Margin of 196 blocks | Margin of 1,724 blocks. Still unexposed, and still unexposed if the reorg limit goes to 999 |
 | C7, C11 | Up to 100 signatures in a pointer | Up to 12, since `3351fc4c` |
 | C11 | After C7's fix, quorum-subset freedom reaches about 88.8 bits at 100 members | About 10.6 bits at 12 members. A roster key holder can still re-sign without limit, so the conclusion stands |
-| all `write.rs` and `new_network.rs` citations | Line numbers | `write.rs` moved down about 10 lines, `new_network.rs` about 46. `bft.rs` line numbers are still exact |
+| all `write.rs` and `new_network.rs` citations | Line numbers | `write.rs` moved down about 10 lines. `new_network.rs` moved about 46 lines at `d00b6a44`, and again at `e56e35f8`, which adds about 100 lines above the commit loop. `bft.rs` line numbers are still exact |
+
+### Re-check at `e56e35f8`
+
+One commit landed after the first assessment: `e56e35f8`, "Answer every queued block through a fate table; back off re-fetching rejected blocks". It touches `new_network.rs`, the submit path in `methods.rs`, the two download components, six lines of `test_format.rs`, and adds one scenario test.
+
+| Row | Effect |
+|-|-|
+| C1, C4, C6, C10 | None. `bft.rs` and `write.rs` are untouched |
+| C3 | None. The new backoff applies to a block a peer served that failed verification. C3's bogus hashes are never served, so they never enter the backoff table, and `MISSING_POW_BLOCKS` is unchanged |
+| C6 | None on the re-download loop. A by-hash block dropped as "already finalized" goes through the new `drop_block!` path, which reports to a test peer and does not start a backoff |
+| C8 | None. The `methods.rs` change is in `submitblock`, where a held block now answers `Inconclusive`. There is still no tip check |
+| C2, C5, C7, C9, C11, all `G` rows | None. Their files are untouched |
+| F1, T1 | PARTIAL, as described in the test-format section |
+
+Two things in the commit are new behaviour and belong to no row. When a served block fails verification, the peer is now disconnected only if the header is invalid, not for a bad body; the hash is retried after a backoff of 1 to 64 seconds. And `settle_fate` aborts the node if a queued block has no fate entry; both paths that queue a block insert one, checked by reading.
+
+One new finding came out of this commit: the backoff is keyed by hash alone. It was raised by the "crosslink spreadsheet triage" session, validated by tracing the code, and is tracked as row S1 above. The lead as first stated overstated the reach, and the report records the corrections: the backoff gates only new requests, the node asks two peers per hash, and an honest download already in flight is not cancelled. It has not been raised with the commit's author.
 
 One item is new and belongs to no report yet. `sync()` can now return at shutdown, which drops the BFT request receiver. A decision arriving at that moment may reach the `panic!` at `bft.rs:1517` or the `expect` at `:1520`, and the build aborts on panic. **This is inferred from reading and was not traced end to end.** C6.4 would cover it.
 

@@ -1215,7 +1215,7 @@ checksum = "4df6f98652d30167eaeea34d77b730e07c8caba6df17bd4551842b9b8da01deb"
 
 [[package]]
 name = "cosmo-build"
-version = "5.0.2"
+version = "6.0.0"
 dependencies = [
  "ureq",
  "zip",
@@ -1223,7 +1223,9 @@ dependencies = [
 
 [[package]]
 name = "cosmo-compat"
-version = "5.0.2"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f30040047d19b38310799bf7b8c01ee8a9de5b166a48c3529032def84affa8e"
 
 [[package]]
 name = "cpufeatures"
@@ -6260,7 +6262,9 @@ dependencies = [
 
 [[package]]
 name = "softer_gui"
-version = "3.0.1"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c08c1ce406e4cea091a2f2369dc21e5acc4e924e19fa490c7c4d1ceb7935f624"
 
 [[package]]
 name = "soketto"
