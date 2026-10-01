@@ -1560,7 +1560,13 @@ fn with_forged_signature(block: &Block) -> Block {
         .iter()
         .position(|tx| !tx.is_coinbase() && !tx.inputs().is_empty())
         .expect("the block carries a transparent spend");
-    let mut tx = Transaction::clone(&forged.transactions[spend_i]);
+    forged.transactions[spend_i] = Arc::new(forged_signature(&forged.transactions[spend_i]));
+    forged
+}
+
+/// `spend` with one byte of its first unlock script flipped: same txid, invalid signature.
+fn forged_signature(spend: &Transaction) -> Transaction {
+    let mut tx = spend.clone();
     let Transaction::VCrosslink { inputs, .. } = &mut tx else {
         panic!("post-genesis regtest transactions are VCrosslink");
     };
@@ -1570,8 +1576,67 @@ fn with_forged_signature(block: &Block) -> Block {
     let mut bytes = unlock_script.as_raw_bytes().to_vec();
     bytes[8] ^= 1;
     *unlock_script = zebra_chain::transparent::Script::new(&bytes);
-    forged.transactions[spend_i] = Arc::new(tx);
-    forged
+    tx
+}
+
+/// The instructions no scenario used before: RECV_TX, EXPECT_MEMPOOL_REJECTED (including that a
+/// mined transaction is not "rejected"), EXPECT_POOL_TOTALS, EXPECT_FINALIZER_BANK, and the
+/// load-rejected helper.
+#[test]
+fn crosslink_mempool_and_staking_state_instructions() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let key = TestKey::new(b"crosslink test miner");
+    let miner = key.address();
+    let mut gen = BlockGen::init_at_genesis_plus_1(network.clone(), BlockGen::REGTEST_GENESIS_HASH, &miner);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    let mature = |gen: &mut BlockGen, tf: &mut TF| {
+        while gen.mature_coinbase_for(&key).is_none() {
+            tf.push_instr_load_pow(&gen.next_block(&miner), 0);
+        }
+        gen.mature_coinbase_for(&key).expect("matured above")
+    };
+
+    // a spend arriving from a peer reaches the mempool and leaves it when mined, and a mined
+    // transaction is not a rejected one
+    let spend = transparent_spend(&key, mature(&mut gen, &mut tf));
+    let wire = zebra_network::wire::tx_message_bytes(&network, zebra_chain::transaction::UnminedTx::from(spend.clone()))
+        .expect("a transaction frames");
+    tf.push_instr_recv_tx_wire(&wire, 0, 0);
+    tf.push_instr_expect_mempool_contains(&spend, 0);
+    tf.push_instr_load_pow(&gen.next_block_with_txs(&miner, &[spend.clone()]), 0);
+    tf.push_instr_expect_mempool_absent(&spend, 0);
+    tf.push_instr_expect_mempool_rejected(&spend, SHOULD_FAIL);
+
+    // a forged signature is refused and lands in the rejected set
+    let forged = forged_signature(&transparent_spend(&key, mature(&mut gen, &mut tf)));
+    tf.push_instr_submit_tx(&forged, SHOULD_FAIL);
+    tf.push_instr_expect_mempool_rejected(&forged, 0);
+
+    // before any bond the staking pools and the target's bank are empty; a funded bond makes
+    // the bonded pool non-empty. The amounts after it depend on the issuance rules, which pay a
+    // new bond in its own block, so this checks only that the pool moved.
+    let target_key = zebra_crosslink::rng_private_public_key_from_address(b"staking-target").1;
+    let target = zcash_primitives::bft::FinalizerAddress::create(&target_key);
+    let target_pub_key = target.pub_key.0;
+    let input = mature(&mut gen, &mut tf);
+    tf.push_instr_expect_pool_totals(0, 0, TEST_STAKE_IGNORED, 0);
+    tf.push_instr_expect_finalizer_bank(target_pub_key, 0, 0);
+    let bond = staking_tx_create_bond_funded(b"funded-bond", target, 100_000_000, &key, input);
+    let bond_key = bond.staking_action().expect("a staking transaction").bond_key();
+    tf.push_instr_expect_bond(bond_key, TF_BOND_ABSENT, TEST_STAKE_IGNORED, 0);
+    tf.push_instr_load_pow(&gen.next_block_with_txs(&miner, &[bond]), 0);
+    tf.push_instr_expect_bond(bond_key, TF_BOND_ACTIVE, TEST_STAKE_IGNORED, 0);
+    tf.push_instr_expect_pool_totals(0, TEST_STAKE_IGNORED, TEST_STAKE_IGNORED, SHOULD_FAIL);
+
+    // the load-rejected helper: a body that doesn't match the merkle root
+    let mut tampered = gen.next_block(&miner).as_ref().clone();
+    tampered.transactions.push(tampered.transactions[0].clone());
+    tf.push_instr_load_pow_rejected(&tampered, "merkle");
+
+    test_bytes(tf.write_to_bytes());
 }
 
 /// A forged body under an honest block's hash is rejected, and must not stop the honest block

@@ -1198,25 +1198,43 @@ pub(crate) async fn handle_instr(
 
         TestInstr::ExpectPoWBlockFinality(hash, f) => {
             let expect = f;
-            let height = block_height_from_hash(&internal_handle.call.clone(), hash).await;
+            // Only for the message, so a slow or failed lookup just leaves it out.
+            let height = tokio::time::timeout(NODE_ANSWER_WAIT, block_height_from_hash(&internal_handle.call.clone(), hash))
+                .await
+                .ok()
+                .flatten();
             // The state service answers `fin` and the best chain in one read (FINALITY.md
-            // §7.2), so the harness asks it exactly as the RPC does.
-            let actual = match (internal_handle.call.read_state)(
-                zebra_state::ReadRequest::CrosslinkBlockFinality(hash),
+            // §7.2), so the harness asks it exactly as the RPC does. It always answers with a
+            // finality, so an expected `None` never matches; a failed or missing answer is no
+            // verdict, which never passes.
+            let answer = tokio::time::timeout(
+                NODE_ANSWER_WAIT,
+                (internal_handle.call.read_state)(zebra_state::ReadRequest::CrosslinkBlockFinality(hash)),
             )
-            .await
-            {
-                Ok(zebra_state::ReadResponse::CrosslinkBlockFinality(finality)) => Some(finality),
-                _ => None,
-            };
-            test_check(
-                flags,
-                expect == actual,
-                &format!(
-                    "PoW block finality at hash={}, height={:?}: expected {:?}, actually {:?}",
-                    hash, height, expect, actual
+            .await;
+            match answer {
+                Ok(Ok(zebra_state::ReadResponse::CrosslinkBlockFinality(finality))) => {
+                    let actual = Some(finality);
+                    test_check(
+                        flags,
+                        expect == actual,
+                        &format!(
+                            "PoW block finality at hash={}, height={:?}: expected {:?}, actually {:?}",
+                            hash, height, expect, actual
+                        ),
+                    );
+                }
+                Ok(other) => test_check_outcome(
+                    false,
+                    false,
+                    &format!("PoW block finality at hash={hash}: no verdict, the read answered {other:?}"),
                 ),
-            ); // TODO: maybe assert in test but recoverable error in-GUI
+                Err(_) => test_check_outcome(
+                    false,
+                    false,
+                    &format!("PoW block finality at hash={hash}: no verdict within {NODE_ANSWER_WAIT:?}"),
+                ),
+            }
         }
 
         TestInstr::ExpectRosterIncludes(pub_key, stake) => {
@@ -1515,11 +1533,18 @@ async fn await_mempool(
             Ok(Ok(Response::TransactionIds(ids))) => ids.contains(&id),
             other => return (false, format!("mempool {txid}: the transaction ids request answered {other:?}")),
         };
-        let rejected = match ask(Request::RejectedTransactionIds([id].into_iter().collect())).await {
+        let in_rejected_set = match ask(Request::RejectedTransactionIds([id].into_iter().collect())).await {
             Ok(Ok(Response::RejectedTransactionIds(ids))) => !ids.is_empty(),
             other => return (false, format!("mempool {txid}: the rejected ids request answered {other:?}")),
         };
-        let state = format!("resident {resident}, rejected {rejected}");
+        // The mempool files a mined transaction under its rejected ids too (as Mined), and does
+        // not say which reason applies, so the best chain decides: mined is not rejected.
+        let mined = match tokio::time::timeout(NODE_ANSWER_WAIT, (internal_handle.call.state)(StateRequest::Transaction(txid))).await {
+            Ok(Ok(StateResponse::Transaction(found))) => found.is_some(),
+            other => return (false, format!("mempool {txid}: the mined transaction request answered {other:?}")),
+        };
+        let rejected = in_rejected_set && !mined;
+        let state = format!("resident {resident}, rejected {rejected}, mined {mined}");
         let reached = match expect {
             MempoolExpect::Resident => resident,
             MempoolExpect::Absent => !resident,
@@ -1528,9 +1553,15 @@ async fn await_mempool(
         if reached {
             return (true, format!("mempool {txid}: {expect:?} ({state})"));
         }
-        // A rejected transaction won't become resident; say so now rather than at the deadline.
-        if matches!(expect, MempoolExpect::Resident) && rejected {
-            return (false, format!("mempool {txid}: expected {expect:?}, but it was rejected"));
+        // A rejected or mined transaction won't become resident, and a mined one won't become
+        // rejected; say so now rather than at the deadline.
+        let settled_otherwise = match expect {
+            MempoolExpect::Resident => rejected || mined,
+            MempoolExpect::Rejected => mined,
+            MempoolExpect::Absent => false,
+        };
+        if settled_otherwise {
+            return (false, format!("mempool {txid}: expected {expect:?}, but it is {state}"));
         }
         if tokio::time::Instant::now() >= deadline {
             return (
