@@ -5,8 +5,7 @@
 # `cargo metadata` install step, both look for `Cargo.toml`/`Cargo.lock`
 # right at `${src}`, with no way to point them at a nested manifest). So
 # `crateSrc` here is rooted at `zebra-crosslink/` itself. But the GUI
-# binary (`zebrad`, which always carries the GUI) has path-dependencies
-# on sibling directories (`zebra-gui`, `clay-rs`, `librustzcash`,
+# on sibling directories (`zebra-gui`, `wallet`, `clay-rs`, `librustzcash`,
 # `tenderlink`, `patches`) that live *outside* that workspace. `postUnpack`
 # copies those into place next to the unpacked source before cargo ever
 # runs, so `../zebra-gui` etc. resolve exactly as they do in the working
@@ -46,7 +45,7 @@
       # A plain path (rather than `lib.fileset.toSource`) so the unpacked
       # source directory is named `zebra-crosslink` (matching its store
       # path's basename) instead of the generic `source` - some sibling
-      # path-dependencies (e.g. `zebra-gui`'s `../zebra-crosslink/wallet`)
+      # path-dependencies (e.g. `tenderlink`'s `../zebra-crosslink/zebra-debug-time`)
       # hardcode that directory name.
       crateSrc = ../zebra-crosslink;
 
@@ -54,6 +53,7 @@
       # `../`, copied into place next to the unpacked workspace source.
       siblingSrcs = {
         "zebra-gui" = ../zebra-gui;
+        "wallet" = ../wallet;
         "clay-rs" = ../clay-rs;
         "librustzcash" = ../librustzcash;
         "tenderlink" = ../tenderlink;
