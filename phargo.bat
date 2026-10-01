@@ -35,10 +35,10 @@ set "extra=%4 %5 %6 %7 %8 %9"
 rem cosmo-build ignores CARGO_TARGET_DIR: the finished .com lands in the package's own
 rem target\cosmo\<debug|release>, next to its per-architecture builds. On Windows cargo gives a
 rem check the same build-script environment as a build, so cosmo-build cannot tell it to skip
-rem the APE; it is told outright.
+rem the APE; anything but a build is told outright.
 if /i "%platform%"=="APE" (
     set "flags=%flags% --features ape"
-    if /i "%PH_SUBCOMMAND%"=="check" set "COSMO_APE=0"
+    if /i not "%PH_SUBCOMMAND%"=="build" set "COSMO_APE=0"
 )
 
 if /i "%platform%"=="Linux" goto :linux
@@ -73,6 +73,11 @@ pushd "%root%%project%"
 call "%root%cargo_errorlimit.bat" %launch% %PH_SUBCOMMAND% %flags% %extra%
 set "result=%errorlevel%"
 popd
+
+if /i "%platform%"=="APE" if "%result%"=="0" if "%COSMO_APE%"=="" (
+    for %%f in ("%root%%project%\target\cosmo\%build_folder%\*.com") do echo APE: %%~ff
+    for /d %%d in ("%root%%project%\*") do for %%f in ("%%d\target\cosmo\%build_folder%\*.com") do echo APE: %%~ff
+)
 
 exit /b %result%
 

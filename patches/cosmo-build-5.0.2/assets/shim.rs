@@ -530,9 +530,10 @@ fn split_response_file(text: &str) -> Vec<String> {
 ///
 /// On Windows cosmocc's tools crash at random, a few runs in a hundred: gcc
 /// reports "internal compiler error: SIGTRAP signal terminated program cc1" (or
-/// as, or ld), or dies itself. The same command then succeeds, so a crashed run
-/// is repeated, and only the last attempt's output is shown -- a half-written
-/// `-E` on stdout followed by a whole one would be garbage to cc-rs.
+/// as, or ld), or dies itself. Rarer, a cc1 stops using CPU and never exits.
+/// The same command then succeeds, so a crashed or stalled run is repeated, and
+/// only the last attempt's output is shown -- a half-written `-E` on stdout
+/// followed by a whole one would be garbage to cc-rs.
 fn run(prog: &Path, args: &[String]) -> i32 {
    const ATTEMPTS: usize = 5;
    for attempt in 1..=ATTEMPTS {
@@ -544,20 +545,140 @@ fn run(prog: &Path, args: &[String]) -> i32 {
          c
       };
       cmd.args(args);
-      let out = match cmd.output() {
-         Ok(o) => o,
-         Err(e) => die(&format!("cosmo-shim: {}: {e}", prog.display())),
+      let Some((code, stdout, stderr)) = execute(prog, cmd) else {
+         if attempt < ATTEMPTS {
+            eprintln!("cosmo-shim: {} stalled, retrying", prog.display());
+            continue;
+         }
+         die(&format!("cosmo-shim: {} stalled {ATTEMPTS} times", prog.display()));
       };
-      let code = out.status.code().unwrap_or(1);
-      if attempt < ATTEMPTS && crashed(code, &out.stderr) {
+      if attempt < ATTEMPTS && crashed(code, &stderr) {
          eprintln!("cosmo-shim: {} crashed (status {code:#x}), retrying", prog.display());
          continue;
       }
-      let _ = std::io::Write::write_all(&mut std::io::stdout(), &out.stdout);
-      let _ = std::io::Write::write_all(&mut std::io::stderr(), &out.stderr);
+      let _ = std::io::Write::write_all(&mut std::io::stdout(), &stdout);
+      let _ = std::io::Write::write_all(&mut std::io::stderr(), &stderr);
       return code;
    }
    unreachable!()
+}
+
+#[cfg(not(windows))]
+fn execute(prog: &Path, mut cmd: Command) -> Option<(i32, Vec<u8>, Vec<u8>)> {
+   let out = cmd.output().unwrap_or_else(|e| die(&format!("cosmo-shim: {}: {e}", prog.display())));
+   Some((out.status.code().unwrap_or(1), out.stdout, out.stderr))
+}
+
+/// Run a command to completion, or return None if it stalls. The child goes in
+/// a job object so the CPU time of everything it starts (gcc's cc1, as, ld) is
+/// counted, and so killing it takes them down too. A tree that spends less than
+/// half a second of CPU in a minute is stuck: a stalled cc1 uses a few
+/// milliseconds a second, a working one close to a whole core.
+#[cfg(windows)]
+fn execute(prog: &Path, mut cmd: Command) -> Option<(i32, Vec<u8>, Vec<u8>)> {
+   use std::os::windows::io::AsRawHandle;
+   use std::process::Stdio;
+   use std::time::{Duration, Instant};
+
+   const PROGRESS: i64 = 5_000_000; // In 100 ns units.
+   const STALL: Duration = Duration::from_secs(60);
+
+   cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+   let mut child = cmd.spawn().unwrap_or_else(|e| die(&format!("cosmo-shim: {}: {e}", prog.display())));
+   let job = win::Job::new();
+   job.assign(child.as_raw_handle());
+
+   let mut out = child.stdout.take().unwrap();
+   let mut err = child.stderr.take().unwrap();
+   let out = std::thread::spawn(move || { let mut b = Vec::new(); let _ = out.read_to_end(&mut b); b });
+   let err = std::thread::spawn(move || { let mut b = Vec::new(); let _ = err.read_to_end(&mut b); b });
+
+   let mut mark = (Instant::now(), job.cpu());
+   let status = loop {
+      if win::wait(child.as_raw_handle(), 1000) {
+         break child.wait().ok();
+      }
+      let cpu = job.cpu();
+      if cpu - mark.1 >= PROGRESS {
+         mark = (Instant::now(), cpu);
+      } else if mark.0.elapsed() > STALL {
+         break None;
+      }
+   };
+   // Also reaps anything the child left behind still holding the pipes.
+   job.kill();
+   let _ = child.wait();
+   let (out, err) = (out.join().unwrap(), err.join().unwrap());
+   status.map(|s| (s.code().unwrap_or(1), out, err))
+}
+
+#[cfg(windows)]
+mod win {
+   use std::ffi::c_void;
+
+   type Handle = *mut c_void;
+
+   #[repr(C)]
+   #[derive(Default)]
+   struct BasicAccounting {
+      total_user_time: i64,
+      total_kernel_time: i64,
+      this_period_total_user_time: i64,
+      this_period_total_kernel_time: i64,
+      total_page_fault_count: u32,
+      total_processes: u32,
+      active_processes: u32,
+      total_terminated_processes: u32,
+   }
+
+   const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: i32 = 1;
+   const WAIT_OBJECT_0: u32 = 0;
+
+   #[link(name = "kernel32")]
+   extern "system" {
+      fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
+      fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+      fn QueryInformationJobObject(job: Handle, class: i32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
+      fn TerminateJobObject(job: Handle, code: u32) -> i32;
+      fn WaitForSingleObject(handle: Handle, ms: u32) -> u32;
+      fn CloseHandle(handle: Handle) -> i32;
+   }
+
+   pub struct Job(Handle);
+
+   impl Job {
+      pub fn new() -> Job {
+         Job(unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) })
+      }
+
+      pub fn assign(&self, process: Handle) {
+         unsafe { AssignProcessToJobObject(self.0, process) };
+      }
+
+      /// User plus kernel time of every process that has been in the job.
+      pub fn cpu(&self) -> i64 {
+         let mut info = BasicAccounting::default();
+         let len = std::mem::size_of::<BasicAccounting>() as u32;
+         let ptr = &mut info as *mut BasicAccounting as *mut c_void;
+         unsafe { QueryInformationJobObject(self.0, JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION, ptr, len, std::ptr::null_mut()) };
+         info.total_user_time + info.total_kernel_time
+      }
+
+      pub fn kill(&self) {
+         unsafe { TerminateJobObject(self.0, 1) };
+      }
+   }
+
+   impl Drop for Job {
+      fn drop(&mut self) {
+         unsafe { CloseHandle(self.0) };
+      }
+   }
+
+   /// Whether the process exited within `ms` milliseconds.
+   pub fn wait(process: Handle, ms: u32) -> bool {
+      unsafe { WaitForSingleObject(process, ms) == WAIT_OBJECT_0 }
+   }
 }
 
 /// Whether a run died rather than failed. gcc exits 4 when a program it

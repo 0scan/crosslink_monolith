@@ -100,6 +100,16 @@ fn cargo(
    cmd.current_dir(manifest_dir);
    scrub(&mut cmd);
 
+   // With the outer jobserver scrubbed, the inner cargo would run a job per
+   // core, and cc-rs as many compilers per C++ crate; rocksdb alone then takes
+   // several GB. The outer -j comes through as NUM_JOBS. A --jobs in `args`
+   // still wins over the env var.
+   if std::env::var_os("CARGO_BUILD_JOBS").is_none() {
+      if let Ok(jobs) = std::env::var("NUM_JOBS") {
+         cmd.env("CARGO_BUILD_JOBS", jobs);
+      }
+   }
+
    // cfg(cosmo) lets a crate pick a cosmo-specific code path, and gates the
    // cosmo-compat dependency. Appended to, not replacing, any RUSTFLAGS set.
    let flags = std::env::var("COSMO_RUSTFLAGS").unwrap_or_default();
