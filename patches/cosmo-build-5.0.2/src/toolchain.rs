@@ -132,7 +132,8 @@ fn assimilate(cosmocc: &Path) -> Result<(), String> {
    // there, which parses the APE header, and every tool in the chain that
    // spawns another (gcc -> cc1, as, ld) is itself a cosmo program whose execve
    // knows how to launch an APE. The tools stay APEs and run through the shell.
-   if cfg!(target_os = "macos") {
+   // Nor on Windows, where an APE is also a PE and runs as one.
+   if cfg!(target_os = "macos") || cfg!(windows) {
       return Ok(());
    }
    let tool = cosmocc.join("bin").join("assimilate");
@@ -226,6 +227,7 @@ fn unzip(zip: &Path, into: &Path) -> Result<(), String> {
    let f = File::open(zip).map_err(|e| format!("{}: {e}", zip.display()))?;
    let mut ar = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", zip.display()))?;
 
+   let mut links = Vec::new();
    for i in 0..ar.len() {
       let mut entry = ar.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
       // enclosed_name rejects paths that escape the destination; a toolchain
@@ -248,14 +250,11 @@ fn unzip(zip: &Path, into: &Path) -> Result<(), String> {
       // them as regular files produces text files holding a path, which exec
       // cannot run. It goes unnoticed because the entries that matter most
       // resolve by another route, so the toolchain half-works.
-      #[cfg(unix)]
       if entry.unix_mode().map(|m| m & 0xf000 == 0xa000).unwrap_or(false) {
          let mut target = String::new();
          std::io::Read::read_to_string(&mut entry, &mut target)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-         let _ = fs::remove_file(&path);
-         std::os::unix::fs::symlink(&target, &path)
-            .map_err(|e| format!("{} -> {target}: {e}", path.display()))?;
+         links.push((path, target));
          continue;
       }
 
@@ -265,15 +264,54 @@ fn unzip(zip: &Path, into: &Path) -> Result<(), String> {
 
       // Every compiler, linker and APE in here needs its executable bit back;
       // zip carries the mode and the extractor has to honour it.
-      #[cfg(unix)]
       if entry.unix_mode().map(|m| m & 0o111 != 0).unwrap_or(false) {
          cache::set_exec(&path)?;
       }
    }
+
+   // Links name links, so they are made in passes until one makes no progress.
+   while !links.is_empty() {
+      let before = links.len();
+      let mut left = Vec::new();
+      for (path, target) in links {
+         if !link(&path, &target)? {
+            left.push((path, target));
+         }
+      }
+      if left.len() == before {
+         let (path, target) = &left[0];
+         return Err(format!("{} -> {target}: the link names nothing in the archive", path.display()));
+      }
+      links = left;
+   }
    Ok(())
 }
 
-fn run(cmd: &mut Command) -> Result<(), String> {
+#[cfg(unix)]
+fn link(path: &Path, target: &str) -> Result<bool, String> {
+   let _ = fs::remove_file(path);
+   std::os::unix::fs::symlink(target, path)
+      .map_err(|e| format!("{} -> {target}: {e}", path.display()))?;
+   Ok(true)
+}
+
+/// Windows makes creating a symlink a privilege, so the link becomes a hard link
+/// to the file it names, or a copy of it. False while that file is itself a link
+/// still to be made.
+#[cfg(not(unix))]
+fn link(path: &Path, target: &str) -> Result<bool, String> {
+   let src = path.parent().unwrap_or(Path::new("")).join(target);
+   if !src.is_file() {
+      return Ok(false);
+   }
+   let _ = fs::remove_file(path);
+   fs::hard_link(&src, path)
+      .or_else(|_| fs::copy(&src, path).map(|_| ()))
+      .map_err(|e| format!("{} -> {}: {e}", path.display(), src.display()))?;
+   Ok(true)
+}
+
+pub(crate) fn run(cmd: &mut Command) -> Result<(), String> {
    let out = cmd.output().map_err(|e| format!("{:?}: {e}", cmd.get_program()))?;
    if out.status.success() {
       return Ok(());

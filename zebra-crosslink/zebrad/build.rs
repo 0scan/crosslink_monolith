@@ -8,8 +8,13 @@ fn main() {
     #[cfg(feature = "ape")]
     apeify();
 
+    // The host decides whether embed-resource is here at all; the target decides
+    // whether its output belongs in the link. An APE's per-architecture builds
+    // run on a Windows host too, and cosmo's ld cannot take a Windows resource.
     #[cfg(windows)]
-    embed_icon_resource();
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_icon_resource();
+    }
     let mut emitter = Emitter::default();
     // Dependency instructions run nested `cargo metadata`, which cannot resolve
     // unpublished workspace versions during a multi-package publish.
@@ -98,54 +103,17 @@ fn embed_icon_resource() {
 /// Build zebrad again, once per architecture, and fuse the two ELFs into one
 /// Actually Portable Executable.
 ///
-/// cosmo-build drives the *link* through cosmocc but leaves C compilation to
-/// cc-rs, and this tree is full of it (rocksdb, zcash_script, secp256k1, ring,
-/// bzip2, lz4, zlib). cc-rs picks its compiler from the target triple, and
-/// nothing on the host answers to `*-unknown-cosmo`, so it is pointed at
-/// cosmocc's own cross compilers here. Setting them before `apeify()` is what
-/// makes them stick: cosmo-build scrubs the toolchain variables from the nested
-/// cargo's environment but passes everything else through, and by the time that
-/// cargo runs a build script cosmocc is unpacked.
+/// cosmo-build points cc-rs at cosmocc for the C and C++ in this tree (rocksdb,
+/// zcash_script, secp256k1, ring, bzip2, lz4, zlib); what is set here is only
+/// what this tree's C needs on top. Setting it before `apeify()` is what makes
+/// it stick: cosmo-build scrubs the toolchain variables from the nested cargo's
+/// environment but passes everything else through.
 #[cfg(feature = "ape")]
 fn apeify() {
     use std::{env, fs, path::PathBuf};
 
-    // Same default as cosmo-build's own Cache::locate.
-    let cosmo_home = env::var_os("COSMO_HOME").map(PathBuf::from).unwrap_or_else(|| {
-        let base = env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env::var("HOME").expect("HOME")).join(".cache"));
-        base.join("cargo-cosmo")
-    });
-    let bin = cosmo_home.join("cosmocc").join("bin");
-
-    // `<triple>-cc` is cosmocross, a shell script that adds what a bare
-    // `<arch>-linux-cosmo-gcc` knows nothing about: -nostdinc, the cosmopolitan
-    // include root, the normalize.inc prologue and the per-arch register
-    // reservations. `ar` has no such driver and is a bare APE -- no ELF magic,
-    // no shebang -- so execve refuses it and it needs a /bin/sh wrapper.
-    let wrappers = PathBuf::from(env::var("OUT_DIR").unwrap()).join("cosmocc-wrappers");
-    fs::create_dir_all(&wrappers).unwrap();
-
-    for (triple, arch) in [
-        ("x86_64-unknown-cosmo", "x86_64"),
-        ("aarch64-unknown-cosmo", "aarch64"),
-    ] {
-        let cc = cc_wrapper(&wrappers, &bin.join(format!("{triple}-cc")), ENDIAN_FIX);
-        let cxx = cc_wrapper(
-            &wrappers,
-            &bin.join(format!("{triple}-c++")),
-            &format!("{ENDIAN_FIX} -include algorithm {ROCKSDB_PLATFORM}"),
-        );
-        let ar = shell_wrapper(&wrappers, &bin.join(format!("{arch}-linux-cosmo-ar")));
-
-        // cc-rs accepts the triple with either dashes or underscores; set both.
-        for key in [triple.to_string(), triple.replace('-', "_")] {
-            set_if_unset(&format!("CC_{key}"), &cc);
-            set_if_unset(&format!("CXX_{key}"), &cxx);
-            set_if_unset(&format!("AR_{key}"), &ar);
-        }
-    }
+    append_env("COSMO_CFLAGS", ENDIAN_FIX);
+    append_env("COSMO_CXXFLAGS", &format!("{ENDIAN_FIX} -include algorithm {ROCKSDB_PLATFORM}"));
 
     // librocksdb-sys names its C++ runtime by triple: `stdc++` for anything
     // containing "linux", otherwise `c++`, set with cpp_link_stdlib, which beats
@@ -161,21 +129,14 @@ fn apeify() {
     let cxx_stub = PathBuf::from(env::var("OUT_DIR").unwrap()).join("cosmo-cxx-stub");
     fs::create_dir_all(&cxx_stub).unwrap();
     fs::write(cxx_stub.join("libc++.a"), b"!<arch>\n").unwrap();
-    let rustflags = env::var("COSMO_RUSTFLAGS").unwrap_or_default();
-    // Safety: build scripts are single-threaded here; nothing else in this
-    // process reads the environment concurrently.
-    #[allow(unsafe_code)]
-    unsafe {
-        env::set_var(
-            "COSMO_RUSTFLAGS",
-            format!(
-                "{rustflags} -L native={} --cfg mio_unsupported_force_poll_poll \
-                 --cfg mio_unsupported_force_waker_pipe",
-                cxx_stub.display()
-            )
-            .trim(),
-        )
-    };
+    append_env(
+        "COSMO_RUSTFLAGS",
+        &format!(
+            "-L native={} --cfg mio_unsupported_force_poll_poll \
+             --cfg mio_unsupported_force_waker_pipe",
+            cxx_stub.display()
+        ),
+    );
 
     // The nested build gets a fresh feature set, so anything the outer build
     // turned on that changes the binary would have to be named again. Nothing
@@ -196,7 +157,7 @@ fn apeify() {
     cosmo_build::apeify_with(&args);
 }
 
-/// Wrap a cosmocc compiler driver so C gets cosmo's `endian.h` and assembly does not.
+/// Makes C use cosmo's own `endian.h`.
 ///
 /// Cosmopolitan compiles OS-agnostically: `normalize.inc` undefines `__linux__`
 /// and friends on purpose, so one binary can run anywhere. C that sniffs the OS
@@ -205,9 +166,9 @@ fn apeify() {
 /// supported`. Defining that header's include guard makes it a no-op and
 /// force-including cosmo's own `endian.h` supplies the same macros for real.
 ///
-/// It has to be a wrapper rather than `CFLAGS_<triple>`, because cc-rs passes
-/// those to `.S` files too, and the assembler does not preprocess C: it reads
-/// the declarations in `endian.h` and reports every one as an unknown
+/// It goes in `COSMO_CFLAGS` rather than `CFLAGS_<triple>`, because cc-rs
+/// passes those to `.S` files too, and the assembler does not preprocess C: it
+/// reads the declarations in `endian.h` and reports every one as an unknown
 /// instruction. ring ships a lot of pregenerated assembly.
 ///
 /// C++ additionally gets `-include algorithm`. Cosmo's libcxx does not pull it
@@ -244,37 +205,7 @@ const ENDIAN_FIX: &str = "-DPORTABLE_ENDIAN_H__=1 -include endian.h";
 #[cfg(feature = "ape")]
 const ROCKSDB_PLATFORM: &str = "-DROCKSDB_PLATFORM_POSIX -DROCKSDB_LIB_IO_POSIX -DCYGWIN";
 
-#[cfg(feature = "ape")]
-fn cc_wrapper(dir: &std::path::Path, real: &std::path::Path, extra: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = dir.join(format!("wrap-{}", real.file_name().unwrap().to_string_lossy()));
-    let script = format!(
-        "#!/bin/sh\n\
-         for a in \"$@\"; do\n\
-         \tcase \"$a\" in *.S|*.s) exec {real} \"$@\" ;; esac\n\
-         done\n\
-         exec {real} {extra} \"$@\"\n",
-        real = real.display()
-    );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
-}
-
-/// Write a shell script in `dir` that runs `real` through /bin/sh, and hand back
-/// its path. Needed for cosmocc's APE tools, which cannot be execve'd.
-#[cfg(feature = "ape")]
-fn shell_wrapper(dir: &std::path::Path, real: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = dir.join(real.file_name().unwrap());
-    std::fs::write(&path, format!("#!/bin/sh\nexec /bin/sh {} \"$@\"\n", real.display())).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
-}
-
-/// Leave an explicit override alone; a caller who set `CC_<triple>` meant it.
+/// Append to a space-separated flags variable, keeping whatever the caller set.
 ///
 /// The workspace denies `unsafe_code`; the allow is scoped to this one function
 /// because `env::set_var` is unsafe only for its effect on other threads, and a
@@ -282,10 +213,9 @@ fn shell_wrapper(dir: &std::path::Path, real: &std::path::Path) -> std::path::Pa
 /// environment.
 #[cfg(feature = "ape")]
 #[allow(unsafe_code)]
-fn set_if_unset(key: &str, value: &std::path::Path) {
-    if std::env::var_os(key).is_none() {
-        // Safety: build scripts are single-threaded here; nothing else in this
-        // process reads the environment concurrently.
-        unsafe { std::env::set_var(key, value) };
-    }
+fn append_env(key: &str, value: &str) {
+    let old = std::env::var(key).unwrap_or_default();
+    // Safety: build scripts are single-threaded here; nothing else in this
+    // process reads the environment concurrently.
+    unsafe { std::env::set_var(key, format!("{old} {value}").trim()) };
 }

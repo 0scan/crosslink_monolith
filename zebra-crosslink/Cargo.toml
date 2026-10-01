@@ -374,6 +374,8 @@ path = "../patches/sqlx-sqlite-0.8.6"
 # cosmo's own calls (realpath -> readlink) skip cosmo-compat's translators; the
 # published 5.0.2 does not, and every fs::canonicalize fails on Windows. Must
 # move in lockstep with ../patches/cosmo-compat-5.0.2, which calls the renamed
-# symbols. From ShieldedLabs/cargo_cosmo; drop once a release carries it.
+# symbols. Its compiler and linker drivers are Rust rather than shell, so an APE
+# also builds on a Windows host. From ShieldedLabs/cargo_cosmo; drop once a
+# release carries both.
 [patch.crates-io.cosmo-build]
 path = "../patches/cosmo-build-5.0.2"
