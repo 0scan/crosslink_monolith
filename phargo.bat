@@ -26,11 +26,20 @@ if "%config%"=="Release" (
 
 if "%PH_SUBCOMMAND%"=="" ( echo PH_SUBCOMMAND not set, do not call this directly! && exit /b 1 )
 
-if /i not "%platform%"=="Win64" if /i not "%platform%"=="Linux" (
-    echo Unknown platform "%platform%", expected Win64 or Linux! && exit /b 1
+if /i not "%platform%"=="Win64" if /i not "%platform%"=="Linux" if /i not "%platform%"=="APE" (
+    echo Unknown platform "%platform%", expected Win64, Linux or APE! && exit /b 1
 )
 
 set "extra=%4 %5 %6 %7 %8 %9"
+
+rem cosmo-build ignores CARGO_TARGET_DIR: the finished .com lands in the package's own
+rem target\cosmo\<debug|release>, next to its per-architecture builds. On Windows cargo gives a
+rem check the same build-script environment as a build, so cosmo-build cannot tell it to skip
+rem the APE; it is told outright.
+if /i "%platform%"=="APE" (
+    set "flags=%flags% --features ape"
+    if /i "%PH_SUBCOMMAND%"=="check" set "COSMO_APE=0"
+)
 
 if /i "%platform%"=="Linux" goto :linux
 

@@ -18,6 +18,7 @@
 		<Platforms>
 			<Platform>Win64</Platform>
 			<Platform>Linux</Platform>
+			<Platform>APE</Platform>
 		</Platforms>
 		<AdditionalIncludePaths></AdditionalIncludePaths>
 		<Defines></Defines>
@@ -98,6 +99,44 @@
 				<ForceIncludes></ForceIncludes>
 				<PrioritiseFiles></PrioritiseFiles>
 			</ConfigAndPlatform>
+			<ConfigAndPlatform>
+				<Name>Debug:APE</Name>
+				<BuildCommand>..\phuild.bat zebra-crosslink $(Configuration) APE</BuildCommand>
+				<RebuildCommand></RebuildCommand>
+				<BuildFileCommand></BuildFileCommand>
+				<CleanCommand></CleanCommand>
+				<BuildWorkingDirectory>./zebra-crosslink</BuildWorkingDirectory>
+				<FileSyntaxCheckCommand></FileSyntaxCheckCommand>
+				<CancelBuild></CancelBuild>
+				<Exe></Exe>
+				<Args></Args>
+				<WorkingDirectory>./zebra-crosslink</WorkingDirectory>
+				<DebugCommand></DebugCommand>
+				<DebuggerExe></DebuggerExe>
+				<DebugSln></DebugSln>
+				<Defines></Defines>
+				<ForceIncludes></ForceIncludes>
+				<PrioritiseFiles></PrioritiseFiles>
+			</ConfigAndPlatform>
+			<ConfigAndPlatform>
+				<Name>Release:APE</Name>
+				<BuildCommand>..\phuild.bat zebra-crosslink $(Configuration) APE</BuildCommand>
+				<RebuildCommand></RebuildCommand>
+				<BuildFileCommand></BuildFileCommand>
+				<CleanCommand></CleanCommand>
+				<BuildWorkingDirectory>./zebra-crosslink</BuildWorkingDirectory>
+				<FileSyntaxCheckCommand></FileSyntaxCheckCommand>
+				<CancelBuild></CancelBuild>
+				<Exe></Exe>
+				<Args></Args>
+				<WorkingDirectory>./zebra-crosslink</WorkingDirectory>
+				<DebugCommand></DebugCommand>
+				<DebuggerExe></DebuggerExe>
+				<DebugSln></DebugSln>
+				<Defines></Defines>
+				<ForceIncludes></ForceIncludes>
+				<PrioritiseFiles></PrioritiseFiles>
+			</ConfigAndPlatform>
 			<Config>
 				<Name>Debug</Name>
 				<Defines></Defines>
@@ -112,6 +151,10 @@
 			</Platform>
 			<Platform>
 				<Name>Linux</Name>
+				<Defines></Defines>
+			</Platform>
+			<Platform>
+				<Name>APE</Name>
 				<Defines></Defines>
 			</Platform>
 		</ConfigProperties>
