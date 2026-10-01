@@ -870,6 +870,142 @@ fn key_bit(key: u32) -> Option<(bool, u128)> {
     else               { None }
 }
 
+/// The Win32 clipboard as CF_UNICODETEXT, for a native Windows build and for an
+/// APE that landed on Windows. Imports go through softer_gui's LoadLibraryW and
+/// GetProcAddress, which are already bound right for both kinds of build.
+#[cfg(any(target_os = "windows", cosmo))]
+mod win_clipboard {
+    use core::ffi::c_void;
+    use softer_gui::sys_win::{GetProcAddress, LoadLibraryW, wide, BOOL, HANDLE, HWND};
+
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+
+    // In a cosmo build `extern "system"` means SysV, so x86-64 must name the
+    // Microsoft convention outright (see softer_gui's win_fn_types).
+    macro_rules! fn_types {
+        ($( $name:ident = fn($($ty:ty),*) -> $ret:ty; )*) => { $(
+            #[cfg(all(cosmo, target_arch = "x86_64"))]
+            type $name = unsafe extern "win64" fn($($ty),*) -> $ret;
+            #[cfg(not(all(cosmo, target_arch = "x86_64")))]
+            type $name = unsafe extern "system" fn($($ty),*) -> $ret;
+        )* };
+    }
+
+    fn_types! {
+        FnOpenClipboard = fn(HWND) -> BOOL;
+        FnCloseClipboard = fn() -> BOOL;
+        FnEmptyClipboard = fn() -> BOOL;
+        FnGetClipboardData = fn(u32) -> HANDLE;
+        FnSetClipboardData = fn(u32, HANDLE) -> HANDLE;
+        FnGlobalAlloc = fn(u32, usize) -> HANDLE;
+        FnGlobalLock = fn(HANDLE) -> *mut c_void;
+        FnGlobalUnlock = fn(HANDLE) -> BOOL;
+        FnGlobalSize = fn(HANDLE) -> usize;
+        FnGlobalFree = fn(HANDLE) -> HANDLE;
+    }
+
+    struct Api {
+        open: FnOpenClipboard,
+        close: FnCloseClipboard,
+        empty: FnEmptyClipboard,
+        get_data: FnGetClipboardData,
+        set_data: FnSetClipboardData,
+        alloc: FnGlobalAlloc,
+        lock: FnGlobalLock,
+        unlock: FnGlobalUnlock,
+        size: FnGlobalSize,
+        free: FnGlobalFree,
+    }
+
+    unsafe fn sym<F: Copy>(m: HANDLE, name: &[u8]) -> Option<F> {
+        let f = unsafe { GetProcAddress(m, name.as_ptr()) };
+        if f.is_null() { return None; }
+        return Some(unsafe { core::mem::transmute_copy::<*const c_void, F>(&f) });
+    }
+
+    fn api() -> Option<&'static Api> {
+        static API: std::sync::OnceLock<Option<Api>> = std::sync::OnceLock::new();
+        return API.get_or_init(|| unsafe {
+            let user = LoadLibraryW(wide("user32.dll").as_ptr());
+            let kernel = LoadLibraryW(wide("kernel32.dll").as_ptr());
+            if user.is_null() || kernel.is_null() { return None; }
+            Some(Api {
+                open: sym(user, b"OpenClipboard\0")?,
+                close: sym(user, b"CloseClipboard\0")?,
+                empty: sym(user, b"EmptyClipboard\0")?,
+                get_data: sym(user, b"GetClipboardData\0")?,
+                set_data: sym(user, b"SetClipboardData\0")?,
+                alloc: sym(kernel, b"GlobalAlloc\0")?,
+                lock: sym(kernel, b"GlobalLock\0")?,
+                unlock: sym(kernel, b"GlobalUnlock\0")?,
+                size: sym(kernel, b"GlobalSize\0")?,
+                free: sym(kernel, b"GlobalFree\0")?,
+            })
+        }).as_ref();
+    }
+
+    pub fn active() -> bool {
+        #[cfg(cosmo)]
+        return softer_gui::sys_win::cosmo::is_windows();
+        #[cfg(not(cosmo))]
+        return true;
+    }
+
+    // Another process, often a clipboard manager reacting to the last change, can
+    // hold the clipboard open for a moment.
+    fn open(api: &Api) -> bool {
+        for _ in 0..10 {
+            if unsafe { (api.open)(core::ptr::null_mut()) } != 0 { return true; }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        return false;
+    }
+
+    pub fn get() -> Option<String> {
+        let api = api()?;
+        if !open(api) { return None; }
+        let mut text = None;
+        unsafe {
+            let h = (api.get_data)(CF_UNICODETEXT);
+            if !h.is_null() {
+                let p = (api.lock)(h) as *const u16;
+                if !p.is_null() {
+                    let units = std::slice::from_raw_parts(p, (api.size)(h) / 2);
+                    let n = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+                    text = Some(String::from_utf16_lossy(&units[..n]));
+                    (api.unlock)(h);
+                }
+            }
+            (api.close)();
+        }
+        return text;
+    }
+
+    pub fn set(text: &str) -> bool {
+        let Some(api) = api() else { return false; };
+        let units = wide(text);
+        if !open(api) { return false; }
+        let mut ok = false;
+        unsafe {
+            (api.empty)();
+            let h = (api.alloc)(GMEM_MOVEABLE, units.len() * 2);
+            if !h.is_null() {
+                let p = (api.lock)(h) as *mut u16;
+                if !p.is_null() {
+                    core::ptr::copy_nonoverlapping(units.as_ptr(), p, units.len());
+                    (api.unlock)(h);
+                    ok = !(api.set_data)(CF_UNICODETEXT, h).is_null();
+                }
+                // The system takes ownership of the memory only when SetClipboardData succeeds.
+                if !ok { (api.free)(h); }
+            }
+            (api.close)();
+        }
+        return ok;
+    }
+}
+
 impl InputCtx {
     fn key_pressed(&self, key: u32) -> bool {
         match key_bit(key) {
@@ -916,6 +1052,9 @@ impl InputCtx {
     }
 
     fn get_from_clipboard(&self) -> String {
+        #[cfg(any(target_os = "windows", cosmo))]
+        if win_clipboard::active() { return win_clipboard::get().unwrap_or_default(); }
+
         // An APE is built for cosmo even when it runs on macOS; try both clipboard
         // families there. Native Linux keeps X11 first.
         for (program, args) in [
@@ -935,6 +1074,9 @@ impl InputCtx {
 
     fn send_to_clipboard(&self, text: &str) -> bool {
         use std::io::Write;
+
+        #[cfg(any(target_os = "windows", cosmo))]
+        if win_clipboard::active() { return win_clipboard::set(text); }
 
         for (program, args) in [
             ("pbcopy", &[][..]),
