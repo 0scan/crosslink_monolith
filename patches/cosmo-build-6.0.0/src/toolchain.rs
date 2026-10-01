@@ -3,7 +3,7 @@
 use crate::cache::{self, Cache, CHANNEL};
 use crate::sha256::Sha256;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -69,7 +69,7 @@ pub fn ensure_rust() -> Result<(), String> {
 /// place to ship a gigabyte of GPL toolchain.
 pub fn ensure_cosmocc(cache: &Cache) -> Result<(), String> {
    if cache.bin("apelink").exists() {
-      return Ok(());
+      return patch_tools(&cache.cosmocc);
    }
    fs::create_dir_all(&cache.cosmocc).map_err(|e| format!("{}: {e}", cache.cosmocc.display()))?;
 
@@ -110,6 +110,80 @@ pub fn ensure_cosmocc(cache: &Cache) -> Result<(), String> {
          cache.cosmocc.display()
       ));
    }
+   patch_tools(&cache.cosmocc)
+}
+
+/// Patch two cosmo 4.0.2 runtime bugs out of every cosmocc tool, on Windows.
+/// Between them they made a few compiles in a hundred crash or hang, and long
+/// compiles on a busy machine nearly always. No later cosmocc exists to move to.
+///
+/// dlmalloc merges adjacent mmaps into one segment, and trimming the top of it
+/// munmaps a range that covers several of cosmo's Windows mappings and part of
+/// another. munmap releases the whole ones, fails on the part and returns an
+/// error, which dlmalloc reads as nothing released: it goes on allocating from
+/// freed pages. The next malloc there faults, and gcc's crash handler deadlocks
+/// on the malloc lock, so the compile hangs at zero CPU. `sys_trim` opens with
+/// `cmp $MAX_REQUEST, %rsi; jbe body; xor %eax, %eax; ret`; replacing the `jbe`
+/// with two nops makes it always report nothing released, which dlmalloc
+/// already handles. The tools are short-lived, so keeping freed memory costs
+/// nothing.
+///
+/// `_Exit` unmaps the process's signal word and then calls TerminateProcess,
+/// while the signal worker thread may still write through its pointer to it.
+/// A tool that loses that race dies with an access violation after finishing
+/// its work: gcc exits 0xc0000005, or reports `as` or cc1 "terminated" by
+/// SIGTRAP, the low byte of that status. TerminateProcess unmaps everything
+/// anyway, so the `call *UnmapViewOfFile` becomes a six-byte nop.
+///
+/// Both patches find their own instructions and no longer match once applied,
+/// so a cache patched by an older version picks up whichever it lacks. Unix
+/// has neither bug, so the tools are left alone there.
+fn patch_tools(cosmocc: &Path) -> Result<(), String> {
+   const SYS_TRIM: [u8; 12] = [0x48, 0x81, 0xfe, 0x7f, 0xff, 0xff, 0xff, 0x76, 0x05, 0x31, 0xc0, 0xc3];
+   // `lea -0x118(%rbp), %rax; mov %rax, __sig.process(%rip)`, then the call.
+   const EXIT_SWAP: [u8; 10] = [0x48, 0x8d, 0x85, 0xe8, 0xfe, 0xff, 0xff, 0x48, 0x89, 0x05];
+   const EXIT_NEXT: [u8; 7] = [0x48, 0x8d, 0x8d, 0xf0, 0xfe, 0xff, 0xff];
+   if !cfg!(windows) {
+      return Ok(());
+   }
+   let marker = cosmocc.join(".patched");
+   if marker.exists() {
+      return Ok(());
+   }
+   for path in walk(cosmocc) {
+      if !is_ape(&path) {
+         continue;
+      }
+      let data = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+      let mut edits: Vec<(usize, &[u8])> = Vec::new();
+      if let Some(at) = data.windows(SYS_TRIM.len()).position(|w| w == SYS_TRIM) {
+         edits.push((at + 7, &[0x90, 0x90]));
+      }
+      let unmap = data.windows(EXIT_SWAP.len()).enumerate().find_map(|(at, w)| {
+         let call = at + EXIT_SWAP.len() + 4;
+         let ok = w == EXIT_SWAP
+            && data.get(call..call + 2) == Some(&[0xff, 0x15])
+            && data.get(call + 6..call + 6 + EXIT_NEXT.len()) == Some(&EXIT_NEXT);
+         ok.then_some(call)
+      });
+      if let Some(at) = unmap {
+         edits.push((at, &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00]));
+      }
+      if edits.is_empty() {
+         continue;
+      }
+      // In place, because bin/ holds hard links that must all see the change.
+      let mut f = fs::OpenOptions::new()
+         .write(true)
+         .open(&path)
+         .map_err(|e| format!("{}: {e}", path.display()))?;
+      for (at, bytes) in edits {
+         f.seek(SeekFrom::Start(at as u64))
+            .and_then(|_| f.write_all(bytes))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+      }
+   }
+   File::create(&marker).map_err(|e| format!("{}: {e}", marker.display()))?;
    Ok(())
 }
 

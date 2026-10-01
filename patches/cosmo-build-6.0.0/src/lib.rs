@@ -19,7 +19,7 @@
 //! # undefined __wrap_* references. cfg(cosmo) is set only by this crate, so
 //! # ordinary builds neither resolve nor compile it.
 //! [target.'cfg(cosmo)'.dependencies]
-//! cosmo-compat = "5"
+//! cosmo-compat = "6"
 //!
 //! [lints.rust]
 //! unexpected_cfgs = { level = "allow", check-cfg = ['cfg(cosmo)'] }
