@@ -4582,3 +4582,7 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "cosmo-build"
+version = "6.0.3"

@@ -80,4 +80,4 @@ split-debuginfo = "unpacked"  # produce separate .pdb files
 # Its compiler and linker drivers are Rust rather than shell, so an APE also
 # builds on a Windows host.
 [patch.crates-io.cosmo-build]
-path = "../patches/cosmo-build-6.0.0"
+path = "../patches/cosmo-build-6.0.3"

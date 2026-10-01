@@ -1215,7 +1215,7 @@ checksum = "4df6f98652d30167eaeea34d77b730e07c8caba6df17bd4551842b9b8da01deb"
 
 [[package]]
 name = "cosmo-build"
-version = "6.0.0"
+version = "6.0.3"
 dependencies = [
  "ureq",
  "zip",

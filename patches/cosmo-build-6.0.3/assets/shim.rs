@@ -173,7 +173,11 @@ fn ld(arch: &str, args: Vec<String>) -> i32 {
    // Windows), and every canonicalize failed.
    let wraps: Vec<&str> = WRAPS.split_whitespace().collect();
    line.extend(wraps.iter().map(|w| format!("-Wl,--wrap={w}")));
-   line.extend(rest);
+   if wraps.is_empty() {
+      line.extend(rest);
+   } else {
+      line.extend(rest.into_iter().map(|a| native_rlib(arch, a, &wraps)));
+   }
    if wraps.is_empty() {
       line.push("-lcosmo".into());
    } else {
@@ -189,6 +193,62 @@ fn ld(arch: &str, args: Vec<String>) -> i32 {
    // shape apelink and the APE loader expect. Skipping it produces a binary
    // that links cleanly and then crashes on start.
    run(&bin("fixupobj"), &[output])
+}
+
+/// The same rename for the C code rustc bundles inside rlibs (rocksdb and its
+/// friends): those objects call the wrapped names too, and --wrap would route
+/// them through translators written for Rust's Linux-numbered ABI. C speaks
+/// cosmo's own host-numbered ABI, so its flags, errno values and struct layouts
+/// come back wrong -- stat's layout is the measured case, and it breaks the
+/// database that way. An rlib carrying native objects gets a renamed copy beside
+/// it, rebuilt when the rlib is newer, and that copy is linked instead. Pure Rust
+/// rlibs keep their references, which is what they want: those calls do need
+/// translating.
+fn native_rlib(arch: &str, arg: String, wraps: &[&str]) -> String {
+   if !arg.ends_with(".rlib") {
+      return arg;
+   }
+   let members = command(&bin(&format!("{arch}-linux-cosmo-ar")))
+      .arg("t")
+      .arg(&arg)
+      .output()
+      .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+      .unwrap_or_default();
+   let native = members.lines().map(str::trim_end).any(|m| m.ends_with(".o") && !m.ends_with(".rcgu.o"));
+   if !native {
+      return arg;
+   }
+
+   let out = format!("{arg}.native.a");
+   let modified = |p: &str| fs::metadata(p).and_then(|m| m.modified()).ok();
+   if modified(&out).is_some() && modified(&out) >= modified(&arg) {
+      return out;
+   }
+   let tmp = format!("{out}.{}", std::process::id());
+   let syms = format!("{tmp}.syms");
+   let text: String = wraps.iter().map(|w| format!("{w} __cosmo_real_{w}
+")).collect();
+   if let Err(e) = fs::write(&syms, text) {
+      die(&format!("cosmo-ld: {syms}: {e}"));
+   }
+   let code = run(
+      &bin(&format!("{arch}-linux-cosmo-objcopy")),
+      &[format!("--redefine-syms={syms}"), arg.clone(), tmp.clone()],
+   );
+   let _ = fs::remove_file(&syms);
+   if code != 0 {
+      let _ = fs::remove_file(&tmp);
+      die(&format!("cosmo-ld: renaming wrapped symbols in {arg} failed"));
+   }
+   // Another link may have put the same copy in place meanwhile, and Windows
+   // will not replace a file that is open.
+   if fs::rename(&tmp, &out).is_err() {
+      let _ = fs::remove_file(&tmp);
+      if !Path::new(&out).is_file() {
+         die(&format!("cosmo-ld: could not write {out}"));
+      }
+   }
+   out
 }
 
 /// cosmocross, the driver behind cosmocc's `<arch>-unknown-cosmo-cc` names,
@@ -528,18 +588,19 @@ fn split_response_file(text: &str) -> Vec<String> {
 /// is also valid shell; once cosmo-build has assimilated the toolchain into
 /// native ELF files, they exec directly.
 fn run(prog: &Path, args: &[String]) -> i32 {
-   let mut cmd = if cfg!(windows) || is_elf(prog) {
-      Command::new(prog)
-   } else {
-      let mut c = Command::new("/bin/sh");
-      c.arg(prog);
-      c
-   };
-   cmd.args(args);
-   match cmd.status() {
+   match command(prog).args(args).status() {
       Ok(s) => s.code().unwrap_or(1),
       Err(e) => die(&format!("cosmo-shim: {}: {e}", prog.display())),
    }
+}
+
+fn command(prog: &Path) -> Command {
+   if cfg!(windows) || is_elf(prog) {
+      return Command::new(prog);
+   }
+   let mut c = Command::new("/bin/sh");
+   c.arg(prog);
+   c
 }
 
 fn is_elf(path: &Path) -> bool {
