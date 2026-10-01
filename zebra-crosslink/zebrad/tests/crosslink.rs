@@ -954,8 +954,10 @@ fn crosslink_reject_pow_chain_fork_that_is_competing_against_a_shorter_finalized
     let miner_addr2 = zcash_keys::address::Address::Transparent(
         zcash_transparent::address::TransparentAddress::PublicKeyHash([1u8; 20]),
     );
-    for _ in 10..18 {
-        tf.push_instr_load_pow(&genb.next_block(&miner_addr2), SHOULD_FAIL);
+    // Refused at its first block; the rest wait on a parent that never commits.
+    for height in 10..18 {
+        let flags = if height == 10 { SHOULD_FAIL } else { SHOULD_DEFER };
+        tf.push_instr_load_pow(&genb.next_block(&miner_addr2), flags);
     }
     tf.push_instr_expect_pow_chain_length(15, 0);
 
@@ -1066,7 +1068,7 @@ fn crosslink_pow_follows_the_heaviest_chain_until_fin_moves_to_the_decided_branc
 
     // With `fin` on branch B, branch A is gone: a block extending it forks below the finalized
     // tip, which is the fork-choice floor as Zebra enforces it (§4.3, §6.3).
-    tf.push_instr_load_pow(&gen.next_block(&miner_addr), SHOULD_FAIL);
+    tf.push_instr_load_pow(&gen.next_block(&miner_addr), SHOULD_DEFER);
     tf.push_instr_expect_pow_chain_length(22, 0);
 
     test_bytes(tf.write_to_bytes());
@@ -1680,7 +1682,7 @@ fn crosslink_invalid_header_kills_peer_and_orphans_answer_at_once() {
 
     let parent = gen.next_block(&miner_addr);
     let orphan = gen.next_block(&miner_addr);
-    tf.push_instr_load_pow(&orphan, SHOULD_FAIL);
+    tf.push_instr_load_pow(&orphan, SHOULD_DEFER);
     tf.push_instr_expect_rejection_reason("not committed yet", 0);
     tf.push_instr_load_pow(&parent, 0);
     // The orphan commits right after its parent; a child of it commits only if it did.
@@ -2421,7 +2423,10 @@ fn diagram_scene_3(fork_flags: u32) -> (TF, Vec<Arc<Block>>, Vec<Arc<Block>>) {
         } else {
             fork.push(fork_gen.tip.clone());
         }
-        tf.push_instr_load_pow(fork.last().unwrap(), fork_flags);
+        // A refused fork is refused at its first block; the rest wait on a parent that never
+        // commits, so the node answers them pending.
+        let flags = if fork_flags != 0 && height > 4 { SHOULD_DEFER } else { fork_flags };
+        tf.push_instr_load_pow(fork.last().unwrap(), flags);
     }
 
     assert_eq!(pow.len(), 9);
