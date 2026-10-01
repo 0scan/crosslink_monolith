@@ -179,23 +179,27 @@ impl TFInstr {
         str += " (";
 
         match tf_read_instr(&bytes, instr) {
+            // Malformed blocks are what rejection tests load, so describing one must not panic:
+            // this runs in the panic hook and in the GUI's file viewer.
             Some(TestInstr::LoadPoW(block)) => {
-                str += &format!(
-                    "{} - {}, parent: {}",
-                    block.coinbase_height().unwrap().0,
-                    block.hash(),
-                    block.header.previous_block_hash
-                )
+                let height = match block.coinbase_height() {
+                    Some(height) => height.0.to_string(),
+                    None => "no height".to_string(),
+                };
+                str += &format!("{} - {}, parent: {}", height, block.hash(), block.header.previous_block_hash)
             }
-            Some(TestInstr::LoadPoS((block, fat_ptr))) => {
-                str += &format!(
-                    "{}, snapshot: {}, hdrs: [{} .. {}]",
-                    block.blake3_hash(),
-                    block.snapshot_block_hash(),
-                    BlockHash::from_header_data(&block.headers[0]),
-                    BlockHash::from_header_data(block.headers.last().unwrap())
-                )
-            }
+            Some(TestInstr::LoadPoS((block, fat_ptr))) => match (block.headers.first(), block.headers.last()) {
+                (Some(first), Some(last)) => {
+                    str += &format!(
+                        "{}, snapshot: {}, hdrs: [{} .. {}]",
+                        block.blake3_hash(),
+                        block.snapshot_block_hash(),
+                        BlockHash::from_header_data(first),
+                        BlockHash::from_header_data(last)
+                    )
+                }
+                _ => str += &format!("{}, no headers", block.blake3_hash()),
+            },
             Some(TestInstr::SetParams(params)) => {
                 str += &format!(
                     "{} {:?}",
@@ -249,6 +253,9 @@ impl TFInstr {
             if (instr.flags & SHOULD_FAIL) != 0 {
                 str += " SHOULD_FAIL";
             }
+            if (instr.flags & SHOULD_DEFER) != 0 {
+                str += " SHOULD_DEFER";
+            }
             str += " ]";
         }
 
@@ -262,6 +269,9 @@ impl TFInstr {
 
 // Flags
 pub const SHOULD_FAIL: u32 = 1 << 0;
+/// The block is held pending (an unknown parent, or a wait on BFT) rather than accepted or
+/// rejected. Overrides SHOULD_FAIL.
+pub const SHOULD_DEFER: u32 = 1 << 1;
 
 pub struct TF {
     pub instrs: Vec<TFInstr>,
@@ -558,23 +568,43 @@ impl TF {
 
     // Simple version, all in one go... for large files we'll want to break this up; get hdr &
     // get/stream instrs, then read data as needed
+    /// Every offset and length in the file is checked here, so nothing that later slices the
+    /// file can index out of bounds: the GUI opens arbitrary files, and a panic there aborts the
+    /// running node.
     pub fn read_from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let tf_hdr = match TFHdr::ref_from_prefix(&bytes[0..]) {
+        let tf_hdr = match TFHdr::ref_from_prefix(bytes) {
             Ok((hdr, _)) => hdr,
             Err(err) => return Err(err.to_string()),
         };
+        if &tf_hdr.magic != b"ZECCLTF0" {
+            return Err(format!("not a crosslink test file: magic {:?}", tf_hdr.magic));
+        }
+        if tf_hdr.instr_size as usize != size_of::<TFInstr>() {
+            return Err(format!(
+                "instruction size is {} bytes, this build reads {}",
+                tf_hdr.instr_size,
+                size_of::<TFInstr>()
+            ));
+        }
+        let instrs_o = match usize::try_from(tf_hdr.instrs_o) {
+            Ok(o) if o >= size_of::<TFHdr>() && o <= bytes.len() => o,
+            _ => return Err(format!("instructions start at {}, outside the file", tf_hdr.instrs_o)),
+        };
 
-        let read_instrs = <[TFInstr]>::ref_from_prefix_with_elems(
-            &bytes[tf_hdr.instrs_o as usize..],
-            tf_hdr.instrs_n as usize,
-        );
+        let read_instrs = <[TFInstr]>::ref_from_prefix_with_elems(&bytes[instrs_o..], tf_hdr.instrs_n as usize);
 
         let instrs = match read_instrs {
             Ok((instrs, _)) => instrs,
             Err(err) => return Err(err.to_string()),
         };
+        for (instr_i, instr) in instrs.iter().enumerate() {
+            let in_file = instr.data.o.checked_add(instr.data.size).is_some_and(|end| end <= bytes.len() as u64);
+            if !in_file {
+                return Err(format!("instruction {instr_i}'s data runs past the end of the file"));
+            }
+        }
 
-        let data = &bytes[size_of::<TFHdr>()..tf_hdr.instrs_o as usize];
+        let data = &bytes[size_of::<TFHdr>()..instrs_o];
 
         // TODO: just use slices, don't copy to vectors
         let tf = TF {
@@ -597,30 +627,42 @@ impl TF {
 
 // TODO: macro for a stringified condition
 fn test_check(flags: u32, condition: bool, message: &str) {
-    *TEST_LAST_CHECK.lock().unwrap() = Some((condition, message.to_string()));
-    let should_succeed = (flags & SHOULD_FAIL) == 0;
-    const SUCCESS_STRS: [&str; 2] = ["fail", "succeed"];
+    test_check_outcome(condition, condition == ((flags & SHOULD_FAIL) == 0), message);
+}
 
-    if condition != should_succeed {
+/// Records an instruction's outcome. `accepted` is what EXPECT_REJECTION_REASON reads back;
+/// `holds` is whether that outcome is the one the instruction's flags expected.
+fn test_check_outcome(accepted: bool, holds: bool, message: &str) {
+    *TEST_LAST_CHECK.lock().unwrap() = Some((accepted, message.to_string()));
+
+    if !holds {
         let test_instr_i = *TEST_INSTR_C.lock().unwrap();
         TEST_FAILED_INSTR_IDXS.lock().unwrap().push((test_instr_i, message.to_string()));
 
         match *TEST_CHECK_ASSERT.lock().unwrap() {
             0 => {},
-            1 => error!(
-                "test check should {} but actually {}ed, message:\n{}",
-                SUCCESS_STRS[should_succeed as usize],
-                SUCCESS_STRS[!should_succeed as usize],
-                message
-            ),
-            _ => panic!(
-                "test check should {} but actually {}ed (and TEST_CHECK_ASSERT enabled), message:\n{}",
-                SUCCESS_STRS[should_succeed as usize],
-                SUCCESS_STRS[!should_succeed as usize],
-                message
-            ),
+            1 => error!("test check did not hold, message:\n{}", message),
+            _ => panic!("test check did not hold (and TEST_CHECK_ASSERT enabled), message:\n{}", message),
         }
     }
+}
+
+/// A delivered block meets its instruction's expectation: accepted by default, rejected under
+/// SHOULD_FAIL, held pending under SHOULD_DEFER. An `Err` (no verdict came back) meets none of
+/// them, so a node that stopped answering cannot pass for one that rejected.
+fn check_ingest(flags: u32, label: &str, outcome: Result<zebra_state::new_network::IngestOutcome, String>) {
+    use zebra_state::new_network::IngestOutcome;
+    let expect_pending = flags & SHOULD_DEFER != 0;
+    let expect_rejected = !expect_pending && flags & SHOULD_FAIL != 0;
+    let expect_accepted = !expect_pending && !expect_rejected;
+    let (accepted, holds, message) = match outcome {
+        Ok(IngestOutcome::Committed(_)) => (true, expect_accepted, format!("{label}accepted: PoW ingest ok")),
+        Ok(IngestOutcome::Known { .. }) => (true, expect_accepted, format!("{label}accepted: PoW already known")),
+        Ok(IngestOutcome::Failed { reason, .. }) => (false, expect_rejected, format!("{label}rejected: {reason}")),
+        Ok(IngestOutcome::Pending { reason }) => (false, expect_pending, format!("{label}pending: {reason}")),
+        Err(reason) => (false, false, format!("{label}no verdict: {reason}")),
+    };
+    test_check_outcome(accepted, holds, &message);
 }
 
 use crate::*;
@@ -791,22 +833,23 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
         }
         TFInstr::EXPECT_POS_CHAIN_LENGTH => Some(TestInstr::ExpectPoSChainLength(instr.val[0])),
 
-        TFInstr::EXPECT_POW_BLOCK_FINALITY => Some(TestInstr::ExpectPoWBlockFinality(
-            ZebBlockHash(
-                instr
-                    .data_slice(bytes)
-                    .try_into()
-                    .expect("should be 32 bytes for hash"),
-            ),
-            finality_from_val(&instr.val),
-        )),
+        TFInstr::EXPECT_POW_BLOCK_FINALITY => {
+            // finality_from_val panics on an unknown code, and the code comes from the file.
+            if instr.val[0] != 0 && instr.val[1] > TF_CANT_BE_FINALIZED {
+                return None;
+            }
+            Some(TestInstr::ExpectPoWBlockFinality(
+                ZebBlockHash(instr.data_slice(bytes).try_into().ok()?),
+                finality_from_val(&instr.val),
+            ))
+        }
 
         TFInstr::ROSTER_FORCE_INCLUDE => Some(TestInstr::RosterForceInclude(
-            instr.data_slice(bytes).try_into().expect("32-byte array"),
+            instr.data_slice(bytes).try_into().ok()?,
             instr.val[0],
         )),
         TFInstr::EXPECT_ROSTER_INCLUDES => Some(TestInstr::ExpectRosterIncludes(
-            instr.data_slice(bytes).try_into().expect("32-byte array"),
+            instr.data_slice(bytes).try_into().ok()?,
             instr.val[0],
         )),
 
@@ -854,10 +897,9 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             peer: instr.val[0],
         }),
 
-        _ => {
-            panic!("Unrecognized instruction {}", instr.kind);
-            None
-        }
+        // An instruction this build doesn't know. The caller decides whether that is fatal
+        // (a test) or skippable (the fuzzer, the GUI viewer).
+        _ => None,
     }
 }
 
@@ -903,29 +945,32 @@ pub(crate) async fn handle_instr(
             // let mut file = std::fs::File::create(&path).expect("valid file");
             // file.write_all(instr.data_slice(bytes));
 
-            let (force_feed_ok, msg) = ingest_pow(Arc::new(block)).await;
-            test_check(flags, force_feed_ok, &msg);
+            // Through new_network's ingest queue, the doorway submitblock uses, so blocks take
+            // the production admission path rather than a parallel one.
+            let outcome = zebra_state::new_network::submit_block_to_new_network(Arc::new(block), NODE_ANSWER_WAIT).await;
+            check_ingest(flags, "", outcome);
         }
 
-        TestInstr::MineFromTemplate => {
-            let (accepted, message) = match internal_handle.call.block_from_template.get() {
-                None => (false, "MINE_FROM_TEMPLATE: the node has no RPC implementation to take a template from".to_string()),
-                Some(block_from_template) => match block_from_template().await {
-                    Err(err) => (false, format!("MINE_FROM_TEMPLATE: {err}")),
-                    Ok(block) => {
-                        let label = format!(
-                            "MINE_FROM_TEMPLATE {} @ {:?}, {} transaction(s)",
-                            block.hash(),
-                            block.coinbase_height().map(|height| height.0),
-                            block.transactions.len()
-                        );
-                        let (accepted, verdict) = ingest_pow(Arc::new(block)).await;
-                        (accepted, format!("{label}: {verdict}"))
-                    }
-                },
-            };
-            test_check(flags, accepted, &message);
-        }
+        TestInstr::MineFromTemplate => match internal_handle.call.block_from_template.get() {
+            None => check_ingest(
+                flags,
+                "MINE_FROM_TEMPLATE: ",
+                Err("the node has no RPC implementation to take a template from".to_string()),
+            ),
+            Some(block_from_template) => match block_from_template().await {
+                Err(err) => check_ingest(flags, "MINE_FROM_TEMPLATE: ", Err(err)),
+                Ok(block) => {
+                    let label = format!(
+                        "MINE_FROM_TEMPLATE {} @ {:?}, {} transaction(s): ",
+                        block.hash(),
+                        block.coinbase_height().map(|height| height.0),
+                        block.transactions.len()
+                    );
+                    let outcome = zebra_state::new_network::submit_block_to_new_network(Arc::new(block), NODE_ANSWER_WAIT).await;
+                    check_ingest(flags, &label, outcome);
+                }
+            },
+        },
 
         TestInstr::LoadPoS((block, fat_ptr)) => {
             // let path = format!("../crosslink-test-data/test_pos_block_{}.bin", instr_i);
@@ -933,11 +978,23 @@ pub(crate) async fn handle_instr(
             // let mut file = std::fs::File::create(&path).expect("valid file");
             // file.write_all(instr.data_slice(bytes)).expect("write success");
 
-            let (force_feed_ok, msg) = match zebra_state::new_network::bft::force_feed_bft_block(Arc::new(block), fat_ptr).await {
-                Ok(()) => (true, "PoS force feed ok".to_string()),
-                Err(msg) => (false, msg),
-            };
-            test_check(flags, force_feed_ok, &msg);
+            // A force-feed is decided or refused at once, so it is never pending: SHOULD_DEFER
+            // cannot hold. Not reaching the BFT loop at all is no verdict, as for LOAD_POW.
+            let expect_rejected = flags & SHOULD_DEFER == 0 && flags & SHOULD_FAIL != 0;
+            let expect_accepted = flags & SHOULD_DEFER == 0 && !expect_rejected;
+            let answer = tokio::time::timeout(
+                NODE_ANSWER_WAIT,
+                zebra_state::new_network::bft::force_feed_bft_block(Arc::new(block), fat_ptr),
+            )
+            .await;
+            match answer {
+                Ok(Ok(())) => test_check_outcome(true, expect_accepted, "accepted: PoS force feed ok"),
+                Ok(Err(msg)) if msg.starts_with("new_network ") => {
+                    test_check_outcome(false, false, &format!("no verdict: {msg}"))
+                }
+                Ok(Err(msg)) => test_check_outcome(false, expect_rejected, &format!("rejected: {msg}")),
+                Err(_) => test_check_outcome(false, false, &format!("no verdict: no answer within {NODE_ANSWER_WAIT:?}")),
+            }
         }
 
         TestInstr::SetParams(params) => {
@@ -1014,19 +1071,23 @@ pub(crate) async fn handle_instr(
             test_check(flags, accepted, &message);
         }
 
-        TestInstr::RecvPoW { block, peer } => {
-            let mut stp = take_stp_peer(peer);
-            let (accepted, message) = serve_block(internal_handle, &mut stp, &block).await;
-            put_stp_peer(stp);
-            test_check(flags, accepted, &message);
-        }
+        TestInstr::RecvPoW { block, peer } => match take_stp_peer(peer) {
+            Err(err) => check_ingest(flags, "RECV_POW: ", Err(err)),
+            Ok(mut stp) => {
+                let outcome = serve_block(internal_handle, &mut stp, &block).await;
+                put_stp_peer(stp);
+                check_ingest(flags, "RECV_POW: ", outcome);
+            }
+        },
 
-        TestInstr::RecvStpPacket { packet, peer } => {
-            let mut stp = take_stp_peer(peer);
-            let (survived, message) = deliver_stp_packet(&mut stp, packet).await;
-            put_stp_peer(stp);
-            test_check(flags, survived, &message);
-        }
+        TestInstr::RecvStpPacket { packet, peer } => match take_stp_peer(peer) {
+            Err(err) => test_check_outcome(false, false, &format!("RECV_STP_PACKET: {err}")),
+            Ok(mut stp) => {
+                let (survived, message) = deliver_stp_packet(&mut stp, packet).await;
+                put_stp_peer(stp);
+                test_check(flags, survived, &message);
+            }
+        },
 
         TestInstr::ExpectMempoolContains(transaction) => {
             let (holds, message) = await_mempool(internal_handle, &transaction, MempoolExpect::Resident).await;
@@ -1252,27 +1313,15 @@ const STP_PACKET_SETTLE: Duration = Duration::from_secs(1);
 /// so there is no verdict to wait for, only a kill to rule out.
 const KNOWN_BLOCK_SETTLE: Duration = Duration::from_secs(2);
 
-/// Through new_network's ingest queue, the doorway submitblock uses, so blocks take the
-/// production admission path rather than a parallel one.
-async fn ingest_pow(block: Arc<Block>) -> (bool, String) {
-    use zebra_state::new_network::IngestOutcome;
-    match zebra_state::new_network::submit_block_to_new_network(block, NODE_ANSWER_WAIT).await {
-        Ok(IngestOutcome::Committed(_)) => (true, "PoW ingest ok".to_string()),
-        Ok(IngestOutcome::Known { .. }) => (true, "PoW already known".to_string()),
-        Ok(IngestOutcome::Failed { reason, .. }) => (false, reason),
-        // The block stays queued and may commit later, but the ingest did not.
-        Ok(IngestOutcome::Pending { reason }) => (false, reason),
-        Err(msg) => (false, msg),
-    }
-}
-
-fn take_stp_peer(index: u64) -> HarnessStpPeer {
+fn take_stp_peer(index: u64) -> Result<HarnessStpPeer, String> {
     let mut peers = TEST_STP_PEERS.lock().unwrap();
     if let Some(i) = peers.iter().position(|p| p.index == index) {
-        return peers.swap_remove(i);
+        return Ok(peers.swap_remove(i));
     }
-    let link_index = u16::try_from(index).expect("synthetic peer indices fit in 16 bits");
-    HarnessStpPeer { index, link: zebra_state::new_network::attach_synthetic_peer(link_index), killed: None }
+    let Ok(link_index) = u16::try_from(index) else {
+        return Err(format!("synthetic peer index {index} does not fit in 16 bits"));
+    };
+    Ok(HarnessStpPeer { index, link: zebra_state::new_network::attach_synthetic_peer(link_index), killed: None })
 }
 
 fn put_stp_peer(peer: HarnessStpPeer) {
@@ -1317,41 +1366,53 @@ async fn deliver_stp_packet(stp: &mut HarnessStpPeer, packet: Vec<u8>) -> (bool,
 }
 
 /// Plays a peer that has `wire_block`: advertises it, then answers the node's requests for it.
-async fn serve_block(internal_handle: &TFLServiceHandle, stp: &mut HarnessStpPeer, wire_block: &[u8]) -> (bool, String) {
+/// A kill is a rejection: the node refused the peer, and the block with it. `Err` is a delivery
+/// that never reached a verdict.
+async fn serve_block(
+    internal_handle: &TFLServiceHandle,
+    stp: &mut HarnessStpPeer,
+    wire_block: &[u8],
+) -> Result<zebra_state::new_network::IngestOutcome, String> {
     use zebra_state::new_network::{
         block_chunk_packets, parse_block_request, status_packet, IngestOutcome, NearTipChains, ShadowBlock,
         SyntheticPeerEvent,
     };
     let index = stp.index;
+    let killed = |reason: String| Ok(IngestOutcome::Failed { reason, misbehavior_score: 0 });
     let Ok(block) = Block::zcash_deserialize(wire_block) else {
-        return (false, "RECV_POW: the block does not parse, so no STATUS can advertise it; send its packets with RECV_STP_PACKET".to_string());
+        return Err("the block does not parse, so no STATUS can advertise it; send its packets with RECV_STP_PACKET".to_string());
     };
     let hash = block.hash();
     let Some(height) = block.coinbase_height().map(|height| height.0) else {
-        return (false, format!("RECV_POW: block {hash} has no coinbase height, so no STATUS can advertise it"));
+        return Err(format!("block {hash} has no coinbase height, so no STATUS can advertise it"));
     };
 
     drain_stp_peer(stp);
     if let Some(reason) = &stp.killed {
-        return (false, format!("RECV_POW: peer {index} was already killed: {reason}"));
+        return killed(format!("peer {index} was already killed: {reason}"));
     }
 
-    let already_known = matches!(
-        tokio::time::timeout(NODE_ANSWER_WAIT, (internal_handle.call.state)(StateRequest::KnownBlock(hash))).await,
-        Ok(Ok(StateResponse::KnownBlock(Some(_))))
-    );
+    let already_known = match tokio::time::timeout(
+        NODE_ANSWER_WAIT,
+        (internal_handle.call.state)(StateRequest::KnownBlock(hash)),
+    )
+    .await
+    {
+        Ok(Ok(StateResponse::KnownBlock(Some(known)))) => Some(known),
+        _ => None,
+    };
 
     let mut chains = NearTipChains::default();
     chains.push_chain_unchecked(vec![ShadowBlock { this_hash: hash, parent_hash: block.header.previous_block_hash, this_height: height }]);
     let _ = stp.link.inbound.send(status_packet(&[], &chains, None));
 
-    let deadline = tokio::time::Instant::now() + if already_known { KNOWN_BLOCK_SETTLE } else { NODE_ANSWER_WAIT };
+    let deadline = tokio::time::Instant::now() + if already_known.is_some() { KNOWN_BLOCK_SETTLE } else { NODE_ANSWER_WAIT };
     let (mut requests, mut chunks) = (0usize, 0usize);
     loop {
         tokio::select! {
             packet = stp.link.outbound.recv() => {
                 let Some(packet) = packet else {
-                    return (false, "RECV_POW: the sync loop is gone".to_string());
+                    return Err("the sync loop is gone".to_string());
                 };
                 let Some((req_height, req_hash, offset)) = parse_block_request(&packet) else {
                     continue; // STATUS, address gossip, hole punching: a real peer would handle these, but they don't bear on this block
@@ -1368,28 +1429,21 @@ async fn serve_block(internal_handle: &TFLServiceHandle, stp: &mut HarnessStpPee
             event = stp.link.events.recv() => match event {
                 Some(SyntheticPeerEvent::Killed(reason)) => {
                     stp.killed = Some(reason.clone());
-                    return (false, format!("RECV_POW: the node killed peer {index}: {reason}"));
+                    return killed(format!("the node killed peer {index}: {reason}"));
                 }
                 Some(SyntheticPeerEvent::Outcome { hash: decided, outcome }) if decided == hash => {
-                    return match outcome {
-                        IngestOutcome::Committed(_) => (true, "PoW ingest ok".to_string()),
-                        IngestOutcome::Known { .. } => (true, "PoW already known".to_string()),
-                        IngestOutcome::Failed { reason, .. } => (false, reason),
-                        // As LOAD_POW reports it: the block stays queued, but the ingest failed.
-                        IngestOutcome::Pending { reason } => (false, reason),
-                    };
+                    return Ok(outcome);
                 }
                 Some(_) => {}
-                None => return (false, "RECV_POW: the sync loop is gone".to_string()),
+                None => return Err("the sync loop is gone".to_string()),
             },
             _ = tokio::time::sleep_until(deadline) => {
-                if already_known && requests == 0 {
-                    return (true, "PoW already known".to_string());
+                if let (Some(known), 0) = (&already_known, requests) {
+                    return Ok(IngestOutcome::Known { location: known.location.clone(), height: known.height });
                 }
-                return (
-                    false,
-                    format!("RECV_POW: no verdict on {hash} @ {height} within {NODE_ANSWER_WAIT:?}; the node sent {requests} request(s) for it, answered with {chunks} chunk(s)"),
-                );
+                return Err(format!(
+                    "{hash} @ {height} after {NODE_ANSWER_WAIT:?}; the node sent {requests} request(s) for it, answered with {chunks} chunk(s)"
+                ));
             }
         }
     }
@@ -1503,7 +1557,18 @@ pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs
         //     instrs[instr_i].kind
         // );
 
-        if let Some(instr) = uhh_option(tf_read_instr(bytes, &instrs[instr_i]), on_fail) {
+        let parsed = tf_read_instr(bytes, &instrs[instr_i]);
+        if parsed.is_none() {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "test format: instruction {instr_i} ({}, kind {}) does not parse",
+                    TFInstr::str_from_kind(instrs[instr_i].kind),
+                    instrs[instr_i].kind
+                );
+            }
+        }
+        if let Some(instr) = uhh_option(parsed, on_fail) {
             let height = match &instr {
                 TestInstr::LoadPoW(block) => block.coinbase_height().map(|height| height.0),
                 TestInstr::RecvPoW { block, .. } => Block::zcash_deserialize(&block[..])

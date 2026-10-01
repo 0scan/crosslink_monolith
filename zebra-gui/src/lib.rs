@@ -1183,7 +1183,10 @@ pub fn open_window() -> Option<Window> {
         let t = WINDOW_TITLE.lock().unwrap();
         if t.is_empty() { "Zcash Crosslink Visualizer".to_string() } else { t.clone() }
     };
-    softer_gui::open(&title, "org.zfnd.crosslink_visualizer", 1600, 900)
+    let mut opts = softer_gui::Options::from_env();
+    // GDI by default: the D3D pump in softer_gui 4.0.0 and earlier ignores request_frame, so the first RENDER we let go by unpresented stops the window drawing for good. Remove once the dependency carries the fix; SOFTER_GUI_WIN=d3d still selects D3D meanwhile.
+    if opts.backend == softer_gui::Backend_::Auto { opts.backend = softer_gui::Backend_::Gdi; }
+    softer_gui::open_with(&title, "org.zfnd.crosslink_visualizer", 1600, 900, opts)
 }
 
 pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::WalletState>>, fake_data: bool, should_stop: impl Fn() -> bool) {
