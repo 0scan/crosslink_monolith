@@ -3875,6 +3875,12 @@ where
                 Ok(SubmitBlockErrorResponse::Rejected.into())
             }
 
+            // Held until its parent or a BFT decision arrives; it may still commit.
+            Ok(zebra_state::new_network::IngestOutcome::Pending { reason }) => {
+                tracing::info!(?block_hash, ?height, ?reason, "submit block held in the commit queue");
+                Ok(SubmitBlockErrorResponse::Inconclusive.into())
+            }
+
             Err(error) => {
                 tracing::warn!(?block_hash, ?height, ?error, "submit block could not be ingested");
                 Ok(SubmitBlockErrorResponse::Rejected.into())

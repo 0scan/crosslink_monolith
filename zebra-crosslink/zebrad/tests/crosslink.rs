@@ -1653,6 +1653,44 @@ fn crosslink_recv_pow_over_stp() {
     test_bytes(tf.write_to_bytes());
 }
 
+/// A block whose header is invalid cannot exist under its hash, so the peer serving it is killed.
+/// A block whose parent is unknown is answered at once, then committed when the parent arrives.
+#[test]
+fn crosslink_invalid_header_kills_peer_and_orphans_answer_at_once() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
+    let mut gen =
+        BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
+    tf.push_instr_load_pow(&gen.tip, 0);
+
+    let honest = gen.next_block(&miner_addr);
+    let mut bad = honest.as_ref().clone();
+    let mut bad_header = BlockHeader::clone(&bad.header);
+    bad_header.difficulty_threshold = work::difficulty::INVALID_COMPACT_DIFFICULTY;
+    bad.header = Arc::new(bad_header);
+    tf.push_instr_recv_pow(&bad, 0, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("header", 0);
+    tf.push_instr_recv_pow(&honest, 0, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("already killed", 0);
+    tf.push_instr_recv_pow(&honest, 1, 0);
+    tf.push_instr_expect_pow_chain_length(3, 0);
+
+    let parent = gen.next_block(&miner_addr);
+    let orphan = gen.next_block(&miner_addr);
+    tf.push_instr_load_pow(&orphan, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("not committed yet", 0);
+    tf.push_instr_load_pow(&parent, 0);
+    // The orphan commits right after its parent; a child of it commits only if it did.
+    tf.push_instr_load_pow(&gen.next_block(&miner_addr), 0);
+    tf.push_instr_expect_pow_chain_length(6, 0);
+    tf.push_instr_expect_node_alive(0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
 // NOTE: a staking action is the only transaction we can synthesize without spendable
 // UTXOs or shielded proofs: `has_inputs_and_outputs` waives the inputs/outputs rule for
 // it. The amount must be 0 unless the bond is funded: the per-tx value balance must be

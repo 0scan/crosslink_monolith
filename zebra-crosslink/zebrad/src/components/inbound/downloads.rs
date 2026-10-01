@@ -410,6 +410,9 @@ where
                 zebra_state::new_network::IngestOutcome::Failed { reason, .. } => {
                     Err(reason.into())
                 }
+                zebra_state::new_network::IngestOutcome::Pending { reason } => {
+                    Err(format!("gossiped block is held in the commit queue: {reason}").into())
+                }
             })
             .map(|hash| (hash, block_height))
             .map_err(|e| (e, advertiser_addr))

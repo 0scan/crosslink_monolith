@@ -1260,6 +1260,8 @@ async fn ingest_pow(block: Arc<Block>) -> (bool, String) {
         Ok(IngestOutcome::Committed(_)) => (true, "PoW ingest ok".to_string()),
         Ok(IngestOutcome::Known { .. }) => (true, "PoW already known".to_string()),
         Ok(IngestOutcome::Failed { reason, .. }) => (false, reason),
+        // The block stays queued and may commit later, but the ingest did not.
+        Ok(IngestOutcome::Pending { reason }) => (false, reason),
         Err(msg) => (false, msg),
     }
 }
@@ -1368,13 +1370,13 @@ async fn serve_block(internal_handle: &TFLServiceHandle, stp: &mut HarnessStpPee
                     stp.killed = Some(reason.clone());
                     return (false, format!("RECV_POW: the node killed peer {index}: {reason}"));
                 }
-                // As LOAD_POW reports it: a deferral is a failed ingest whose block stays queued.
-                Some(SyntheticPeerEvent::Deferred { hash: deferred, reason }) if deferred == hash => return (false, reason),
                 Some(SyntheticPeerEvent::Outcome { hash: decided, outcome }) if decided == hash => {
                     return match outcome {
                         IngestOutcome::Committed(_) => (true, "PoW ingest ok".to_string()),
                         IngestOutcome::Known { .. } => (true, "PoW already known".to_string()),
                         IngestOutcome::Failed { reason, .. } => (false, reason),
+                        // As LOAD_POW reports it: the block stays queued, but the ingest failed.
+                        IngestOutcome::Pending { reason } => (false, reason),
                     };
                 }
                 Some(_) => {}

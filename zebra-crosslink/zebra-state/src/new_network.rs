@@ -69,6 +69,11 @@ const PACKET_STATUS_MAX_SIZE:   usize = ((PACKET_STATUS_MAX_HASHES * 32 + JUMBO_
 
 const DOWNLOAD_UNMODIFIED_TIMEOUT_DUR: std::time::Duration = std::time::Duration::from_secs(8);
 
+// How long a block a peer served us that failed verification goes unrequested. The wait doubles
+// with each repeat failure of the same hash, up to the max.
+const REJECTED_BLOCK_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+const REJECTED_BLOCK_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(64);
+
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PacketHashTreeHdr {
     pub tip_height: u32,
@@ -1247,6 +1252,11 @@ pub enum IngestOutcome {
         reason: String,
         misbehavior_score: u32,
     },
+    /// Held in the commit queue, waiting on its parent or a BFT decision. It may still commit or
+    /// fail later; a submitter hears nothing more.
+    Pending {
+        reason: String,
+    },
 }
 
 /// A block submitted from outside new_network, with a channel for the verdict.
@@ -1279,9 +1289,8 @@ pub struct SyntheticPeer {
 pub enum SyntheticPeerEvent {
     /// The node disconnected the peer for misbehaving. The peer stays disconnected.
     Killed(String),
-    /// A block the peer delivered is waiting on something outside it (a BFT decision).
-    Deferred { hash: Hash, reason: String },
-    /// A block the peer delivered left the commit queue with this verdict.
+    /// What became of a block the peer delivered. A block held in the commit queue reports
+    /// `Pending` once, then its final verdict when it leaves.
     Outcome { hash: Hash, outcome: IngestOutcome },
 }
 
@@ -1434,6 +1443,93 @@ pub async fn submit_block_to_new_network(
     }
 }
 
+// The fate table: one entry per block in blocks_to_commit, holding everyone owed word of what
+// becomes of it. Blocks leave the queue only through settle_fate(), so nobody is left waiting.
+#[derive(Default)]
+struct BlockFate {
+    reply: Option<tokio::sync::oneshot::Sender<IngestOutcome>>,
+    delivered_by: Option<ConnectionKey>,
+    cheap_checks: Option<CheapBlockChecks>,
+    pending_told: bool,
+}
+
+impl BlockFate {
+    fn tell(&mut self, synthetic_peers: &[SyntheticPeerLink], hash: Hash, outcome: IngestOutcome) {
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(outcome.clone());
+        }
+        if let Some(key) = self.delivered_by {
+            tell_synthetic_peer(synthetic_peers, key, hash, outcome);
+        }
+    }
+
+    fn tell_pending(&mut self, synthetic_peers: &[SyntheticPeerLink], hash: Hash, reason: std::fmt::Arguments) {
+        if !self.pending_told {
+            self.pending_told = true;
+            self.tell(synthetic_peers, hash, IngestOutcome::Pending { reason: reason.to_string() });
+        }
+    }
+}
+
+/// Takes the block's entry out of the fate table and answers everyone waiting on it. Returns the
+/// peer that delivered it.
+fn settle_fate(fates: &mut HashMap<Hash, BlockFate>, synthetic_peers: &[SyntheticPeerLink], hash: Hash, outcome: IngestOutcome) -> Option<ConnectionKey> {
+    let mut fate = fates.remove(&hash).expect("every queued block has a fate");
+    fate.tell(synthetic_peers, hash, outcome);
+    fate.delivered_by
+}
+
+fn tell_synthetic_peer(synthetic_peers: &[SyntheticPeerLink], key: ConnectionKey, hash: Hash, outcome: IngestOutcome) {
+    if let Some(synthetic) = synthetic_peers.iter().find(|p| p.address.connection_key() == key) {
+        let _ = synthetic.events.send(SyntheticPeerEvent::Outcome { hash, outcome });
+    }
+}
+
+fn known_outcome(read_state: &ReadState, hash: Hash) -> Option<IngestOutcome> {
+    read_state.known_block(hash).map(|known| IngestOutcome::Known { location: known.location, height: known.height })
+}
+
+// A peer-served block that failed verification. Its hash goes unrequested until `retry_at` rather
+// than being banned: the hash covers only the header, and a forged body or forged signatures can
+// sit under an honest block's hash, so a ban would let any peer keep us off the honest block.
+struct Rejection {
+    strikes: u32,
+    retry_at: std::time::Instant,
+}
+
+fn note_rejection(rejections: &mut HashMap<Hash, Rejection>, hash: Hash) {
+    let now = std::time::Instant::now();
+    let rejection = rejections.entry(hash).or_insert(Rejection { strikes: 0, retry_at: now });
+    rejection.strikes += 1;
+    let backoff = REJECTED_BLOCK_BACKOFF_MIN.saturating_mul(1 << (rejection.strikes - 1).min(16));
+    rejection.retry_at = now + backoff.min(REJECTED_BLOCK_BACKOFF_MAX);
+}
+
+fn is_backing_off(rejections: &HashMap<Hash, Rejection>, hash: Hash) -> bool {
+    rejections.get(&hash).is_some_and(|rejection| std::time::Instant::now() < rejection.retry_at)
+}
+
+fn kill_peer(
+    current_connections: &mut Vec<(STPAddress, [u8; 64])>,
+    recent_peer_addresses: &mut HashMap<u16, HashMap<STPAddress, RecentPeerAddress>>,
+    synthetic_peers: &mut [SyntheticPeerLink],
+    local_addresses_secret: u64,
+    address: &STPAddress,
+    reason: String,
+) {
+    tracing::error!("NewNet: Killing peer {:?}: {}", address, reason);
+    let key = address.connection_key();
+    current_connections.retain(|(addr, _)| addr.connection_key() != key);
+    let kill_bucket = address_bucket(local_addresses_secret, address) & (MAX_RECENT_BUCKETS - 1);
+    if let Some(recents) = recent_peer_addresses.get_mut(&(kill_bucket as u16)) {
+        recents.remove(address);
+    }
+    if let Some(synthetic) = synthetic_peers.iter_mut().find(|p| p.address.connection_key() == key) {
+        synthetic.alive = false;
+        let _ = synthetic.events.send(SyntheticPeerEvent::Killed(reason));
+    }
+}
+
 // Which cached block to evict when the cache is full. The queue is kept sorted by height,
 // and the low blocks are the next in line to commit, so evict from the top: prefer the
 // highest block whose parent is neither committed nor queued (a tail that can't commit any
@@ -1482,9 +1578,9 @@ pub fn sync(
             Err(err) => panic!("could not commit genesis block: {err}"),
         }
     }
-    // Replies live beside blocks_to_commit rather than inside it, so the existing queue and
-    // its eviction logic are untouched.
-    let mut submission_replies: HashMap<Hash, tokio::sync::oneshot::Sender<IngestOutcome>> = HashMap::new();
+    let mut fates: HashMap<Hash, BlockFate> = HashMap::new();
+    let mut rejections: HashMap<Hash, Rejection> = HashMap::new();
+    let mut peers_to_kill: Vec<(ConnectionKey, String)> = Vec::new();
 
     {
         let ((tip_height, tip_hash), (finalized_tip_height, finalized_tip_hash)) = get_tips_blocking(&read_state);
@@ -1531,8 +1627,6 @@ pub fn sync(
     let mut initiate_connections = Vec::<STPAddress>::new();
     let mut packets_to_send: Vec<(ConnectionKey, Vec<u8>)> = Vec::new();
     let mut synthetic_peers: Vec<SyntheticPeerLink> = Vec::new();
-    // Which synthetic peer delivered each queued block, so its verdict can be reported back.
-    let mut synthetic_delivered: HashMap<Hash, ConnectionKey> = HashMap::new();
 
     // Parse and connect to initial peers
     let mut initial_peer_addresses: Vec<STPAddress> = Vec::new();
@@ -1568,11 +1662,6 @@ pub fn sync(
     let mut blocks_to_commit:  Vec<(Hash, std::sync::Arc<Block>)>     = Vec::new();
     let mut blocks_to_send:    Vec<(ConnectionKey, Hash, u32, usize)> = Vec::new();
     let mut serialized_blocks: HashMap<Hash, Vec<u8>>             = HashMap::new(); // @Todo: cap max memory storage size for this map.
-    // crosslink-deferred blocks get a commit re-attempt every tick; header+body checks are
-    // deterministic per block, so cache the pass rather than re-running PoW etc. on every
-    // retry. also how first attempts are told apart from retries, for logging.
-    // swept against blocks_to_commit at the end of each tick.
-    let mut cheap_checks_memo: HashMap<Hash, CheapBlockChecks> = HashMap::new();
 
     use rand::Rng;
     let local_addresses_secret: u64 = rand::thread_rng().gen();
@@ -1713,7 +1802,7 @@ pub fn sync(
                     }
 
                     blocks_to_commit.push((hash, block));
-                    submission_replies.insert(hash, reply);
+                    fates.insert(hash, BlockFate { reply: Some(reply), ..Default::default() });
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(err) => { tracing::error!("block submission queue: {err:?}"); break; }
@@ -2064,6 +2153,10 @@ pub fn sync(
         if std::time::Instant::now() >= next_dl_init { 'init_dls: {
             next_dl_init = std::time::Instant::now() + dl_init_interval;
 
+            // An entry outlives its backoff by the max, so a hash failing again soon after keeps
+            // its strike count and waits longer.
+            rejections.retain(|_, rejection| std::time::Instant::now() < rejection.retry_at + REJECTED_BLOCK_BACKOFF_MAX);
+
             // Same deal as the STATUS block: built here, used here, dropped here.
             let Some(near_tip_chains) = near_tip_chains_from_state(&read_state) else {
                 tracing::warn!("NewNet: no tip yet; skipping download init");
@@ -2179,7 +2272,7 @@ pub fn sync(
                         break;
                     }
                     let dups = requests_by_hash.entry(hash).or_insert(0);
-                    if *dups >= MAX_REQUEST_DUPLICATES_N {
+                    if *dups >= MAX_REQUEST_DUPLICATES_N || is_backing_off(&rejections, hash) {
                         continue;
                     }
                     let request = HeightAndHashOr0 {
@@ -2364,6 +2457,9 @@ pub fn sync(
                                     if TRACE { tracing::info!("Skipped requesting block already in our queue. Peer {connection_address:?}. Hash: {hash}"); }
                                     continue;
                                 }
+                                if is_backing_off(&rejections, hash) {
+                                    continue;
+                                }
 
                                 // We may submit the same block multiple times (visit >1 of our chains that share a short prefix with their branch), and that's valid
                                 let height_hash = HeightAndHashOr0 {
@@ -2537,16 +2633,7 @@ pub fn sync(
             }
             macro_rules! kill {
                 ($($arg:tt)*) => {{
-                    tracing::error!("{}", format!("NewNet: Killing peer {:?}: {}", connection_address, format!($($arg)*)).to_string());
-                    current_connections.retain(|(addr, _)| addr.connection_key() != connection_key);
-                    let kill_bucket = address_bucket(local_addresses_secret, &connection_address) & (MAX_RECENT_BUCKETS - 1);
-                    if let Some(recents) = recent_peer_addresses.get_mut(&(kill_bucket as u16)) {
-                        recents.remove(&connection_address);
-                    }
-                    if let Some(synthetic) = synthetic_peers.iter_mut().find(|p| p.address.connection_key() == connection_key) {
-                        synthetic.alive = false;
-                        let _ = synthetic.events.send(SyntheticPeerEvent::Killed(format!($($arg)*)));
-                    }
+                    kill_peer(&mut current_connections, &mut recent_peer_addresses, &mut synthetic_peers, local_addresses_secret, &connection_address, format!($($arg)*));
                     dbg_panic!();
                 }};
             }
@@ -2735,6 +2822,23 @@ pub fn sync(
                 // the block is deserialized; the height checks below run then instead.
                 let height_is_alleged = alleged_height != u32::MAX;
 
+                // Real peers get no reply when we drop a block they served, but a synthetic peer
+                // is told what became of it.
+                macro_rules! drop_block {
+                    ($hash:expr, $($arg:tt)*) => {{
+                        let hash = $hash;
+                        warning!($($arg)*);
+                        let outcome = if let Some(known) = known_outcome(&read_state, hash) {
+                            known
+                        } else if blocks_to_commit.iter().any(|(queued, _)| *queued == hash) {
+                            IngestOutcome::Known { location: crate::response::KnownBlockLocation::Queue, height: block::Height(alleged_height) }
+                        } else {
+                            IngestOutcome::Failed { reason: format!($($arg)*), misbehavior_score: 0 }
+                        };
+                        tell_synthetic_peer(&synthetic_peers, connection_key, hash, outcome);
+                    }};
+                }
+
                 // @Note: Skip blocks older than the base of the window we advertise. Depending on
                 // whether NEAR_TIP_CHAIN_LEN is < or > Zebra's MAX_BLOCK_REORG_HEIGHT, being below
                 // it *may* or *may not* imply the block is "not even worth" submitting to Zebra
@@ -2745,14 +2849,14 @@ pub fn sync(
                 // if TRACE { tracing::info!("Block @ {alleged_height}, offset {}...", hdr.offset); }
 
                 if height_is_alleged && alleged_height < min_height {
-                    warning!("Block at height {alleged_height} is below our near-tip-chain height {min_height}");
+                    drop_block!(hdr.height_hash.hash_or_0, "Block at height {alleged_height} is below our near-tip-chain height {min_height}");
                     peer.block_downloads.remove(dl_i);
                     continue 'process_packets; // Deciding that it's "not even worth" sending to Zebra
                 }
 
                 let finalized_height = read_state.finalized_tip().map_or(0, |(h, _)| h.0);
                 if height_is_alleged && alleged_height <= finalized_height {
-                    warning!("Block at height {alleged_height} is already finalized");
+                    drop_block!(hdr.height_hash.hash_or_0, "Block at height {alleged_height} is already finalized");
                     peer.block_downloads.remove(dl_i);
                     continue 'process_packets; // Definitely already committed :)
                 }
@@ -2800,13 +2904,13 @@ pub fn sync(
 
                 if !is_unproven_checkpoint_probe {
                     if blocks_to_commit.iter().any(|(queued_hash, _)| *queued_hash == alleged_hash) {
-                        warning!("Block was already queued to commit!: {alleged_hash}");
+                        drop_block!(alleged_hash, "Block was already queued to commit!: {alleged_hash}");
                         peer.block_downloads.remove(dl_i);
                         continue 'process_packets;
                     }
 
                     if read_state.known_block(alleged_hash).is_some() {
-                        warning!("Block was already committed!: {alleged_hash}");
+                        drop_block!(alleged_hash, "Block was already committed!: {alleged_hash}");
                         peer.block_downloads.remove(dl_i);
                         continue 'process_packets;
                     }
@@ -2900,11 +3004,11 @@ pub fn sync(
                 if !height_is_alleged {
                     // Deferred height checks for a by-hash request (see `height_is_alleged`).
                     if height.0 < min_height {
-                        warning!("Block at height {} is below our near-tip-chain height {min_height}", height.0);
+                        drop_block!(hash, "Block at height {} is below our near-tip-chain height {min_height}", height.0);
                         continue 'process_packets;
                     }
                     if height.0 <= finalized_height {
-                        warning!("Block at height {} is already finalized", height.0);
+                        drop_block!(hash, "Block at height {} is already finalized", height.0);
                         continue 'process_packets;
                     }
                 }
@@ -2914,7 +3018,7 @@ pub fn sync(
                 // wrong fork still share all their pre-fork blocks with us.
                 if let Some(cp) = &checkpoint {
                     if cp.rejects(height.0, hash) {
-                        warning!("block {hash} @ {} conflicts with checkpoint {} @ {}; dropping block", height.0, cp.hash, cp.height);
+                        drop_block!(hash, "block {hash} @ {} conflicts with checkpoint {} @ {}; dropping block", height.0, cp.hash, cp.height);
                         continue 'process_packets;
                     }
                     if hash == cp.hash {
@@ -2923,6 +3027,7 @@ pub fn sync(
                         // re-run the dup checks skipped for probes; don't queue the block twice
                         if blocks_to_commit.iter().any(|(queued_hash, _)| *queued_hash == hash)
                             || read_state.known_block(hash).is_some() {
+                            drop_block!(hash, "Checkpoint block {hash} is already queued or committed");
                             continue 'process_packets;
                         }
                     }
@@ -2936,16 +3041,18 @@ pub fn sync(
                 // a peer still advertises it, so this is a cost, not a correctness issue.
                 if blocks_to_commit.len() >= MAX_DEFERRED_BLOCKS {
                     if let Some(evict_i) = eviction_index(&blocks_to_commit, &read_state) {
-                        let evicted = blocks_to_commit.remove(evict_i);
-                        warning!("Block cache full ({MAX_DEFERRED_BLOCKS}); evicting: {}", evicted.0);
+                        let (evicted, _) = blocks_to_commit.remove(evict_i);
+                        warning!("Block cache full ({MAX_DEFERRED_BLOCKS}); evicting: {}", evicted);
+                        settle_fate(&mut fates, &synthetic_peers, evicted, IngestOutcome::Failed {
+                            reason: "evicted from the full commit queue".to_string(),
+                            misbehavior_score: 0,
+                        });
                     }
                 }
 
                 println!("Queueing for commit: {}", hash);
                 blocks_to_commit.push((hash, std::sync::Arc::new(block)));
-                if synthetic_peers.iter().any(|p| p.address.connection_key() == connection_key) {
-                    synthetic_delivered.insert(hash, connection_key);
-                }
+                fates.insert(hash, BlockFate { delivered_by: Some(connection_key), ..Default::default() });
             } else {
                 warning!("NewNet: Got unknown msg type={} len={}, ignoring.", packet_type, msg.len());
                 continue 'process_packets;
@@ -2993,8 +3100,10 @@ pub fn sync(
             let block_arc = block_arc.clone();
 
             let parent_hash = block_arc.header.previous_block_hash;
+            let fate = fates.get_mut(&hash).expect("every queued block has a fate");
 
             if read_state.known_block(parent_hash).is_none() {
+                fate.tell_pending(&synthetic_peers, hash, format_args!("parent {parent_hash} is not committed yet"));
                 return true; // keep
             }
 
@@ -3002,7 +3111,7 @@ pub fn sync(
 
             let height = block_arc.coinbase_height().expect("all blocks in the commit queue should already have been confirmed to have a height").0;
             // a deferred block gets retried every tick; only narrate the first attempt
-            let first_attempt = !cheap_checks_memo.contains_key(&hash);
+            let first_attempt = fate.cheap_checks.is_none();
             if first_attempt { println!("Committing: @ {height}, {hash}"); }
             // Verify synchronously, immediately before committing. This must NOT run at
             // packet-receipt time: the block that created the outputs this one spends may still
@@ -3017,18 +3126,19 @@ pub fn sync(
                 // crosslink gate -> expensive. The crosslink gate MUST come after the body:
                 // it makes permanent, height-keyed decisions, and until the merkle root is
                 // checked the height is not bound to the PoW'd header.
-                let cheap_result = if let Some(cheap) = cheap_checks_memo.get(&hash) {
+                let cheap_result = if let Some(cheap) = &fate.cheap_checks {
                     Ok(cheap.clone())
                 } else {
                     let res = (verify_fns.check_header)(&block_arc.header, &network, block::Height(height), zebra_debug_time::now(), check_pow)
-                        .and_then(|()| (verify_fns.check_body)(&block_arc, &network, block::Height(height)));
+                        .map_err(|err| ("header", err))
+                        .and_then(|()| (verify_fns.check_body)(&block_arc, &network, block::Height(height)).map_err(|err| ("body", err)));
                     if let Ok(cheap) = &res {
-                        cheap_checks_memo.insert(hash, cheap.clone());
+                        fate.cheap_checks = Some(cheap.clone());
                     }
                     res
                 };
                 match cheap_result {
-                    Err(err) => Err(("cheap", err.msg, false)),
+                    Err((phase, err)) => Err((phase, err, false)),
                     Ok(cheap) => {
                         // Crosslink fat-pointer gate, mirroring the state service's version
                         // (:CrosslinkGate in service.rs). Three-way:
@@ -3077,9 +3187,9 @@ pub fn sync(
                         match gate {
                             // Reversible: the BFT block has not arrived. Hold the block and
                             // re-check next tick rather than dropping and re-downloading it.
-                            None => Err(("crosslink", defer_msg, true)),
+                            None => Err(("crosslink", BlockVerifyError { msg: defer_msg, misbehavior_score: 0 }, true)),
                             // Permanent, per the gate's own documentation. Drop it.
-                            Some(crate::CrosslinkVerdict::Reject) => Err(("crosslink", "fat pointer regressed or is too early".to_string(), false)),
+                            Some(crate::CrosslinkVerdict::Reject) => Err(("crosslink", BlockVerifyError { msg: "fat pointer regressed or is too early".to_string(), misbehavior_score: 0 }, false)),
                             // `pos_payout` travels with the block to `Chain::push`: the gate is the
                             // only place that resolves the certificate and what it finalizes.
                             Some(crate::CrosslinkVerdict::Accept { pos_payout }) => {
@@ -3103,7 +3213,7 @@ pub fn sync(
                                     verify_fns, block_arc.clone(), network, cheap.clone(), spent_utxos,
                                 ) else { return true; };
                                 match result {
-                                    Err(err) => Err(("expensive", err.msg, false)),
+                                    Err(err) => Err(("expensive", err, false)),
                                     Ok(new_outputs) => Ok((cheap, new_outputs, pos_payout)),
                                 }
                             }
@@ -3116,6 +3226,14 @@ pub fn sync(
             // reply for teardown rather than reporting a bad peer or starting a write.
             // Once handle_commit starts, it and all bookkeeping below must finish.
             if zebra_chain::shutdown::is_shutting_down() { return true; }
+
+            // A deferrable verdict means "not yet", not "no": keep the block so the next tick
+            // can retry it, instead of dropping it and paying for another download.
+            if let Err((phase, err, true)) = &verdict {
+                if first_attempt { println!("Deferring: @ {height}, {hash}: {phase}: {}", err.msg); }
+                fate.tell_pending(&synthetic_peers, hash, format_args!("{phase}: {}", err.msg));
+                return true; // keep
+            }
 
             // The sync path now GATES the commit: a rejection here means the block is never
             // submitted. The old route (verifier router -> StateService -> queue_and_commit ->
@@ -3143,49 +3261,39 @@ pub fn sync(
                             }
                         })
                 }
-                Err((phase, msg, _)) => Err(BlockCommitError::Other(format!("{phase}: {msg}"))),
+                Err((phase, err, _)) => Err(BlockCommitError::Other(format!("{phase}: {}", err.msg))),
             };
 
             let outcome = match (&verdict, &res) {
                 (_, Ok(committed)) => IngestOutcome::Committed(*committed),
-                (_, Err(BlockCommitError::Duplicate)) => IngestOutcome::Known {
+                (_, Err(BlockCommitError::Duplicate)) => known_outcome(&read_state, hash).unwrap_or(IngestOutcome::Known {
                     location: crate::response::KnownBlockLocation::BestChain,
                     height: block::Height(height),
-                },
-                (Err((phase, msg, _)), _) => IngestOutcome::Failed {
-                    reason: format!("{phase}: {msg}"),
-                    misbehavior_score: 0,
+                }),
+                (Err((phase, err, _)), _) => IngestOutcome::Failed {
+                    reason: format!("{phase}: {}", err.msg),
+                    misbehavior_score: err.misbehavior_score,
                 },
                 (_, Err(BlockCommitError::Other(why))) => IngestOutcome::Failed {
                     reason: why.clone(),
                     misbehavior_score: 0,
                 },
             };
-            if let Some(reply) = submission_replies.remove(&hash) {
-                let _ = reply.send(outcome.clone());
-            }
+            let failed = matches!(outcome, IngestOutcome::Failed { .. });
+            let delivered_by = settle_fate(&mut fates, &synthetic_peers, hash, outcome);
 
-            if let Some(key) = synthetic_delivered.get(&hash).copied() {
-                let deferred = matches!(&verdict, Err((_, _, true)));
-                if let Some(synthetic) = synthetic_peers.iter().find(|p| p.address.connection_key() == key) {
-                    let event = match &verdict {
-                        Err((phase, msg, true)) => first_attempt.then(|| SyntheticPeerEvent::Deferred { hash, reason: format!("{phase}: {msg}") }),
-                        _ => Some(SyntheticPeerEvent::Outcome { hash, outcome }),
-                    };
-                    if let Some(event) = event {
-                        let _ = synthetic.events.send(event);
+            // Only a bad header gets the peer killed: the hash commits to the header and nothing
+            // else, so the peer advertised a block that cannot exist. A bad body may be forged
+            // under an honest block's hash, and the same peer may still serve the honest one.
+            if let Some(key) = delivered_by {
+                if failed {
+                    note_rejection(&mut rejections, hash);
+                }
+                if let Err(("header", err, _)) = &verdict {
+                    if err.misbehavior_score > 0 {
+                        peers_to_kill.push((key, format!("served block {hash} with an invalid header: {}", err.msg)));
                     }
                 }
-                if !deferred {
-                    synthetic_delivered.remove(&hash);
-                }
-            }
-
-            // A deferrable verdict means "not yet", not "no": keep the block so the next tick
-            // can retry it, instead of dropping it and paying for another download.
-            if let Err((phase, msg, true)) = &verdict {
-                if first_attempt { println!("Deferring: @ {height}, {hash}: {phase}: {msg}"); }
-                return true; // keep
             }
 
             match res {
@@ -3217,6 +3325,11 @@ pub fn sync(
             let height = block.coinbase_height().map_or(0, |h| h.0);
             if height <= finalized_height {
                 if TRACE { tracing::info!("Dropping cached block @ {height} {hash}: at or below finalized {finalized_height}"); }
+                let outcome = known_outcome(&read_state, *hash).unwrap_or_else(|| IngestOutcome::Failed {
+                    reason: format!("height {height} is at or below the finalized height {finalized_height}"),
+                    misbehavior_score: 0,
+                });
+                settle_fate(&mut fates, &synthetic_peers, *hash, outcome);
                 return false;
             }
             true
@@ -3225,13 +3338,21 @@ pub fn sync(
         // Bound the cache. See MAX_DEFERRED_BLOCKS and eviction_index().
         while blocks_to_commit.len() > MAX_DEFERRED_BLOCKS {
             let Some(evict_i) = eviction_index(&blocks_to_commit, &read_state) else { break; };
-            let evicted = blocks_to_commit.remove(evict_i);
-            if TRACE { tracing::info!("Block cache full; evicting: {}", evicted.0); }
+            let (evicted, _) = blocks_to_commit.remove(evict_i);
+            if TRACE { tracing::info!("Block cache full; evicting: {}", evicted); }
+            settle_fate(&mut fates, &synthetic_peers, evicted, IngestOutcome::Failed {
+                reason: "evicted from the full commit queue".to_string(),
+                misbehavior_score: 0,
+            });
         }
+        debug_assert_eq!(fates.len(), blocks_to_commit.len());
 
-        // memoized cheap checks live exactly as long as their queue entry
-        cheap_checks_memo.retain(|hash, _| blocks_to_commit.iter().any(|(queued, _)| queued == hash));
-        synthetic_delivered.retain(|hash, _| blocks_to_commit.iter().any(|(queued, _)| queued == hash));
+        for (key, reason) in peers_to_kill.drain(..) {
+            if let Some((address, _)) = current_connections.iter().find(|(addr, _)| addr.connection_key() == key).cloned() {
+                kill_peer(&mut current_connections, &mut recent_peer_addresses, &mut synthetic_peers, local_addresses_secret, &address, reason);
+                dbg_panic!();
+            }
+        }
 
         let _ = any_blocks_in_the_queue_can_make_progress;
 

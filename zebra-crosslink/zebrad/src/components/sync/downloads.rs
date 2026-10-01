@@ -551,9 +551,9 @@ where
                 // system. It is built around wide concurrent verification (download concurrency
                 // 50, lookahead), whereas new_network commits serially from its tick loop, so
                 // blocks queue up behind each other instead of verifying in parallel. It also
-                // submits out of order, which new_network answers with a "dropped from the
-                // commit queue" rejection and relies on the syncer to retry. Functionally
-                // correct, but the shapes do not match.
+                // submits out of order, which new_network answers with a "held in the commit
+                // queue" rejection while it keeps the block for when the parent arrives.
+                // Functionally correct, but the shapes do not match.
                 let _ = verifier;
                 let mut rsp = zebra_state::new_network::submit_block_to_new_network(
                     block,
@@ -575,6 +575,16 @@ where
                         Err(BlockDownloadVerifyError::IngestRejected {
                             reason,
                             misbehavior_score,
+                            duplicate: false,
+                            height: block_height,
+                            hash,
+                            advertiser_addr,
+                        })
+                    }
+                    Ok(zebra_state::new_network::IngestOutcome::Pending { reason }) => {
+                        Err(BlockDownloadVerifyError::IngestRejected {
+                            reason: format!("held in the commit queue: {reason}"),
+                            misbehavior_score: 0,
                             duplicate: false,
                             height: block_height,
                             hash,

@@ -1332,12 +1332,12 @@ where
                 false
             }
 
-            // Out-of-order submissions are answered with a drop rather than being held: the
-            // syncer re-requests, so this is routine rather than a sync failure.
+            // Out-of-order submissions are held until their parent arrives, so this is routine
+            // rather than a sync failure.
             BlockDownloadVerifyError::IngestRejected { reason, .. }
-                if reason.contains("dropped from the commit queue") =>
+                if reason.contains("held in the commit queue") =>
             {
-                debug!(error = ?e, "block left the commit queue before its parent arrived, continuing");
+                debug!(error = ?e, "block is waiting in the commit queue, continuing");
                 false
             }
 
