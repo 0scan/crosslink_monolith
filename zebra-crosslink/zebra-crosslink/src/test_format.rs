@@ -304,8 +304,29 @@ pub fn val_from_finality(val: Option<TFLBlockFinality>) -> [u64; 2] {
     }
 }
 
+/// The file magic this build writes. Version 1 always writes the staking calendar in SET_PARAMS
+/// and may follow it with a node config fragment; version 0 files are still read.
+pub const TF_MAGIC: &[u8; 8] = b"ZECCLTF1";
+const TF_MAGIC_V0: &[u8; 8] = b"ZECCLTF0";
+
+/// 1 for a current file, 0 for one from before the format was versioned.
+fn file_version(bytes: &[u8]) -> u8 {
+    if bytes.starts_with(TF_MAGIC_V0) {
+        0
+    } else {
+        1
+    }
+}
+
 impl TF {
     pub fn new(params: &ZcashCrosslinkParameters) -> TF {
+        Self::new_with_node_config(params, "")
+    }
+
+    /// Also sets parts of the node's config: `node_config` is a zebrad.toml fragment, of which
+    /// the harness takes the `[network]` parameters (on regtest, under the Crosslink parameters
+    /// given here), the `[crosslink]` hardfork schedule, and `[state] network_checkpoint`.
+    pub fn new_with_node_config(params: &ZcashCrosslinkParameters, node_config: &str) -> TF {
         let mut tf = TF {
             instrs: Vec::new(),
             data: Vec::new(),
@@ -320,7 +341,7 @@ impl TF {
         tf.push_instr_ex(
             TFInstr::SET_PARAMS,
             0,
-            &params_to_bytes(bootstrap, staking),
+            &params_to_bytes(bootstrap, staking, node_config),
             [bc_confirmation_depth_sigma, 0],
         );
 
@@ -527,7 +548,7 @@ impl TF {
         let instrs_o_unaligned = size_of::<TFHdr>() + self.data.len();
         let instrs_o = Self::align_up(instrs_o_unaligned, align_of::<TFInstr>());
         let hdr = TFHdr {
-            magic: "ZECCLTF0".as_bytes().try_into().unwrap(),
+            magic: *TF_MAGIC,
             instrs_o: instrs_o as u64,
             instrs_n: self.instrs.len() as u32,
             instr_size: size_of::<TFInstr>() as u32,
@@ -576,7 +597,7 @@ impl TF {
             Ok((hdr, _)) => hdr,
             Err(err) => return Err(err.to_string()),
         };
-        if &tf_hdr.magic != b"ZECCLTF0" {
+        if &tf_hdr.magic != TF_MAGIC && &tf_hdr.magic != TF_MAGIC_V0 {
             return Err(format!("not a crosslink test file: magic {:?}", tf_hdr.magic));
         }
         if tf_hdr.instr_size as usize != size_of::<TFInstr>() {
@@ -740,7 +761,9 @@ fn short_calendar(params: &ZcashCrosslinkParameters) -> StakingParameters {
 const TF_BOOTSTRAP_SUPPLIED: u8 = 0;
 const TF_BOOTSTRAP_FROM_CHAIN: u8 = 1;
 
-fn params_to_bytes(bootstrap: BftBootstrap, staking: StakingParameters) -> Vec<u8> {
+/// The calendar is always written: a file that leaves it out means whatever the prototype
+/// calendar is when it is read, and that changed under every stored file once (00565513).
+fn params_to_bytes(bootstrap: BftBootstrap, staking: StakingParameters, node_config: &str) -> Vec<u8> {
     let mut bytes = match bootstrap {
         BftBootstrap::Supplied => vec![TF_BOOTSTRAP_SUPPLIED],
         BftBootstrap::FromChain { staking_height, roster_height, activation_height } => {
@@ -751,27 +774,48 @@ fn params_to_bytes(bootstrap: BftBootstrap, staking: StakingParameters) -> Vec<u
             bytes
         }
     };
-    if staking != PROTOTYPE_STAKING {
-        for value in [staking.period, staking.day_window, staking.action_delay] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
+    for value in [staking.period, staking.day_window, staking.action_delay] {
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
+    bytes.extend_from_slice(node_config.as_bytes());
     bytes
 }
 
-fn params_from_bytes(bytes: &[u8]) -> Option<(BftBootstrap, StakingParameters)> {
-    let (bootstrap, rest) = match bytes {
-        [TF_BOOTSTRAP_SUPPLIED, rest @ ..] => (BftBootstrap::Supplied, rest),
-        [TF_BOOTSTRAP_FROM_CHAIN, s0, s1, s2, s3, r0, r1, r2, r3, a0, a1, a2, a3, rest @ ..] => (
+/// The SET_PARAMS payload of a file of `version`: bootstrap, calendar, node config fragment.
+fn params_from_bytes(bytes: &[u8], version: u8) -> Option<(BftBootstrap, StakingParameters, String)> {
+    if version == 0 {
+        let (bootstrap, staking) = params_from_bytes_v0(bytes)?;
+        return Some((bootstrap, staking, String::new()));
+    }
+    let (bootstrap, rest) = bootstrap_from_bytes(bytes)?;
+    if rest.len() < 12 {
+        return None;
+    }
+    let word = |i: usize| u32::from_le_bytes(rest[4 * i..4 * i + 4].try_into().expect("four bytes"));
+    let staking = StakingParameters { period: word(0), day_window: word(1), action_delay: word(2) };
+    let node_config = String::from_utf8(rest[12..].to_vec()).ok()?;
+    Some((bootstrap, staking, node_config))
+}
+
+fn bootstrap_from_bytes(bytes: &[u8]) -> Option<(BftBootstrap, &[u8])> {
+    match bytes {
+        [TF_BOOTSTRAP_SUPPLIED, rest @ ..] => Some((BftBootstrap::Supplied, rest)),
+        [TF_BOOTSTRAP_FROM_CHAIN, s0, s1, s2, s3, r0, r1, r2, r3, a0, a1, a2, a3, rest @ ..] => Some((
             BftBootstrap::FromChain {
                 staking_height: u32::from_le_bytes([*s0, *s1, *s2, *s3]),
                 roster_height: u32::from_le_bytes([*r0, *r1, *r2, *r3]),
                 activation_height: u32::from_le_bytes([*a0, *a1, *a2, *a3]),
             },
             rest,
-        ),
-        _ => return None,
-    };
+        )),
+        _ => None,
+    }
+}
+
+/// Version 0 left the calendar out when it equalled the prototype's, so such a file is read
+/// under whatever the prototype calendar is now.
+fn params_from_bytes_v0(bytes: &[u8]) -> Option<(BftBootstrap, StakingParameters)> {
+    let (bootstrap, rest) = bootstrap_from_bytes(bytes)?;
     let word = |i: usize| u32::from_le_bytes(rest[4 * i..4 * i + 4].try_into().expect("four bytes"));
     let staking = match rest.len() {
         0 => PROTOTYPE_STAKING,
@@ -779,6 +823,23 @@ fn params_from_bytes(bytes: &[u8]) -> Option<(BftBootstrap, StakingParameters)> 
         _ => return None,
     };
     Some((bootstrap, staking))
+}
+
+/// The zebrad.toml fragment a test file's leading `SET_PARAMS` carries, empty if none. See
+/// [`TF::new_with_node_config`] for the parts the harness applies.
+pub fn node_config_for_test(bytes: &[u8]) -> String {
+    let Ok(tf) = TF::read_from_bytes(bytes) else {
+        return String::new();
+    };
+    match tf.instrs.first() {
+        Some(first) if first.kind == TFInstr::SET_PARAMS => {
+            match params_from_bytes(first.data_slice(bytes), file_version(bytes)) {
+                Some((_, _, node_config)) => node_config,
+                None => String::new(),
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 /// The Crosslink parameters a test file's node must run with: its leading `SET_PARAMS`, or
@@ -820,7 +881,7 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
         }
 
         TFInstr::SET_PARAMS => {
-            let (bootstrap, staking) = params_from_bytes(instr.data_slice(bytes))?;
+            let (bootstrap, staking, _node_config) = params_from_bytes(instr.data_slice(bytes), file_version(bytes))?;
             Some(TestInstr::SetParams(ZcashCrosslinkParameters {
                 bc_confirmation_depth_sigma: instr.val[0],
                 bootstrap,
@@ -1715,21 +1776,26 @@ mod tests {
     const SHORT: StakingParameters = StakingParameters { period: 10, day_window: 5, action_delay: 6 };
 
     #[test]
-    fn set_params_round_trips_the_staking_calendar() {
+    fn set_params_round_trips_the_staking_calendar_and_node_config() {
         for bootstrap in [BftBootstrap::Supplied, BftBootstrap::FromChain { staking_height: 0, roster_height: 5, activation_height: 300 }] {
             for staking in [PROTOTYPE_STAKING, SHORT] {
-                assert_eq!(params_from_bytes(&params_to_bytes(bootstrap, staking)), Some((bootstrap, staking)));
+                for node_config in ["", "[state]\nnetwork_checkpoint = \"10:00\"\n"] {
+                    assert_eq!(
+                        params_from_bytes(&params_to_bytes(bootstrap, staking, node_config), 1),
+                        Some((bootstrap, staking, node_config.to_string()))
+                    );
+                }
             }
         }
     }
 
-    /// Files written before the calendar was a parameter end after the bootstrap, and must keep
-    /// meaning what they meant: the prototype calendar. Writing the prototype calendar produces
-    /// those same bytes, so tracked scene files don't change.
+    /// A version 0 file ends after the bootstrap when its calendar was the prototype's, and is
+    /// read under the prototype calendar of the build reading it. Version 1 always writes it.
     #[test]
-    fn set_params_without_a_calendar_is_the_prototype_calendar() {
-        assert_eq!(params_from_bytes(&[TF_BOOTSTRAP_SUPPLIED]), Some((BftBootstrap::Supplied, PROTOTYPE_STAKING)));
-        assert_eq!(params_to_bytes(BftBootstrap::Supplied, PROTOTYPE_STAKING), vec![TF_BOOTSTRAP_SUPPLIED]);
+    fn version_0_set_params_without_a_calendar_is_the_current_prototype_calendar() {
+        assert_eq!(params_from_bytes(&[TF_BOOTSTRAP_SUPPLIED], 0), Some((BftBootstrap::Supplied, PROTOTYPE_STAKING, String::new())));
+        assert_eq!(params_from_bytes(&[TF_BOOTSTRAP_SUPPLIED], 1), None);
+        assert_eq!(params_to_bytes(BftBootstrap::Supplied, PROTOTYPE_STAKING, "").len(), 1 + 12);
     }
 
     #[test]
@@ -1746,8 +1812,9 @@ mod tests {
 
     #[test]
     fn set_params_with_a_partial_calendar_is_rejected() {
-        let mut bytes = params_to_bytes(BftBootstrap::Supplied, SHORT);
+        let mut bytes = params_to_bytes(BftBootstrap::Supplied, SHORT, "");
         bytes.pop();
-        assert_eq!(params_from_bytes(&bytes), None);
+        assert_eq!(params_from_bytes(&bytes, 1), None);
+        assert_eq!(params_from_bytes(&bytes, 0), None);
     }
 }

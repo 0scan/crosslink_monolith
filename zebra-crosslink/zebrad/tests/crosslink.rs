@@ -56,22 +56,24 @@ pub fn test_start() {
     {
         // Consensus parameters are fixed when the network is built, so they are read from the test
         // file here, before the node boots.
-        let crosslink = {
+        let bytes = {
             let path = zebra_crosslink::TEST_INSTR_PATH.lock().unwrap().clone();
-            let bytes = match path {
+            match path {
                 Some(path) => std::fs::read(path).unwrap_or_default(),
                 None => zebra_crosslink::TEST_INSTR_BYTES.lock().unwrap().clone(),
-            };
-            crosslink_parameters_for_test(&bytes)
+            }
         };
+        let crosslink = crosslink_parameters_for_test(&bytes);
+        let node_config = node_config_for_test(&bytes);
         *CROSSLINK_TEST_CONFIG_OVERRIDE.lock().unwrap() = {
             let mut base = ZebradConfig::default();
-            base.network.network = Network::new_regtest(
-                zebra_chain::parameters::testnet::RegtestParameters {
-                    crosslink: Some(crosslink),
-                    ..Default::default()
-                },
-            );
+            base.network.network = test_network(&crosslink, &node_config);
+            if !node_config.is_empty() {
+                let file: ZebradConfig = toml::from_str(&node_config).expect("a test file's node config parses as zebrad.toml");
+                base.crosslink.hardforks = file.crosslink.hardforks;
+                base.crosslink.disable_shipped_hardforks = file.crosslink.disable_shipped_hardforks;
+                base.state.network_checkpoint = file.state.network_checkpoint;
+            }
             base.state.ephemeral = true;
             // getblocktemplate refuses to build a coinbase without one (MINE_FROM_TEMPLATE). The
             // test miner's key, so scenarios can spend what the node's templates pay out.
@@ -204,10 +206,99 @@ const POS_FILE_IDX: [usize; 7] = [5, 8, 11, 16, 20, 24, 27];
 /// share of the coinbase, for one, starts at the bootstrap activation height, or at genesis when
 /// BFT is supplied.
 fn regtest_network(params: &zcash_primitives::bft::ZcashCrosslinkParameters) -> Network {
-    Network::new_regtest(zebra_chain::parameters::testnet::RegtestParameters {
+    test_network(params, "")
+}
+
+/// The network a test file's node runs: regtest with the file's Crosslink parameters, and the
+/// file's `[network]` parameters (activation heights, funding streams, lockbox payouts,
+/// checkpoints, unshielded coinbase spends) when its node config sets any. test_start and
+/// scenarios building blocks for that node both call this, so the two cannot drift.
+fn test_network(params: &zcash_primitives::bft::ZcashCrosslinkParameters, node_config: &str) -> Network {
+    use zebra_chain::parameters::testnet::RegtestParameters;
+
+    let default = || Network::new_regtest(RegtestParameters { crosslink: Some(*params), ..Default::default() });
+    if node_config.is_empty() {
+        return default();
+    }
+    // Parsed as the node parses it, so a bad file fails with zebrad's own message.
+    let file: ZebradConfig = toml::from_str(node_config).expect("a test file's node config parses as zebrad.toml");
+    assert!(file.network.network.is_regtest(), "test files configure a regtest network, not {}", file.network.network);
+
+    // A config can't carry the harness's Crosslink parameters (it can't express supplied BFT), so
+    // the network is built again with the file's own on top. The configured values are read from
+    // the file, not from the network zebra built: building keeps one upgrade per activation
+    // height, so a built network reads back with different heights for upgrades that shared one.
+    // This mirrors zebra-network's build_regtest_params, for both ways a config names regtest.
+    let value: toml::Value = toml::from_str(node_config).expect("a test file's node config parses as TOML");
+    let section = value.get("network");
+    let configured = section
+        .and_then(|network| network.get("network"))
+        .and_then(|network| network.get("params"))
+        .or_else(|| section.and_then(|network| network.get("testnet_parameters")));
+    let Some(configured) = configured else {
+        return default();
+    };
+    fn field<T: serde::de::DeserializeOwned>(table: &toml::Value, name: &str) -> Option<T> {
+        let value = table.get(name)?.clone();
+        Some(value.try_into().unwrap_or_else(|err| panic!("node config network parameter {name}: {err}")))
+    }
+    let mut funding_streams: Vec<zebra_chain::parameters::testnet::ConfiguredFundingStreams> =
+        field(configured, "funding_streams").unwrap_or_default();
+    if let Some(post_nu6) = field(configured, "post_nu6_funding_streams") {
+        funding_streams.insert(0, post_nu6);
+    }
+    if let Some(pre_nu6) = field(configured, "pre_nu6_funding_streams") {
+        funding_streams.insert(0, pre_nu6);
+    }
+    Network::new_regtest(RegtestParameters {
+        activation_heights: field(configured, "activation_heights").unwrap_or_default(),
+        funding_streams: Some(funding_streams),
+        lockbox_disbursements: field(configured, "lockbox_disbursements"),
+        checkpoints: field(configured, "checkpoints"),
+        extend_funding_stream_addresses_as_required: field(configured, "extend_funding_stream_addresses_as_required"),
+        should_allow_unshielded_coinbase_spends: field(configured, "should_allow_unshielded_coinbase_spends"),
         crosslink: Some(*params),
-        ..Default::default()
     })
+}
+
+/// A node config fragment configuring regtest with these activation heights, for
+/// TF::new_with_node_config. Written from the configured heights: serializing a built network
+/// would fold upgrades that share a height (see test_network).
+fn node_config_with_activation_heights(heights: zebra_chain::parameters::testnet::ConfiguredActivationHeights) -> String {
+    let mut params = toml::map::Map::new();
+    params.insert("activation_heights".to_string(), toml::Value::try_from(heights).expect("activation heights serialize"));
+    let mut network = toml::map::Map::new();
+    network.insert("params".to_string(), toml::Value::Table(params));
+    let mut section = toml::map::Map::new();
+    section.insert("network".to_string(), toml::Value::Table(network));
+    let mut config = toml::map::Map::new();
+    config.insert("network".to_string(), toml::Value::Table(section));
+    toml::to_string(&config).expect("a TOML table serializes")
+}
+
+/// A test file's node config reaches the node unchanged: the network rebuilt from it under the
+/// file's Crosslink parameters is the network the config described. Needs no node.
+#[test]
+fn test_format_node_config_round_trips_the_network() {
+    use zebra_chain::parameters::testnet::{ConfiguredActivationHeights, RegtestParameters};
+
+    let plain = test_network(&HARNESS_PARAMETERS, "");
+    let defaulted = node_config_with_activation_heights(ConfiguredActivationHeights::default());
+    assert_eq!(test_network(&HARNESS_PARAMETERS, &defaulted), plain);
+
+    let heights = ConfiguredActivationHeights { nu6_1: Some(10), ..Default::default() };
+    let later_upgrade = Network::new_regtest(RegtestParameters {
+        activation_heights: heights,
+        crosslink: Some(HARNESS_PARAMETERS),
+        ..Default::default()
+    });
+    assert_ne!(later_upgrade, plain);
+    let node_config = node_config_with_activation_heights(heights);
+    assert_eq!(test_network(&HARNESS_PARAMETERS, &node_config), later_upgrade);
+
+    let bytes = TF::new_with_node_config(&HARNESS_PARAMETERS, &node_config).write_to_bytes();
+    assert_eq!(node_config_for_test(&bytes), node_config);
+    assert_eq!(crosslink_parameters_for_test(&bytes), HARNESS_PARAMETERS);
 }
 
 /// Rewrite the checked-in binaries in `crosslink-test-data` from the current block format.
