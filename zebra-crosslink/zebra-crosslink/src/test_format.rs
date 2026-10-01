@@ -179,23 +179,27 @@ impl TFInstr {
         str += " (";
 
         match tf_read_instr(&bytes, instr) {
+            // Malformed blocks are what rejection tests load, so describing one must not panic:
+            // this runs in the panic hook and in the GUI's file viewer.
             Some(TestInstr::LoadPoW(block)) => {
-                str += &format!(
-                    "{} - {}, parent: {}",
-                    block.coinbase_height().unwrap().0,
-                    block.hash(),
-                    block.header.previous_block_hash
-                )
+                let height = match block.coinbase_height() {
+                    Some(height) => height.0.to_string(),
+                    None => "no height".to_string(),
+                };
+                str += &format!("{} - {}, parent: {}", height, block.hash(), block.header.previous_block_hash)
             }
-            Some(TestInstr::LoadPoS((block, fat_ptr))) => {
-                str += &format!(
-                    "{}, snapshot: {}, hdrs: [{} .. {}]",
-                    block.blake3_hash(),
-                    block.snapshot_block_hash(),
-                    BlockHash::from_header_data(&block.headers[0]),
-                    BlockHash::from_header_data(block.headers.last().unwrap())
-                )
-            }
+            Some(TestInstr::LoadPoS((block, fat_ptr))) => match (block.headers.first(), block.headers.last()) {
+                (Some(first), Some(last)) => {
+                    str += &format!(
+                        "{}, snapshot: {}, hdrs: [{} .. {}]",
+                        block.blake3_hash(),
+                        block.snapshot_block_hash(),
+                        BlockHash::from_header_data(first),
+                        BlockHash::from_header_data(last)
+                    )
+                }
+                _ => str += &format!("{}, no headers", block.blake3_hash()),
+            },
             Some(TestInstr::SetParams(params)) => {
                 str += &format!(
                     "{} {:?}",
@@ -564,23 +568,43 @@ impl TF {
 
     // Simple version, all in one go... for large files we'll want to break this up; get hdr &
     // get/stream instrs, then read data as needed
+    /// Every offset and length in the file is checked here, so nothing that later slices the
+    /// file can index out of bounds: the GUI opens arbitrary files, and a panic there aborts the
+    /// running node.
     pub fn read_from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let tf_hdr = match TFHdr::ref_from_prefix(&bytes[0..]) {
+        let tf_hdr = match TFHdr::ref_from_prefix(bytes) {
             Ok((hdr, _)) => hdr,
             Err(err) => return Err(err.to_string()),
         };
+        if &tf_hdr.magic != b"ZECCLTF0" {
+            return Err(format!("not a crosslink test file: magic {:?}", tf_hdr.magic));
+        }
+        if tf_hdr.instr_size as usize != size_of::<TFInstr>() {
+            return Err(format!(
+                "instruction size is {} bytes, this build reads {}",
+                tf_hdr.instr_size,
+                size_of::<TFInstr>()
+            ));
+        }
+        let instrs_o = match usize::try_from(tf_hdr.instrs_o) {
+            Ok(o) if o >= size_of::<TFHdr>() && o <= bytes.len() => o,
+            _ => return Err(format!("instructions start at {}, outside the file", tf_hdr.instrs_o)),
+        };
 
-        let read_instrs = <[TFInstr]>::ref_from_prefix_with_elems(
-            &bytes[tf_hdr.instrs_o as usize..],
-            tf_hdr.instrs_n as usize,
-        );
+        let read_instrs = <[TFInstr]>::ref_from_prefix_with_elems(&bytes[instrs_o..], tf_hdr.instrs_n as usize);
 
         let instrs = match read_instrs {
             Ok((instrs, _)) => instrs,
             Err(err) => return Err(err.to_string()),
         };
+        for (instr_i, instr) in instrs.iter().enumerate() {
+            let in_file = instr.data.o.checked_add(instr.data.size).is_some_and(|end| end <= bytes.len() as u64);
+            if !in_file {
+                return Err(format!("instruction {instr_i}'s data runs past the end of the file"));
+            }
+        }
 
-        let data = &bytes[size_of::<TFHdr>()..tf_hdr.instrs_o as usize];
+        let data = &bytes[size_of::<TFHdr>()..instrs_o];
 
         // TODO: just use slices, don't copy to vectors
         let tf = TF {
@@ -809,22 +833,23 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
         }
         TFInstr::EXPECT_POS_CHAIN_LENGTH => Some(TestInstr::ExpectPoSChainLength(instr.val[0])),
 
-        TFInstr::EXPECT_POW_BLOCK_FINALITY => Some(TestInstr::ExpectPoWBlockFinality(
-            ZebBlockHash(
-                instr
-                    .data_slice(bytes)
-                    .try_into()
-                    .expect("should be 32 bytes for hash"),
-            ),
-            finality_from_val(&instr.val),
-        )),
+        TFInstr::EXPECT_POW_BLOCK_FINALITY => {
+            // finality_from_val panics on an unknown code, and the code comes from the file.
+            if instr.val[0] != 0 && instr.val[1] > TF_CANT_BE_FINALIZED {
+                return None;
+            }
+            Some(TestInstr::ExpectPoWBlockFinality(
+                ZebBlockHash(instr.data_slice(bytes).try_into().ok()?),
+                finality_from_val(&instr.val),
+            ))
+        }
 
         TFInstr::ROSTER_FORCE_INCLUDE => Some(TestInstr::RosterForceInclude(
-            instr.data_slice(bytes).try_into().expect("32-byte array"),
+            instr.data_slice(bytes).try_into().ok()?,
             instr.val[0],
         )),
         TFInstr::EXPECT_ROSTER_INCLUDES => Some(TestInstr::ExpectRosterIncludes(
-            instr.data_slice(bytes).try_into().expect("32-byte array"),
+            instr.data_slice(bytes).try_into().ok()?,
             instr.val[0],
         )),
 
@@ -872,10 +897,9 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             peer: instr.val[0],
         }),
 
-        _ => {
-            panic!("Unrecognized instruction {}", instr.kind);
-            None
-        }
+        // An instruction this build doesn't know. The caller decides whether that is fatal
+        // (a test) or skippable (the fuzzer, the GUI viewer).
+        _ => None,
     }
 }
 
@@ -1047,19 +1071,23 @@ pub(crate) async fn handle_instr(
             test_check(flags, accepted, &message);
         }
 
-        TestInstr::RecvPoW { block, peer } => {
-            let mut stp = take_stp_peer(peer);
-            let outcome = serve_block(internal_handle, &mut stp, &block).await;
-            put_stp_peer(stp);
-            check_ingest(flags, "RECV_POW: ", outcome);
-        }
+        TestInstr::RecvPoW { block, peer } => match take_stp_peer(peer) {
+            Err(err) => check_ingest(flags, "RECV_POW: ", Err(err)),
+            Ok(mut stp) => {
+                let outcome = serve_block(internal_handle, &mut stp, &block).await;
+                put_stp_peer(stp);
+                check_ingest(flags, "RECV_POW: ", outcome);
+            }
+        },
 
-        TestInstr::RecvStpPacket { packet, peer } => {
-            let mut stp = take_stp_peer(peer);
-            let (survived, message) = deliver_stp_packet(&mut stp, packet).await;
-            put_stp_peer(stp);
-            test_check(flags, survived, &message);
-        }
+        TestInstr::RecvStpPacket { packet, peer } => match take_stp_peer(peer) {
+            Err(err) => test_check_outcome(false, false, &format!("RECV_STP_PACKET: {err}")),
+            Ok(mut stp) => {
+                let (survived, message) = deliver_stp_packet(&mut stp, packet).await;
+                put_stp_peer(stp);
+                test_check(flags, survived, &message);
+            }
+        },
 
         TestInstr::ExpectMempoolContains(transaction) => {
             let (holds, message) = await_mempool(internal_handle, &transaction, MempoolExpect::Resident).await;
@@ -1285,13 +1313,15 @@ const STP_PACKET_SETTLE: Duration = Duration::from_secs(1);
 /// so there is no verdict to wait for, only a kill to rule out.
 const KNOWN_BLOCK_SETTLE: Duration = Duration::from_secs(2);
 
-fn take_stp_peer(index: u64) -> HarnessStpPeer {
+fn take_stp_peer(index: u64) -> Result<HarnessStpPeer, String> {
     let mut peers = TEST_STP_PEERS.lock().unwrap();
     if let Some(i) = peers.iter().position(|p| p.index == index) {
-        return peers.swap_remove(i);
+        return Ok(peers.swap_remove(i));
     }
-    let link_index = u16::try_from(index).expect("synthetic peer indices fit in 16 bits");
-    HarnessStpPeer { index, link: zebra_state::new_network::attach_synthetic_peer(link_index), killed: None }
+    let Ok(link_index) = u16::try_from(index) else {
+        return Err(format!("synthetic peer index {index} does not fit in 16 bits"));
+    };
+    Ok(HarnessStpPeer { index, link: zebra_state::new_network::attach_synthetic_peer(link_index), killed: None })
 }
 
 fn put_stp_peer(peer: HarnessStpPeer) {
@@ -1527,7 +1557,18 @@ pub async fn read_instrs(internal_handle: TFLServiceHandle, bytes: &[u8], instrs
         //     instrs[instr_i].kind
         // );
 
-        if let Some(instr) = uhh_option(tf_read_instr(bytes, &instrs[instr_i]), on_fail) {
+        let parsed = tf_read_instr(bytes, &instrs[instr_i]);
+        if parsed.is_none() {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "test format: instruction {instr_i} ({}, kind {}) does not parse",
+                    TFInstr::str_from_kind(instrs[instr_i].kind),
+                    instrs[instr_i].kind
+                );
+            }
+        }
+        if let Some(instr) = uhh_option(parsed, on_fail) {
             let height = match &instr {
                 TestInstr::LoadPoW(block) => block.coinbase_height().map(|height| height.0),
                 TestInstr::RecvPoW { block, .. } => Block::zcash_deserialize(&block[..])

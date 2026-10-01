@@ -1506,6 +1506,50 @@ fn crosslink_mine_from_template() {
     test_bytes(tf.write_to_bytes());
 }
 
+/// Malformed files and odd blocks are rejected or described, never panicked on: the GUI opens
+/// arbitrary files inside a running node, and the instruction dump runs in the panic hook.
+/// Needs no node.
+#[test]
+fn test_format_survives_malformed_files_and_odd_blocks() {
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
+    let gen = BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
+    let mut no_height = gen.tip.as_ref().clone();
+    no_height.transactions.clear();
+    tf.push_instr_load_pow(&no_height, SHOULD_FAIL);
+    tf.push_instr_ex(9999, 0, &[1, 2, 3], [0; 2]);
+    let good = tf.write_to_bytes();
+
+    let parsed = TF::read_from_bytes(&good).expect("a written file reads back");
+    let described: Vec<String> = parsed.instrs.iter().map(|instr| TFInstr::string_from_instr(&good, instr)).collect();
+    assert!(described.iter().any(|line| line.contains("no height")), "{described:?}");
+
+    // header: magic [0, 8), instrs_o [8, 16), instrs_n [16, 20), instr_size [20, 24);
+    // instruction: kind, flags, data.o, data.size at +16, val
+    let header = std::mem::size_of::<TFHdr>();
+    let instrs_o = u64::from_le_bytes(good[8..16].try_into().unwrap()) as usize;
+    let mut wrong_magic = good.clone();
+    wrong_magic[0] ^= 1;
+    let mut bad_offset = good.clone();
+    bad_offset[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut bad_stride = good.clone();
+    bad_stride[20..24].copy_from_slice(&1u32.to_le_bytes());
+    let mut data_past_end = good.clone();
+    data_past_end[instrs_o + 16..instrs_o + 24].copy_from_slice(&u64::MAX.to_le_bytes());
+    for (name, bytes) in [
+        ("empty", Vec::new()),
+        ("header only", good[..header].to_vec()),
+        ("wrong magic", wrong_magic),
+        ("instructions outside the file", bad_offset),
+        ("wrong instruction size", bad_stride),
+        ("data past the end", data_past_end),
+        ("truncated", good[..good.len() - 1].to_vec()),
+    ] {
+        assert!(TF::read_from_bytes(&bytes).is_err(), "{name} was accepted");
+    }
+}
+
 /// `block` with one byte of its first spend's unlock script flipped. Transaction ids leave out
 /// unlock scripts (ZIP-244), so the merkle root and the block hash stay the honest block's;
 /// only the auth data commitment, checked at commit, catches it.
