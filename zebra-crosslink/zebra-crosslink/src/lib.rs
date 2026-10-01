@@ -91,23 +91,51 @@ pub fn uhh_option<T>(option: Option<T>, on_fail: u32) -> Option<T> {
 /// grinding.
 pub static TEST_ON_FAIL: Mutex<u32> = Mutex::new(uhh::PANIC);
 
+/// Locks a test global from the shutdown or panic path, where the thread doing the locking may
+/// be the one that already holds it: a panic raised under a guard runs the panic hook before
+/// unwinding drops the guard, and std mutexes are not reentrant, so a plain `lock()` there hangs
+/// the test forever instead of failing it. A brief hold by another thread is waited out; one that
+/// outlasts the wait is reported and the caller skips its work.
+fn lock_for_dump<'a, T>(mutex: &'a Mutex<T>, name: &str) -> Option<std::sync::MutexGuard<'a, T>> {
+    #![allow(clippy::print_stderr)]
+    for _ in 0..50 {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    eprintln!(
+        "\x1b[91mtest harness: {name} is still locked after 500 ms, almost certainly by the thread that \
+         panicked while holding it; skipping rather than hanging\x1b[0m"
+    );
+    None
+}
+
 pub fn dump_test_instrs() {
     #![allow(clippy::print_stderr)]
 
-    let failed_instr_idxs_lock = TEST_FAILED_INSTR_IDXS.lock();
-    let failed_instr_idxs = failed_instr_idxs_lock.as_ref().unwrap();
+    let Some(failed_instr_idxs) = lock_for_dump(&TEST_FAILED_INSTR_IDXS, "TEST_FAILED_INSTR_IDXS") else {
+        return;
+    };
     if failed_instr_idxs.is_empty() {
         eprintln!(
             "no failed instructions recorded. We should have at least 1 failed instruction here"
         );
     }
 
-    let done_instr_c = *TEST_INSTR_C.lock().unwrap();
+    let Some(done_instr_c) = lock_for_dump(&TEST_INSTR_C, "TEST_INSTR_C").map(|count| *count) else {
+        return;
+    };
 
     let mut failed_instr_idx_i = 0;
-    let instrs_lock = TEST_INSTRS.lock().unwrap();
+    let Some(instrs_lock) = lock_for_dump(&TEST_INSTRS, "TEST_INSTRS") else {
+        return;
+    };
     let instrs: &Vec<test_format::TFInstr> = instrs_lock.as_ref();
-    let bytes_lock = TEST_INSTR_BYTES.lock().unwrap();
+    let Some(bytes_lock) = lock_for_dump(&TEST_INSTR_BYTES, "TEST_INSTR_BYTES") else {
+        return;
+    };
     let bytes = bytes_lock.as_ref();
     for instr_i in 0..instrs.len() {
         let (col, msg) = if failed_instr_idx_i < failed_instr_idxs.len()
@@ -311,7 +339,9 @@ pub fn run_tfl_test(internal_handle: TFLServiceHandle) {
     std::panic::set_hook(Box::new(|panic_info| {
         #[allow(clippy::print_stderr)]
         {
-            *TEST_FAILED.lock().unwrap() = -1;
+            if let Some(mut failed) = lock_for_dump(&TEST_FAILED, "TEST_FAILED") {
+                *failed = -1;
+            }
 
             use std::backtrace::{self, *};
             let bt = Backtrace::force_capture();
