@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # Pinned to the commit that makes the Windows pump honour request_frame, until a crates.io release carries it.
-softer_gui = { git = "https://github.com/ShieldedLabs/softer_gui", rev = "a070c8d6ff9b64a634b70286b4c7a492d0da85d7" }
+softer_gui = { git = "https://github.com/ShieldedLabs/softer_gui", rev = "c2ddbe7bf898fbec614b744d5e9e12302a900530" }
 num_cpus = "1.17.0"
 ahash = "0.8.12"
 rand = "0.9.2"

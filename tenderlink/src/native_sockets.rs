@@ -319,17 +319,22 @@ mod linux {
         };
 
         let (mut name_buf, name_len, is_v4) = if let Some(v4) = dst_ip6.to_ipv4_mapped() {
-            let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            sin.sin_family = libc::AF_INET as _;
-            sin.sin_port = dst_port.to_be();
-            sin.sin_addr = libc::in_addr {
-                s_addr: u32::from_le_bytes(v4.octets()),
+            // Address v4 peers as a v4-mapped sockaddr_in6 on the dual-stack
+            // socket, not as a bare sockaddr_in. Linux's udpv6_sendmsg bridges a
+            // v4 destination on a v6 socket, but XNU rejects that with EINVAL and
+            // the STP network thread dies; the v4-mapped form is accepted by both.
+            let mut sin6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+            sin6.sin6_family = libc::AF_INET6 as _;
+            sin6.sin6_port = dst_port.to_be();
+            let o = v4.octets();
+            sin6.sin6_addr = libc::in6_addr {
+                s6_addr: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, o[0], o[1], o[2], o[3]],
             };
 
-            let mut buf = vec![0u8; std::mem::size_of::<libc::sockaddr_in>()];
+            let mut buf = vec![0u8; std::mem::size_of::<libc::sockaddr_in6>()];
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    &sin as *const _ as *const u8,
+                    &sin6 as *const _ as *const u8,
                     buf.as_mut_ptr(),
                     buf.len(),
                 );
@@ -448,6 +453,16 @@ mod linux {
         msg.msg_iovlen = 1;
         msg.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
         msg.msg_controllen = cbuf.len() as _;
+
+        // The cosmo/XNU path rejects datagrams that carry cmsg metadata
+        // (recvmsg fails whenever a packet actually arrives, so every datagram
+        // was dropped). Receive the packet without the control buffer there:
+        // the TCLASS/ECN metadata is advisory and not load-bearing.
+        #[cfg(cosmo)]
+        {
+            msg.msg_control = core::ptr::null_mut();
+            msg.msg_controllen = 0;
+        }
 
         let n = unsafe { libc::recvmsg(fd, &mut msg as *mut libc::msghdr, 0) };
         let timestamp_ns = monotonic_clock_ns();
