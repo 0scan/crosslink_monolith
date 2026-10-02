@@ -60,13 +60,27 @@ $psi.RedirectStandardError  = $true
 $psi.RedirectStandardOutput = $false   # stdout passes straight through
 $psi.UseShellExecute        = $false
 
+# cosmo-build's per-architecture APE builds run inside a build script, whose output cargo
+# holds until the script exits. It appends their progress to this file instead, and the
+# loop below shows each line as it lands.
+$progressPath = [System.IO.Path]::GetTempFileName()
+if (-not $env:COSMO_PROGRESS) { $psi.EnvironmentVariables["COSMO_PROGRESS"] = $progressPath }
+$progressFile = New-Object System.IO.FileStream($progressPath, 'Open', 'Read', 'ReadWrite, Delete')
+$progress = New-Object System.IO.StreamReader($progressFile)
+
 $proc = [System.Diagnostics.Process]::Start($psi)
 
 $errorCount = 0
 # Strip ANSI escapes for matching so color codes don't interfere with the regex
 $ansiPattern = '\x1b\[[0-9;]*m'
 
-while ($null -ne ($line = $proc.StandardError.ReadLine())) {
+$pending = $proc.StandardError.ReadLineAsync()
+while ($true) {
+    while ($null -ne ($p = $progress.ReadLine())) { [Console]::Error.WriteLine($p) }
+    if (-not $pending.Wait(200)) { continue }
+    $line = $pending.Result
+    if ($null -eq $line) { break }
+
     $plain = $line -replace $ansiPattern, ''
     if ($plain -match '^error') {
         $errorCount++
@@ -89,9 +103,13 @@ while ($null -ne ($line = $proc.StandardError.ReadLine())) {
 
     # Print raw line so ANSI escape sequences survive
     [Console]::Error.WriteLine($line)
+    $pending = $proc.StandardError.ReadLineAsync()
 }
 
 $proc.WaitForExit()
+while ($null -ne ($p = $progress.ReadLine())) { [Console]::Error.WriteLine($p) }
+$progress.Close()
+Remove-Item $progressPath -ErrorAction SilentlyContinue
 
 # If we killed it, return failure (1); otherwise return cargo's real exit code
 if ($errorCount -ge 2) {

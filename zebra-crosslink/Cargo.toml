@@ -374,4 +374,4 @@ path = "../patches/sqlx-sqlite-0.8.6"
 # builds on a Windows host. From ShieldedLabs/cargo_cosmo; drop once a release
 # carries them.
 [patch.crates-io.cosmo-build]
-path = "../patches/cosmo-build-6.0.3"
+path = "../patches/cosmo-build-9.0.0"

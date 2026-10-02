@@ -318,7 +318,7 @@ cosmo-compat = "6"
 [build-dependencies]
 vergen-git2 = { workspace = true, features = ["cargo", "rustc"] }
 # Only fetched, compiled or run when -F ape is on.
-cosmo-build = { version = "6", optional = true }
+cosmo-build = { version = "9", optional = true }
 # test feature lightwalletd-grpc-tests
 tonic-prost-build = { workspace = true, optional = true }
 
