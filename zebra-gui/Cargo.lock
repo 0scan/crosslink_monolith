@@ -552,9 +552,7 @@ checksum = "4df6f98652d30167eaeea34d77b730e07c8caba6df17bd4551842b9b8da01deb"
 
 [[package]]
 name = "cosmo-build"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "832628b2054e250179dd5160bf6002dada30857b68a0572285281fd16627f7d1"
+version = "9.0.0"
 dependencies = [
  "ureq",
  "zip",
@@ -562,9 +560,13 @@ dependencies = [
 
 [[package]]
 name = "cosmo-compat"
-version = "6.0.0"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f30040047d19b38310799bf7b8c01ee8a9de5b166a48c3529032def84affa8e"
+checksum = "29ec03234001fa43dea9d2906ea87ece968c1896cd43740401d1e6b775ad6963"
+dependencies = [
+ "libc",
+ "rustix",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -4582,7 +4584,3 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
-
-[[patch.unused]]
-name = "cosmo-build"
-version = "6.0.3"

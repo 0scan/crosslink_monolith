@@ -313,7 +313,7 @@ derive-new.workspace = true
 # Linux but cosmopolitan resolves at load time. tokio's reactor runs on mio's
 # poll(2) selector there (build.rs), since cosmopolitan has no epoll/eventfd.
 [target.'cfg(cosmo)'.dependencies]
-cosmo-compat = "6"
+cosmo-compat = "8"
 
 [build-dependencies]
 vergen-git2 = { workspace = true, features = ["cargo", "rustc"] }
