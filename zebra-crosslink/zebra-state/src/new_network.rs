@@ -2588,14 +2588,21 @@ pub fn sync(
             false
         });
 
-        // Service STP connections (send/recv).
-        let resp = service_connections(&network_thread_handle, NetworkThreadPush {
+        // Service STP connections (send/recv). `None` means the network thread
+        // did not answer in time because it died or wedged: keep our connection
+        // list as it was instead of replacing it with an empty answer, so this
+        // tick loop -- and with it Zebra's shutdown -- can continue.
+        let mut packets_received = match service_connections(&network_thread_handle, NetworkThreadPush {
             initiate_connections,
             wanted_connections: current_connections.iter().filter(|(addr, _)| !synthetic_peers.iter().any(|p| p.address == *addr)).cloned().collect(),
             send_unreliable: packets_to_send,
-        });
-        current_connections = resp.current_connections;
-        let mut packets_received = resp.received_unreliable_messages;
+        }) {
+            Some(resp) => {
+                current_connections = resp.current_connections;
+                resp.received_unreliable_messages
+            }
+            None => Default::default(),
+        };
         for synthetic in synthetic_peers.iter().filter(|p| p.alive) {
             let key = synthetic.address.connection_key();
             current_connections.push((synthetic.address.clone(), [0; 64]));

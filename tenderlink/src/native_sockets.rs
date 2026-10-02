@@ -248,7 +248,7 @@ mod linux {
                 std::mem::size_of_val(&one) as libc::socklen_t,
             ) != 0
             {
-                panic!("Failed to Enable IPv4 TOS, error: {}", std::io::Error::last_os_error());
+                eprintln!("Failed to Enable IPv4 TOS, error: {}", std::io::Error::last_os_error());
             }
 
             if libc::setsockopt(
@@ -259,7 +259,7 @@ mod linux {
                 std::mem::size_of_val(&one) as libc::socklen_t,
             ) != 0
             {
-                panic!("Failed to Enable IPv6 TOS, error: {}", std::io::Error::last_os_error());
+                eprintln!("Failed to Enable IPv6 TOS, error: {}", std::io::Error::last_os_error());
             }
 
             if libc::setsockopt(
@@ -270,7 +270,7 @@ mod linux {
                 std::mem::size_of_val(&one) as libc::socklen_t,
             ) != 0
             {
-                panic!("Failed to Enable IPv6 PKTINFO, error: {}", std::io::Error::last_os_error());
+                eprintln!("Failed to Enable IPv6 PKTINFO, error: {}", std::io::Error::last_os_error());
             }
 
             // Disable fragmentation: force the kernel to return an error instead of fragmenting.
@@ -283,7 +283,7 @@ mod linux {
                 std::mem::size_of_val(&pmtudisc) as libc::socklen_t,
             ) != 0
             {
-                panic!("Failed to set IPV6_MTU_DISCOVER: {}", std::io::Error::last_os_error());
+                eprintln!("Failed to set IPV6_MTU_DISCOVER: {}", std::io::Error::last_os_error());
             }
 
             let pmtudisc_v4: libc::c_int = libc::IP_PMTUDISC_DO;
@@ -295,7 +295,7 @@ mod linux {
                 std::mem::size_of_val(&pmtudisc_v4) as libc::socklen_t,
             ) != 0
             {
-                panic!("Failed to set IP_MTU_DISCOVER: {}", std::io::Error::last_os_error());
+                eprintln!("Failed to set IP_MTU_DISCOVER: {}", std::io::Error::last_os_error());
             }
         }
         Some(SockHandle(fd, known_good_ipv6_address))
