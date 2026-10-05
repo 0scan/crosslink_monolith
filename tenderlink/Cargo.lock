@@ -1615,6 +1615,7 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
  "zcash_primitives",
+ "zebra-debug-time",
 ]
 
 [[package]]
@@ -2210,6 +2211,14 @@ dependencies = [
  "zcash_script",
  "zcash_spec",
  "zip32",
+]
+
+[[package]]
+name = "zebra-debug-time"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
 ]
 
 [[package]]

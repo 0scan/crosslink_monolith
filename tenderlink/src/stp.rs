@@ -22,7 +22,7 @@ pub fn ack_test() {
     let network_thread_handle2 = new_network_thread(vec![kp2.clone()], 23843, None, (1_000_000, 256 * 1024 * 1024, 256 * 1024 * 1024));
 
     let initiate_connections = vec![ STPAddress { ip: Ipv6Addr::LOCALHOST, port: 58493, magic1: CONNECT_MAGIC1_PLAIN_TEXT, key: kp1_pub, } ];
-    let ret = service_connections(&network_thread_handle2, NetworkThreadPush { initiate_connections, send_unreliable: vec![], ..Default::default() });
+    let ret = service_connections(&network_thread_handle2, NetworkThreadPush { initiate_connections, send_unreliable: vec![], ..Default::default() }).unwrap_or_default();
     let mut wanted_connections = ret.current_connections;
 
     // Build 50 messages with random sizes between 100 bytes and 4 MiB.
@@ -62,14 +62,14 @@ pub fn ack_test() {
             sent = true;
             println!("Sent {NUM_MESSAGES} messages, waiting 10s for receive...");
         } else if !sent {
-            let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, ..Default::default() });
+            let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, ..Default::default() }).unwrap_or_default();
             wanted_connections = ret.current_connections;
             std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
         } else {
             break;
         }
-        let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, send_unreliable, ..Default::default() });
+        let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, send_unreliable, ..Default::default() }).unwrap_or_default();
         wanted_connections = ret.current_connections;
     }
 
@@ -81,7 +81,7 @@ pub fn ack_test() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
 
     while std::time::Instant::now() < deadline {
-        let ret = service_connections(&network_thread_handle1, NetworkThreadPush::default());
+        let ret = service_connections(&network_thread_handle1, NetworkThreadPush::default()).unwrap_or_default();
         for (_conn_key, data) in &ret.received_unreliable_messages {
             if data.len() < HEADER_SIZE {
                 malformed += 1;
@@ -131,7 +131,7 @@ pub fn do_the_test_program3(port: u16, my_keypair: IdentityKeyPair, beam_to: Opt
     if let Some(other) = beam_to {
         let initiate_connections = vec![other];
 
-        let ret = service_connections(&network_thread_handle2, NetworkThreadPush { initiate_connections, ..Default::default() });
+        let ret = service_connections(&network_thread_handle2, NetworkThreadPush { initiate_connections, ..Default::default() }).unwrap_or_default();
         let mut wanted_connections = ret.current_connections;
     
         let mut i = 0;
@@ -144,7 +144,7 @@ pub fn do_the_test_program3(port: u16, my_keypair: IdentityKeyPair, beam_to: Opt
                 }
                 // the sends will be truncated anyway
             }
-            let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, send_unreliable, ..Default::default() });
+            let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, send_unreliable, ..Default::default() }).unwrap_or_default();
             wanted_connections = ret.current_connections;
             std::thread::sleep(std::time::Duration::from_millis(3000));
         }
@@ -152,7 +152,7 @@ pub fn do_the_test_program3(port: u16, my_keypair: IdentityKeyPair, beam_to: Opt
     else {
         let mut wanted_connections = Vec::new();
         loop {
-            let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, ..Default::default() });
+            let ret = service_connections(&network_thread_handle2, NetworkThreadPush { wanted_connections, ..Default::default() }).unwrap_or_default();
             wanted_connections = ret.current_connections;
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -2142,7 +2142,9 @@ pub fn new_network_thread(my_keypairs: Vec<IdentityKeyPair>, my_port: u16, max_p
 
 //////// END SEND ////////////////////////////////////////////////////////////////////////
 
-                if should_sleep { std::thread::yield_now(); }
+                // Idle: sleep instead of spinning on a core. 150us is well below
+                // any packet-arrival timescale here and keeps the thread parked when quiet.
+                if should_sleep { std::thread::sleep(std::time::Duration::from_micros(150)); }
             }
         }
     });
@@ -2270,9 +2272,27 @@ pub fn cubic_rate(t_ns: u64, r_max: u64, k_ns: u64) -> (u64, char) {
 }
 
 
-pub fn service_connections(network_thread_handle: &NetworkThreadHandle, mut req: NetworkThreadPush) -> NetworkThreadPull {
+/// Hands `req` to the network thread and returns what it last produced.
+///
+/// The network thread is a separate OS thread and `state` is the handshake: wait
+/// for it to be idle, hand it the push queue, mark it runnable, then wait for it
+/// to finish and mark itself idle again. If that thread died or wedged, waiting
+/// would block forever -- which is how Zebra's shutdown drain got stuck, keeping
+/// `zebrad.com` alive after its window was closed. So both waits are bounded:
+/// past the deadline the thread is treated as gone and `None` is returned,
+/// leaving the caller's view of the connections untouched.
+pub fn service_connections(network_thread_handle: &NetworkThreadHandle, mut req: NetworkThreadPush) -> Option<NetworkThreadPull> {
+    // The exchange normally takes microseconds; past this the network thread
+    // is not answering.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
     while network_thread_handle.inner.state.load(std::sync::atomic::Ordering::Acquire) != 0 {
-        std::hint::spin_loop();
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        // Sleep-poll: spinning here burned a core per caller for as long as the
+        // network thread took to answer.
+        std::thread::sleep(std::time::Duration::from_micros(25));
     }
 
     #[allow(unsafe_code)]
@@ -2283,8 +2303,10 @@ pub fn service_connections(network_thread_handle: &NetworkThreadHandle, mut req:
     network_thread_handle.inner.state.store(1, std::sync::atomic::Ordering::Release);
 
     while network_thread_handle.inner.state.load(std::sync::atomic::Ordering::Acquire) != 0 {
-        //std::hint::spin_loop();
-        std::thread::yield_now();
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(25));
     }
 
     let mut resp = NetworkThreadPull::default();
@@ -2294,7 +2316,7 @@ pub fn service_connections(network_thread_handle: &NetworkThreadHandle, mut req:
         std::mem::swap(&mut *network_thread_handle.inner.pull.get(), &mut resp);
     }
 
-    resp
+    Some(resp)
 }
 
 pub fn get_handshake_hash(handshake: &snow::HandshakeState) -> [u8; 64] {

@@ -18,6 +18,17 @@ use crate::*;
 /// The window is opened before any of the node exists, since whether it opens decides which
 /// of those two shapes the process takes; `GUI_ACTIVE` carries the answer to the node.
 pub fn run_node(headless: bool, node: impl FnOnce() + Send + 'static) {
+    // Closing the window means "quit": once Zebra is asked to stop, give its
+    // shutdown drain a bounded grace period, then leave regardless. A wedged
+    // task must never keep the process alive after the window is gone.
+    std::thread::spawn(|| {
+        while !zebra_chain::shutdown::is_shutting_down() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        eprintln!("Zebra did not shut down within 20s; exiting anyway");
+        std::process::exit(0);
+    });
     let window = if headless { None } else { open_window() };
     let Some(window) = window else {
         if !headless {
