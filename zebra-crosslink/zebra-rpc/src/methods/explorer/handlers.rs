@@ -16,7 +16,7 @@ use zebra_consensus::router::service_trait::BlockVerifierService;
 use zebra_indexer::{
     address_summary_from_state, address_transactions_page_from_state,
     address_utxos_page_from_state, block_details_from_state, blocks_page_from_state,
-    chart_data_from_state, stats_from_state, top_balances_from_state,
+    chart_data_from_state, miner_info_from_state, stats_from_state, top_balances_from_state,
     top_miners_from_state, transaction_details_from_state, transactions_page_from_state,
 };
 use zebra_network::address_book_peers::AddressBookPeers;
@@ -40,7 +40,7 @@ use super::{
         BlocksResponse, ChartDataRequest, ChartDataResponse, ExplorerNetworkStatsResponse,
         GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
         GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
-        MempoolTransactionsResponse, TopBalancesRequest, TopBalancesResponse,
+        MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
         TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
     },
 };
@@ -545,6 +545,25 @@ where
                 }
                 Err(error) => Err(error).map_misc_error(),
             }
+        }
+    }
+
+    pub(in crate::methods) async fn explorer_get_miner_info(
+        &self,
+        address: String,
+    ) -> Result<MinerInfoResponse> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = address;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            let address = explorer_transparent_address(&self.network, &address)
+                .map_error(server::error::LegacyCode::InvalidAddressOrKey)?;
+            miner_info_from_state(self.read_state.clone(), &self.network, address)
+                .await
+                .map_misc_error()
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Persisted all-time miner ranking.
 
 use tower::ServiceExt;
-use zebra_chain::block::Height;
+use zebra_chain::{block::Height, transparent::Address};
 use zebra_state::{
     ExplorerMinerRankCursor, ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse,
     ReadRequest, ReadResponse, ReadState,
@@ -9,8 +9,8 @@ use zebra_state::{
 
 use crate::{
     types::{
-        PageDirection, TopMinerEntry, TopMinersPagination, TopMinersRequest, TopMinersResponse,
-        TopMinersSummary,
+        MinerInfoResponse, PageDirection, TopMinerEntry, TopMinersPagination, TopMinersRequest,
+        TopMinersResponse, TopMinersSummary,
     },
     Error,
 };
@@ -19,6 +19,87 @@ use super::miner_cursor::MinerCursor;
 
 const DEFAULT_MINERS_LIMIT: u32 = 30;
 const MAX_MINERS_LIMIT: u32 = 100;
+
+/// Returns all-time mining information for one payout address without scanning the ranking.
+pub async fn miner_info_from_state<State>(
+    read_state: State,
+    network: &zebra_chain::parameters::Network,
+    address: Address,
+) -> Result<MinerInfoResponse, Error>
+where
+    State: ReadState,
+{
+    let response = read_state
+        .clone()
+        .oneshot(ReadRequest::Explorer(ExplorerReadRequest::Miner {
+            address,
+        }))
+        .await
+        .map_err(|error| Error::StateRequest(error.to_string()))?;
+    let ReadResponse::Explorer(ExplorerReadResponse::Miner(miner)) = response else {
+        return Err(Error::StateResponse(
+            "state returned the wrong response for a miner lookup".to_string(),
+        ));
+    };
+
+    let encoded_address = address.to_string();
+    let pool = if let Some(record) = miner.record {
+        let response = read_state
+            .oneshot(ReadRequest::Explorer(ExplorerReadRequest::BlockSummaries(
+                vec![Height(record.latest_height)].into(),
+            )))
+            .await
+            .map_err(|error| Error::StateRequest(error.to_string()))?;
+        let ReadResponse::Explorer(ExplorerReadResponse::BlockSummaries(blocks)) = response else {
+            return Err(Error::StateResponse(
+                "state returned the wrong response for the miner's latest block".to_string(),
+            ));
+        };
+        let block = blocks.into_iter().next().flatten().ok_or_else(|| {
+            Error::StateResponse(
+                "the miner's latest block is missing from canonical state".to_string(),
+            )
+        })?;
+        let coinbase = block.block.transactions.first().ok_or_else(|| {
+            Error::CorruptData("a canonical miner block has no coinbase".to_string())
+        })?;
+        let (identified_address, identified_pool) =
+            super::miner_attribution::identify_miner(coinbase, network);
+        if identified_address.as_deref() == Some(encoded_address.as_str()) {
+            identified_pool
+        } else {
+            super::miner_attribution::pool_from_address(&encoded_address)
+                .unwrap_or("Unknown")
+                .to_string()
+        }
+    } else {
+        "Unknown".to_string()
+    };
+    let blocks_mined = miner.record.map_or(0, |record| record.block_count);
+
+    Ok(MinerInfoResponse {
+        address: encoded_address,
+        is_miner: miner.record.is_some(),
+        pool,
+        blocks_mined: blocks_mined.to_string(),
+        mined_zat: miner
+            .record
+            .map_or(0, |record| record.mined_zat)
+            .to_string(),
+        block_share_percent: share_percent(blocks_mined, miner.chain_block_count),
+        last_mined_height: miner.record.map(|record| record.latest_height.to_string()),
+        last_mined_block_hash: miner
+            .record
+            .map(|record| record.latest_block_hash.to_string()),
+        last_mined_at: miner
+            .record
+            .map(|record| record.latest_timestamp.to_string()),
+        staked_zat: None,
+        finalizer_count: None,
+        indexed_height: miner.best_tip.map(|(height, _)| height.0.to_string()),
+        indexed_block_hash: miner.best_tip.map(|(_, hash)| hash.to_string()),
+    })
+}
 
 /// Returns the all-time miner ranking without scanning blocks or the complete miner set.
 pub async fn top_miners_from_state<State>(

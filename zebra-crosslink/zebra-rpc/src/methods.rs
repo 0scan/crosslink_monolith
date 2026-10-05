@@ -123,7 +123,7 @@ use explorer::types::{
     BlocksResponse, ChartDataRequest, ChartDataResponse, ExplorerNetworkStatsResponse,
     GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
     GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
-    MempoolTransactionsResponse, TopBalancesRequest, TopBalancesResponse,
+    MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
     TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
 };
 use hex_data::HexData;
@@ -947,6 +947,10 @@ pub trait Rpc {
         &self,
         request: Option<TopMinersRequest>,
     ) -> Result<TopMinersResponse>;
+
+    /// Returns all-time mining information for one transparent payout address.
+    #[method(name = "getminerinfo")]
+    async fn get_miner_info(&self, address: String) -> Result<MinerInfoResponse>;
 
     /// Returns the hash of the block of a given height iff the index argument correspond
     /// to a block in the best chain.
@@ -3504,6 +3508,10 @@ where
         request: Option<TopMinersRequest>,
     ) -> Result<TopMinersResponse> {
         self.explorer_get_top_miners(request).await
+    }
+
+    async fn get_miner_info(&self, address: String) -> Result<MinerInfoResponse> {
+        self.explorer_get_miner_info(address).await
     }
 
     async fn get_block_hash(&self, index: i32) -> Result<GetBlockHashResponse> {

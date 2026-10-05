@@ -29,7 +29,8 @@ pub use block_transaction::{
 };
 pub use chart::{ChartDataEntry, ChartDataRequest, ChartDataResponse};
 pub use miner::{
-    TopMinerEntry, TopMinersPagination, TopMinersRequest, TopMinersResponse, TopMinersSummary,
+    MinerInfoResponse, TopMinerEntry, TopMinersPagination, TopMinersRequest, TopMinersResponse,
+    TopMinersSummary,
 };
 pub use pagination::PageDirection;
 pub use stats::{ChainTotals, IndexerStats, RollingDayStats};

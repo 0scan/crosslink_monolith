@@ -8,5 +8,5 @@ mod miners;
 mod query;
 
 pub use details::block_details_from_state;
-pub use miners::top_miners_from_state;
+pub use miners::{miner_info_from_state, top_miners_from_state};
 pub use query::blocks_page_from_state;

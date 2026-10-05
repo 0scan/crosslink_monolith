@@ -30,7 +30,7 @@ explorer methods use `rpc.listen_addr`.
 
 The feature adds these JSON-RPC methods:
 
-- Blocks: `getblocks`, `getblockdetails`, `gettopminers`
+- Blocks: `getblocks`, `getblockdetails`, `gettopminers`, `getminerinfo`
 - Transactions: `gettransactions`, `getmempooltransactions`, `gettransactiondetails`
 - Addresses: `getaddresssummary`, `getaddresstransactions`, `getaddressutxospage`
 - Explorer: `getindexerstatus`, `getnetworkstats`, `getexplorerchartdata`,

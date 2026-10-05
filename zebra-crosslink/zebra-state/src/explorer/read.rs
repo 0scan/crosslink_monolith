@@ -108,6 +108,9 @@ pub fn handle(
             cursor,
             direction,
         } => ExplorerReadResponse::MinerPage(explorer_miner_page(db, limit, cursor, direction)),
+        ExplorerReadRequest::Miner { address } => {
+            ExplorerReadResponse::Miner(explorer_miner(db, address))
+        }
     })
 }
 
@@ -154,6 +157,18 @@ pub fn explorer_miner_page(
         miner_count: totals.miner_count,
         entries,
         has_more,
+    }
+}
+
+/// Returns persisted all-time totals for one payout address in constant time.
+pub fn explorer_miner(
+    db: &ZebraDb,
+    address: zebra_chain::transparent::Address,
+) -> crate::ExplorerMiner {
+    crate::ExplorerMiner {
+        best_tip: db.tip(),
+        chain_block_count: db.explorer_chain_stats().block_count,
+        record: db.explorer_miner_record(address),
     }
 }
 

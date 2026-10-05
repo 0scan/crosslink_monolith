@@ -158,6 +158,11 @@ pub enum ExplorerReadRequest {
         /// Cursor traversal direction.
         direction: ExplorerPageDirection,
     },
+    /// Returns all-time mining totals for one transparent payout address.
+    Miner {
+        /// Transparent coinbase payout address.
+        address: transparent::Address,
+    },
 }
 
 impl ExplorerReadRequest {
@@ -175,6 +180,7 @@ impl ExplorerReadRequest {
             Self::DailyStats { .. } => "explorer_daily_stats",
             Self::BalanceRankPage { .. } => "explorer_balance_rank_page",
             Self::MinerPage { .. } => "explorer_miner_page",
+            Self::Miner { .. } => "explorer_miner",
         }
     }
 }
@@ -204,6 +210,8 @@ pub enum ExplorerReadResponse {
     BalanceRankPage(ExplorerBalanceRankPage),
     /// Finalized all-time miner ranking and summary.
     MinerPage(ExplorerMinerPage),
+    /// All-time mining totals for one transparent payout address.
+    Miner(ExplorerMiner),
 }
 
 impl ExplorerTransactionQuery {
@@ -511,6 +519,15 @@ pub struct ExplorerMinerPage {
     pub miner_count: u64,
     pub entries: Vec<ExplorerMinerRankEntry>,
     pub has_more: bool,
+}
+
+/// One transparent payout address and the finalized chain generation used to read it.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExplorerMiner {
+    pub best_tip: Option<(block::Height, block::Hash)>,
+    pub chain_block_count: u64,
+    pub record: Option<ExplorerMinerRecord>,
 }
 
 /// One UTC day's reversible snapshot and interval facts.

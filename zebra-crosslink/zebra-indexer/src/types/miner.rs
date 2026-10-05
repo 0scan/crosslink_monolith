@@ -48,6 +48,37 @@ pub struct TopMinerEntry {
     pub finalizer_count: Option<String>,
 }
 
+/// All-time mining information for one transparent payout address.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct MinerInfoResponse {
+    /// Queried transparent payout address.
+    pub address: String,
+    /// Whether at least one finalized block is attributed to this address.
+    pub is_miner: bool,
+    /// Best-effort mining-pool attribution, or `Unknown`.
+    pub pool: String,
+    /// Finalized blocks attributed to this address.
+    pub blocks_mined: String,
+    /// Scheduled miner subsidy attributed to this address, excluding fees.
+    pub mined_zat: String,
+    /// Share of every indexed block, formatted with one decimal place.
+    pub block_share_percent: String,
+    /// Height of the most recent attributed block.
+    pub last_mined_height: Option<String>,
+    /// Hash of the most recent attributed block.
+    pub last_mined_block_hash: Option<String>,
+    /// Timestamp of the most recent attributed block.
+    pub last_mined_at: Option<String>,
+    /// Stake publicly attributable to this transparent payout address.
+    pub staked_zat: Option<String>,
+    /// Finalizers publicly attributable to this transparent payout address.
+    pub finalizer_count: Option<String>,
+    /// Highest finalized indexed height represented by this response.
+    pub indexed_height: Option<String>,
+    /// Finalized indexed block hash represented by this response.
+    pub indexed_block_hash: Option<String>,
+}
+
 /// Aggregate values displayed above the all-time miner ranking.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct TopMinersSummary {
