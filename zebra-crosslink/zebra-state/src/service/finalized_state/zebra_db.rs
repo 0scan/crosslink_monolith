@@ -87,6 +87,12 @@ pub struct ZebraDb {
 }
 
 impl ZebraDb {
+    /// Returns the low-level database used by crate-local typed storage extensions.
+    #[cfg(feature = "indexer")]
+    pub(crate) fn disk_db(&self) -> &DiskDb {
+        &self.db
+    }
+
     /// Opens or creates the database at a path based on the kind, major version and network,
     /// with the supplied column families, preserving any existing column families,
     /// and returns a shared high-level typed database wrapper.
@@ -192,6 +198,9 @@ impl ZebraDb {
                 If you just run the node for consensus and don't use data from the RPC interface, you can ignore this warning."
             )
         }
+
+        #[cfg(feature = "indexer")]
+        db.ensure_explorer_schema(read_only)?;
 
         db.spawn_format_change(format_change);
 

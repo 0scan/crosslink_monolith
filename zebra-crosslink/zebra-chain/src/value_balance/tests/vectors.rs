@@ -61,6 +61,20 @@ fn total_over_max_money_is_rejected() {
     assert!(matches!(error, ValueBalanceError::Total(_)));
 }
 
+/// Check that Crosslink staking pools participate in the total monetary base.
+#[test]
+fn staking_pools_are_included_in_total() {
+    let mut value_balance = ValueBalance::<NonNegative>::zero();
+    value_balance.set_staking_bonded_amount(Amount::try_from(3).expect("valid amount"));
+    value_balance.set_staking_unbonded_amount(Amount::try_from(5).expect("valid amount"));
+    value_balance.set_finalizer_rewards_amount(Amount::try_from(7).expect("valid amount"));
+
+    assert_eq!(
+        value_balance.total().expect("staking pool total is valid"),
+        Amount::<NonNegative>::try_from(15).expect("valid amount"),
+    );
+}
+
 /// Check that the ironwood value balance is included in a transaction's
 /// remaining value.
 #[test]

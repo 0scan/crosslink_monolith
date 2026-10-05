@@ -38,7 +38,7 @@ pub struct GetBlockchainInfoBalance {
 
 impl GetBlockchainInfoBalance {
     /// Returns a list of [`GetBlockchainInfoBalance`]s converted from the default [`ValueBalance`].
-    pub fn zero_pools() -> [Self; 6] {
+    pub fn zero_pools() -> [Self; 9] {
         Self::value_pools(Default::default(), None)
     }
 
@@ -92,11 +92,35 @@ impl GetBlockchainInfoBalance {
         Self::new_internal("ironwood", amount, delta)
     }
 
+    /// Creates a [`GetBlockchainInfoBalance`] for active delegation bonds.
+    pub fn staking_bonded(
+        amount: Amount<NonNegative>,
+        delta: Option<Amount<NegativeAllowed>>,
+    ) -> Self {
+        Self::new_internal("staking_bonded", amount, delta)
+    }
+
+    /// Creates a [`GetBlockchainInfoBalance`] for released delegation bonds.
+    pub fn staking_unbonded(
+        amount: Amount<NonNegative>,
+        delta: Option<Amount<NegativeAllowed>>,
+    ) -> Self {
+        Self::new_internal("staking_unbonded", amount, delta)
+    }
+
+    /// Creates a [`GetBlockchainInfoBalance`] for unconverted finalizer rewards.
+    pub fn finalizer_rewards(
+        amount: Amount<NonNegative>,
+        delta: Option<Amount<NegativeAllowed>>,
+    ) -> Self {
+        Self::new_internal("finalizer_rewards", amount, delta)
+    }
+
     /// Converts a [`ValueBalance`] to a list of [`GetBlockchainInfoBalance`]s.
     pub fn value_pools(
         value_balance: ValueBalance<NonNegative>,
         delta_balance: Option<ValueBalance<NegativeAllowed>>,
-    ) -> [Self; 6] {
+    ) -> [Self; 9] {
         [
             Self::transparent(
                 value_balance.transparent_amount(),
@@ -123,6 +147,18 @@ impl GetBlockchainInfoBalance {
                 value_balance.ironwood_amount(),
                 delta_balance.map(|b| b.ironwood_amount()),
             ),
+            Self::staking_bonded(
+                value_balance.staking_bonded_amount(),
+                delta_balance.map(|b| b.staking_bonded_amount()),
+            ),
+            Self::staking_unbonded(
+                value_balance.staking_unbonded_amount(),
+                delta_balance.map(|b| b.staking_unbonded_amount()),
+            ),
+            Self::finalizer_rewards(
+                value_balance.finalizer_rewards_amount(),
+                delta_balance.map(|b| b.finalizer_rewards_amount()),
+            ),
         ]
     }
 
@@ -139,5 +175,34 @@ impl GetBlockchainInfoBalance {
                 )
             })
             .expect("at least one pool")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GetBlockchainInfoBalance;
+
+    #[test]
+    fn value_pools_include_crosslink_staking_balances() {
+        let pools = GetBlockchainInfoBalance::zero_pools();
+        let ids = pools
+            .iter()
+            .map(|pool| pool.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            [
+                "transparent",
+                "sprout",
+                "sapling",
+                "orchard",
+                "lockbox",
+                "ironwood",
+                "staking_bonded",
+                "staking_unbonded",
+                "finalizer_rewards",
+            ]
+        );
     }
 }

@@ -113,10 +113,19 @@ use crate::{
     },
 };
 
+mod explorer;
 pub(crate) mod hex_data;
 pub(crate) mod trees;
 pub mod types;
 
+use explorer::types::{
+    AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
+    BlocksResponse, ChartDataRequest, ChartDataResponse, ExplorerNetworkStatsResponse,
+    GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
+    GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
+    MempoolTransactionsResponse, TopBalancesRequest, TopBalancesResponse,
+    TransactionDetailsResponse, TransactionsResponse,
+};
 use hex_data::HexData;
 use trees::{GetSubtreesByIndexResponse, GetTreestateResponse, SubtreeRpcData};
 use types::{
@@ -144,6 +153,15 @@ use types::{
     validate_address::ValidateAddressResponse,
     z_validate_address::ZValidateAddressResponse,
 };
+
+/// Calls a Tower service and maps readiness or call errors to the legacy miscellaneous error.
+async fn call_service<S, Request>(service: S, request: Request) -> Result<S::Response>
+where
+    S: Service<Request>,
+    S::Error: ToString,
+{
+    service.oneshot(request).await.map_misc_error()
+}
 
 include!(concat!(env!("OUT_DIR"), "/rpc_openrpc.rs"));
 
@@ -858,6 +876,70 @@ pub trait Rpc {
     /// tags: blockchain
     #[method(name = "getblockcount")]
     fn get_block_count(&self) -> Result<u32>;
+
+    /// Returns a newest-first, cursor-paginated page of canonical blocks.
+    #[method(name = "getblocks")]
+    async fn get_blocks(&self, request: Option<GetBlocksRequest>) -> Result<BlocksResponse>;
+
+    /// Returns complete explorer details for a canonical block.
+    #[method(name = "getblockdetails")]
+    async fn get_block_details(&self, hash_or_height: String) -> Result<BlockDetails>;
+
+    /// Returns a cursor-paginated, filterable page of canonical transactions.
+    #[method(name = "gettransactions")]
+    async fn get_transactions(
+        &self,
+        request: Option<GetTransactionsRequest>,
+    ) -> Result<TransactionsResponse>;
+
+    /// Returns a cursor-paginated page of transactions in this node's mempool.
+    #[method(name = "getmempooltransactions")]
+    async fn get_mempool_transactions(
+        &self,
+        request: Option<GetMempoolTransactionsRequest>,
+    ) -> Result<MempoolTransactionsResponse>;
+
+    /// Returns complete explorer details for a mined or mempool transaction.
+    #[method(name = "gettransactiondetails")]
+    async fn get_transaction_details(&self, txid: String) -> Result<TransactionDetailsResponse>;
+
+    /// Returns indexed balance and activity information for one transparent address.
+    #[method(name = "getaddresssummary")]
+    async fn get_address_summary(&self, address: String) -> Result<AddressSummary>;
+
+    /// Returns a cursor-paginated page of canonical transactions involving one address.
+    #[method(name = "getaddresstransactions")]
+    async fn get_address_transactions(
+        &self,
+        request: GetAddressTransactionsRequest,
+    ) -> Result<AddressTransactionsResponse>;
+
+    /// Returns a cursor-paginated page of current transparent unspent outputs.
+    #[method(name = "getaddressutxospage")]
+    async fn get_address_utxos_page(
+        &self,
+        request: GetAddressUtxosPageRequest,
+    ) -> Result<AddressUtxosResponse>;
+
+    /// Returns explorer index catch-up progress relative to the node state tip.
+    #[method(name = "getindexerstatus")]
+    async fn get_indexer_status(&self) -> Result<IndexerStatusResponse>;
+
+    /// Returns persisted canonical aggregates and live node network statistics.
+    #[method(name = "getnetworkstats")]
+    async fn get_network_stats(&self) -> Result<ExplorerNetworkStatsResponse>;
+
+    /// Returns date-paginated daily explorer chart snapshots.
+    #[method(name = "getexplorerchartdata")]
+    async fn get_explorer_chart_data(&self, request: ChartDataRequest)
+        -> Result<ChartDataResponse>;
+
+    /// Returns the cursor-paginated transparent-address balance ranking.
+    #[method(name = "getexplorertopbalances")]
+    async fn get_explorer_top_balances(
+        &self,
+        request: TopBalancesRequest,
+    ) -> Result<TopBalancesResponse>;
 
     /// Returns the hash of the block of a given height iff the index argument correspond
     /// to a block in the best chain.
@@ -3344,6 +3426,72 @@ where
         best_chain_tip_height(&self.latest_chain_tip).map(|height| height.0)
     }
 
+    async fn get_blocks(&self, request: Option<GetBlocksRequest>) -> Result<BlocksResponse> {
+        self.explorer_get_blocks(request).await
+    }
+
+    async fn get_block_details(&self, hash_or_height: String) -> Result<BlockDetails> {
+        self.explorer_get_block_details(hash_or_height).await
+    }
+
+    async fn get_transactions(
+        &self,
+        request: Option<GetTransactionsRequest>,
+    ) -> Result<TransactionsResponse> {
+        self.explorer_get_transactions(request).await
+    }
+
+    async fn get_mempool_transactions(
+        &self,
+        request: Option<GetMempoolTransactionsRequest>,
+    ) -> Result<MempoolTransactionsResponse> {
+        self.explorer_get_mempool_transactions(request).await
+    }
+
+    async fn get_transaction_details(&self, txid: String) -> Result<TransactionDetailsResponse> {
+        self.explorer_get_transaction_details(txid).await
+    }
+
+    async fn get_address_summary(&self, address: String) -> Result<AddressSummary> {
+        self.explorer_get_address_summary(address).await
+    }
+
+    async fn get_address_transactions(
+        &self,
+        request: GetAddressTransactionsRequest,
+    ) -> Result<AddressTransactionsResponse> {
+        self.explorer_get_address_transactions(request).await
+    }
+
+    async fn get_address_utxos_page(
+        &self,
+        request: GetAddressUtxosPageRequest,
+    ) -> Result<AddressUtxosResponse> {
+        self.explorer_get_address_utxos_page(request).await
+    }
+
+    async fn get_indexer_status(&self) -> Result<IndexerStatusResponse> {
+        self.explorer_get_indexer_status().await
+    }
+
+    async fn get_network_stats(&self) -> Result<ExplorerNetworkStatsResponse> {
+        self.explorer_get_network_stats().await
+    }
+
+    async fn get_explorer_chart_data(
+        &self,
+        request: ChartDataRequest,
+    ) -> Result<ChartDataResponse> {
+        self.explorer_get_chart_data(request).await
+    }
+
+    async fn get_explorer_top_balances(
+        &self,
+        request: TopBalancesRequest,
+    ) -> Result<TopBalancesResponse> {
+        self.explorer_get_top_balances(request).await
+    }
+
     async fn get_block_hash(&self, index: i32) -> Result<GetBlockHashResponse> {
         let mut read_state = self.read_state.clone();
         let latest_chain_tip = self.latest_chain_tip.clone();
@@ -4651,7 +4799,7 @@ pub struct EndOfService {
 }
 
 /// Type alias for the array of `GetBlockchainInfoBalance` objects
-pub type BlockchainValuePoolBalances = [GetBlockchainInfoBalance; 6];
+pub type BlockchainValuePoolBalances = [GetBlockchainInfoBalance; 9];
 
 /// Response to a `getblockchaininfo` RPC request.
 ///

@@ -33,6 +33,8 @@ pub mod arbitrary;
 pub mod crosslink;
 
 mod error;
+#[cfg(feature = "indexer")]
+mod explorer;
 mod request;
 mod response;
 mod service;
@@ -50,6 +52,17 @@ pub use constants::{
 pub use error::{
     BoxError, CloneError, CommitBlockError, CommitCheckpointVerifiedError,
     CommitSemanticallyVerifiedError, DuplicateNullifierError, StateInitError, ValidateContextError,
+};
+#[cfg(feature = "indexer")]
+pub use explorer::{
+    ExplorerAddressPage, ExplorerAddressRecord, ExplorerAmountFilter, ExplorerBalanceRankCursor,
+    ExplorerBalanceRankEntry, ExplorerBalanceRankPage, ExplorerBlockStats, ExplorerBlockSummary,
+    ExplorerChainStats, ExplorerDailyStats, ExplorerIntervalStats, ExplorerPageDirection,
+    ExplorerReadRequest, ExplorerReadResponse, ExplorerRollingStats, ExplorerShieldedFlow,
+    ExplorerShieldedFlowFilter, ExplorerShieldedPool, ExplorerShieldedPoolFilter,
+    ExplorerStatsSnapshot, ExplorerTransactionKind, ExplorerTransactionKindFilter,
+    ExplorerTransactionPage, ExplorerTransactionQuery, ExplorerTransactionRecord,
+    ExplorerTransactionSummary,
 };
 pub use request::{
     CheckpointVerifiedBlock, CommitSemanticallyVerifiedBlockRequest, HashOrHeight, MappedRequest,

@@ -39,6 +39,13 @@ use crate::{
     CheckpointVerifiedBlock, Config, StateInitError, ValidateContextError,
 };
 
+#[cfg(feature = "indexer")]
+use crate::explorer::{
+    EXPLORER_ADDRESS_META, EXPLORER_BALANCE_ORDER, EXPLORER_BLOCK_STATS, EXPLORER_CHAIN_STATS,
+    EXPLORER_DAILY_STATS, EXPLORER_SCHEMA, EXPLORER_SHIELDED_TRANSACTION_BY_CLASS_LOC,
+    EXPLORER_TRANSACTION_BY_KIND_LOC, EXPLORER_TRANSACTION_META_BY_LOC,
+};
+
 pub mod column_family;
 
 mod disk_db;
@@ -56,6 +63,11 @@ mod tests;
 pub use column_family::{TypedColumnFamily, WriteTypedBatch};
 #[allow(unused_imports)]
 pub use disk_db::{DiskDb, DiskWriteBatch, ReadDisk, WriteDisk};
+#[cfg(feature = "indexer")]
+pub(crate) use disk_format::{
+    block::TRANSACTION_LOCATION_DISK_BYTES,
+    transparent::{AddressBalanceLocation, AddressBalanceLocationUpdates},
+};
 #[allow(unused_imports)]
 pub use disk_format::{
     FromDisk, IntoDisk, OutputLocation, RawBytes, TransactionIndex, TransactionLocation,
@@ -80,6 +92,24 @@ pub const STATE_COLUMN_FAMILIES_IN_CODE: &[&str] = &[
     "tx_by_loc",
     "hash_by_tx_loc",
     "tx_loc_by_hash",
+    #[cfg(feature = "indexer")]
+    EXPLORER_SCHEMA,
+    #[cfg(feature = "indexer")]
+    EXPLORER_TRANSACTION_META_BY_LOC,
+    #[cfg(feature = "indexer")]
+    EXPLORER_TRANSACTION_BY_KIND_LOC,
+    #[cfg(feature = "indexer")]
+    EXPLORER_SHIELDED_TRANSACTION_BY_CLASS_LOC,
+    #[cfg(feature = "indexer")]
+    EXPLORER_ADDRESS_META,
+    #[cfg(feature = "indexer")]
+    EXPLORER_BLOCK_STATS,
+    #[cfg(feature = "indexer")]
+    EXPLORER_CHAIN_STATS,
+    #[cfg(feature = "indexer")]
+    EXPLORER_DAILY_STATS,
+    #[cfg(feature = "indexer")]
+    EXPLORER_BALANCE_ORDER,
     // Transparent
     BALANCE_BY_TRANSPARENT_ADDR,
     "tx_loc_by_transparent_addr_loc",

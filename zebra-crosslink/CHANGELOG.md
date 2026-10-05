@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- Added an opt-in `indexer` feature with in-process RocksDB-backed explorer indexes and RPCs for
+  block, transaction, address, index status, network statistics, chart, and top-balance queries.
+  Enabling it requires a fresh state database so the explorer indexes can be built from genesis.
 - Added `seeder.zec.rocks` and `seeder.testnet.zec.rocks` as default DNS seeders
   ([#11096](https://github.com/ZcashFoundation/zebra/pull/11096)).
 - Prometheus metrics now separate peer connection attempts and terminal outcomes by network,

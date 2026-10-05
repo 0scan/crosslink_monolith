@@ -502,6 +502,10 @@ pub enum ReadResponse {
     /// Response to [`ReadRequest::Transaction`] with the specified transaction.
     Transaction(Option<MinedTx>),
 
+    /// Response to an explorer-only state read.
+    #[cfg(feature = "indexer")]
+    Explorer(crate::ExplorerReadResponse),
+
     /// Response to [`Request::Transaction`] with the specified transaction.
     AnyChainTransaction(Option<AnyTx>),
 
@@ -785,6 +789,9 @@ impl TryFrom<ReadResponse> for Response {
 
             #[cfg(feature = "indexer")]
             ReadResponse::TransactionId(_) => Err("there is no corresponding Response for this ReadResponse"),
+
+            #[cfg(feature = "indexer")]
+            ReadResponse::Explorer(_) => Err("there is no corresponding Response for this ReadResponse"),
 
             ReadResponse::ValidBlockProposal => Ok(Response::ValidBlockProposal),
 
