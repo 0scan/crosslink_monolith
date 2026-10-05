@@ -753,7 +753,7 @@ pub fn get_tips_blocking(read_state: &ReadState) -> ((Height, Hash), (Height, Ha
     loop {
         let (Some(tip), Some(finalized_tip)) = (read_state.best_tip(), read_state.finalized_tip())
         else {
-            std::thread::yield_now();
+            std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         };
         break (tip, finalized_tip)

@@ -552,9 +552,9 @@ checksum = "4df6f98652d30167eaeea34d77b730e07c8caba6df17bd4551842b9b8da01deb"
 
 [[package]]
 name = "cosmo-build"
-version = "8.0.0"
+version = "9.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a699a5c8216cd11a947109c84911b9ce9422d353f79a5a6c7497f0e6140ff94"
+checksum = "1d12b37641181c32dfc5ed97e3d2de9c78ed06a6f5d401be6024cb369b48861b"
 dependencies = [
  "ureq",
  "zip",
@@ -562,9 +562,9 @@ dependencies = [
 
 [[package]]
 name = "cosmo-compat"
-version = "8.0.0"
+version = "9.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29ec03234001fa43dea9d2906ea87ece968c1896cd43740401d1e6b775ad6963"
+checksum = "344aa0f459a52f74560d833ff39af4506720654a47482dc14d86953ebe17e5a9"
 dependencies = [
  "libc",
  "rustix",
@@ -875,7 +875,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1640,7 +1640,7 @@ version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d463f34ca3c400fde3a054da0e0b8c6ffa21e4590922f3e18281bb5eeef4cbdc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2548,7 +2548,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3049,7 +3049,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

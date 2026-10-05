@@ -2142,7 +2142,9 @@ pub fn new_network_thread(my_keypairs: Vec<IdentityKeyPair>, my_port: u16, max_p
 
 //////// END SEND ////////////////////////////////////////////////////////////////////////
 
-                if should_sleep { std::thread::yield_now(); }
+                // Idle: sleep instead of spinning on a core. 150us is well below
+                // any packet-arrival timescale here and keeps the thread parked when quiet.
+                if should_sleep { std::thread::sleep(std::time::Duration::from_micros(150)); }
             }
         }
     });
@@ -2288,7 +2290,9 @@ pub fn service_connections(network_thread_handle: &NetworkThreadHandle, mut req:
         if std::time::Instant::now() >= deadline {
             return None;
         }
-        std::hint::spin_loop();
+        // Sleep-poll: spinning here burned a core per caller for as long as the
+        // network thread took to answer.
+        std::thread::sleep(std::time::Duration::from_micros(25));
     }
 
     #[allow(unsafe_code)]
@@ -2302,8 +2306,7 @@ pub fn service_connections(network_thread_handle: &NetworkThreadHandle, mut req:
         if std::time::Instant::now() >= deadline {
             return None;
         }
-        //std::hint::spin_loop();
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_micros(25));
     }
 
     let mut resp = NetworkThreadPull::default();

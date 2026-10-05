@@ -28,7 +28,7 @@ lewton = { version = "0.10.2", optional = true, default-features = false }
 [build-dependencies]
 png = "0.17"
 # Only fetched, compiled or run when -F ape is on.
-cosmo-build = { version = "8", optional = true }
+cosmo-build = { version = "9", optional = true }
 
 # Host-gated rather than target-gated: cross-building a Windows binary from another OS
 # would need this unconditionally, which no build here does.
@@ -47,7 +47,7 @@ ape = ["dep:cosmo-build"]
 [target.'cfg(cosmo)'.dependencies]
 # Translates the libc entry points std calls, whose constants rustc bakes in for
 # Linux but cosmopolitan resolves at load time.
-cosmo-compat = "8"
+cosmo-compat = "9"
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(cosmo)'] }
