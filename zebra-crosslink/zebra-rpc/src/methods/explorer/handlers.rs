@@ -5,6 +5,8 @@ use chrono::Utc;
 use jsonrpsee::core::RpcResult as Result;
 use tower::Service;
 #[cfg(feature = "indexer")]
+use zcash_primitives::bft::ACTIVE_ROSTER_MAX_N;
+#[cfg(feature = "indexer")]
 use zebra_chain::{
     block::{self, Height},
     parameters::NetworkUpgrade,
@@ -23,15 +25,18 @@ use zebra_network::address_book_peers::AddressBookPeers;
 use zebra_node_services::mempool::{self as node_mempool, MempoolService};
 use zebra_state::crosslink::{TFLServiceRequest, TFLServiceResponse};
 #[cfg(feature = "indexer")]
-use zebra_state::HashOrHeight;
+use zebra_state::{HashOrHeight, ReadRequest, ReadResponse};
 use zebra_state::{ReadState as ReadStateService, State as StateService};
 
 use crate::server::{self, error::MapError};
 
 #[cfg(feature = "indexer")]
 use super::types::{
-    BlockchainRuntimeStats, MempoolStats, MiningStats, NetworkStats, NodeSyncStats,
-    SupplyPoolStats, SupplyStats,
+    BlockchainRuntimeStats, CrosslinkActivationMilestone, CrosslinkActivationOverview,
+    CrosslinkFinalityOverview, CrosslinkFinalityStatus, CrosslinkFinalizersOverview,
+    CrosslinkMinersOverview, CrosslinkNetworkStats, CrosslinkPhase, CrosslinkStakingChange,
+    CrosslinkStakingOverview, CrosslinkStakingStatus, MempoolStats, MiningStats, NetworkStats,
+    NodeSyncStats, SupplyPoolStats, SupplyStats,
 };
 use super::{
     mempool,
@@ -374,26 +379,61 @@ where
 
         #[cfg(feature = "indexer")]
         {
-            let chain_tip = self.latest_chain_tip.best_tip_height_and_hash();
             let indexer_stats = stats_from_state(self.read_state.clone())
                 .await
                 .map_misc_error()?;
 
-            let (blockchain, network_solps, mempool, subsidy) = tokio::join!(
+            let (
+                blockchain,
+                network_solps,
+                mempool,
+                subsidy,
+                activated_response,
+                finalized_response,
+                roster_response,
+            ) = tokio::join!(
                 self.get_blockchain_info(),
                 self.get_network_sol_ps(None, None),
                 self.get_mempool_info(),
                 self.get_block_subsidy(None),
+                call_service(self.read_state.clone(), ReadRequest::CrosslinkIsActivated),
+                call_service(self.read_state.clone(), ReadRequest::CrosslinkFinalizedTip),
+                call_service(self.read_state.clone(), ReadRequest::CrosslinkRoster),
             );
             let blockchain = blockchain?;
             let network_solps = network_solps?;
             let mempool = mempool?;
             let subsidy = subsidy.ok();
+            let activated = match activated_response? {
+                ReadResponse::CrosslinkIsActivated(activated) => activated,
+                _ => unreachable!("unmatched response to CrosslinkIsActivated"),
+            };
+            let finalized_tip = match finalized_response? {
+                ReadResponse::CrosslinkFinalizedTip(tip) => tip,
+                _ => unreachable!("unmatched response to CrosslinkFinalizedTip"),
+            };
+            let roster = match roster_response? {
+                ReadResponse::CrosslinkRoster(roster) => roster,
+                _ => unreachable!("unmatched response to CrosslinkRoster"),
+            };
+
+            let generated_at = Utc::now().timestamp();
+            let chain_tip = self.latest_chain_tip.best_tip_height_and_hash();
+            let node_block_timestamp = chain_tip.and_then(|(height, _)| {
+                self.latest_chain_tip
+                    .best_tip_height_and_block_time()
+                    .filter(|(time_height, _)| *time_height == height)
+                    .map(|(_, time)| time.timestamp())
+            });
             let estimated_network_height = blockchain.estimated_height();
             let node_height = chain_tip.map(|(height, _)| height);
             let sync = NodeSyncStats {
                 estimated_network_height: estimated_network_height.0.to_string(),
                 node_height: node_height.map(|height| height.0.to_string()),
+                node_block_hash: chain_tip.map(|(_, hash)| hash.to_string()),
+                node_block_timestamp: node_block_timestamp.map(|time| time.to_string()),
+                node_block_age_seconds: node_block_timestamp
+                    .map(|time| generated_at.saturating_sub(time).max(0).to_string()),
                 lag: node_height.map(|height| {
                     estimated_network_height
                         .0
@@ -411,6 +451,83 @@ where
                 )
                 .ok()
             });
+            let tip_height = node_height.map(|height| height.0);
+            let params = self.network.crosslink_parameters();
+            let staking_height = params.bootstrap.staking_height();
+            let roster_height = params.bootstrap.roster_height();
+            let activation_height = params.bootstrap.activation_height();
+            let pool_balance = |id: &str| {
+                blockchain
+                    .value_pools()
+                    .iter()
+                    .find(|pool| pool.id().as_str() == id)
+                    .map(|pool| pool.chain_value_zat().zatoshis().to_string())
+                    .unwrap_or_else(|| "0".to_string())
+            };
+            let staking = crosslink_staking_overview(
+                tip_height,
+                staking_height,
+                params.staking.period,
+                params.staking.day_window,
+                generated_at,
+                target_block_time_seconds,
+                pool_balance("staking_bonded"),
+                pool_balance("staking_unbonded"),
+                pool_balance("finalizer_rewards"),
+            );
+            let activation = crosslink_activation_overview(
+                tip_height,
+                staking_height,
+                roster_height,
+                activation_height,
+                generated_at,
+                target_block_time_seconds,
+            );
+            let finality_status = if finalized_tip.is_some() {
+                CrosslinkFinalityStatus::Active
+            } else if activated
+                || tip_height
+                    .zip(activation_height)
+                    .is_some_and(|(tip, height)| tip >= height)
+            {
+                CrosslinkFinalityStatus::Starting
+            } else {
+                CrosslinkFinalityStatus::NotActivated
+            };
+            let finalized_height = finalized_tip.map(|(height, _)| height.0);
+            let active_count = roster.len().min(ACTIVE_ROSTER_MAX_N);
+            let active_voting_power_zat = roster
+                .iter()
+                .take(active_count)
+                .fold(0_u64, |total, member| {
+                    total.saturating_add(member.voting_power)
+                });
+            let crosslink = CrosslinkNetworkStats {
+                finality: CrosslinkFinalityOverview {
+                    status: finality_status,
+                    activated,
+                    finalized_height: finalized_height.map(|height| height.to_string()),
+                    finalized_hash: finalized_tip.map(|(_, hash)| hash.to_string()),
+                    lag_blocks: tip_height
+                        .zip(finalized_height)
+                        .map(|(tip, finalized)| tip.saturating_sub(finalized).to_string()),
+                    confirmation_depth_blocks: params.bc_confirmation_depth_sigma.to_string(),
+                },
+                staking,
+                miners: CrosslinkMinersOverview {
+                    count: indexer_stats.miner_count.clone(),
+                    count_scope: "all".to_string(),
+                    blocks_24h: indexer_stats.trailing_24h.block_count.clone(),
+                    blocks_24h_complete: indexer_stats.trailing_24h.complete,
+                },
+                finalizers: CrosslinkFinalizersOverview {
+                    roster_count: roster.len().to_string(),
+                    active_count: active_count.to_string(),
+                    active_limit: ACTIVE_ROSTER_MAX_N.to_string(),
+                    active_voting_power_zat: active_voting_power_zat.to_string(),
+                },
+                activation,
+            };
             let supply = SupplyStats {
                 chain_supply_zat: blockchain
                     .chain_supply()
@@ -470,7 +587,8 @@ where
                     state_size_bytes: blockchain.size_on_disk().to_string(),
                     pruned: blockchain.pruned(),
                 },
-                generated_at: Utc::now().timestamp().to_string(),
+                crosslink,
+                generated_at: generated_at.to_string(),
             };
 
             Ok(response)
@@ -568,6 +686,170 @@ where
     }
 }
 
+#[cfg(feature = "indexer")]
+#[allow(clippy::too_many_arguments)]
+fn crosslink_staking_overview(
+    tip_height: Option<u32>,
+    staking_height: Option<u32>,
+    period: u32,
+    window: u32,
+    now: i64,
+    target_block_time_seconds: Option<u64>,
+    bonded_zat: String,
+    unbonded_zat: String,
+    finalizer_rewards_zat: String,
+) -> CrosslinkStakingOverview {
+    let first_staking_height = staking_height.unwrap_or(0);
+    let (status, window_start, window_end, next_change, next_change_height, blocks_remaining) =
+        match tip_height {
+            None => (
+                CrosslinkStakingStatus::NotStarted,
+                None,
+                None,
+                Some(CrosslinkStakingChange::Opens),
+                staking_height,
+                None,
+            ),
+            Some(tip) if tip < first_staking_height => (
+                CrosslinkStakingStatus::NotStarted,
+                None,
+                None,
+                Some(CrosslinkStakingChange::Opens),
+                Some(first_staking_height),
+                Some(first_staking_height - tip),
+            ),
+            Some(tip) => {
+                let offset = tip % period;
+                let period_start = tip - offset;
+                if offset < window {
+                    let closes_at = period_start.saturating_add(window);
+                    (
+                        CrosslinkStakingStatus::Open,
+                        Some(period_start),
+                        Some(closes_at.saturating_sub(1)),
+                        Some(CrosslinkStakingChange::Closes),
+                        Some(closes_at),
+                        Some(closes_at.saturating_sub(tip)),
+                    )
+                } else {
+                    let opens_at = period_start.saturating_add(period);
+                    (
+                        CrosslinkStakingStatus::Closed,
+                        None,
+                        None,
+                        Some(CrosslinkStakingChange::Opens),
+                        Some(opens_at),
+                        Some(opens_at.saturating_sub(tip)),
+                    )
+                }
+            }
+        };
+
+    CrosslinkStakingOverview {
+        status,
+        window_open: status == CrosslinkStakingStatus::Open,
+        window_start_height: window_start.map(|height| height.to_string()),
+        window_end_height: window_end.map(|height| height.to_string()),
+        next_change,
+        next_change_height: next_change_height.map(|height| height.to_string()),
+        blocks_remaining: blocks_remaining.map(|blocks| blocks.to_string()),
+        estimated_at: blocks_remaining
+            .and_then(|blocks| estimated_transition_time(now, blocks, target_block_time_seconds)),
+        period_blocks: period.to_string(),
+        window_blocks: window.to_string(),
+        bonded_zat,
+        unbonded_zat,
+        finalizer_rewards_zat,
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn crosslink_activation_overview(
+    tip_height: Option<u32>,
+    staking_height: Option<u32>,
+    roster_height: Option<u32>,
+    activation_height: Option<u32>,
+    now: i64,
+    target_block_time_seconds: Option<u64>,
+) -> CrosslinkActivationOverview {
+    let milestones = [
+        (CrosslinkPhase::Staking, staking_height),
+        (CrosslinkPhase::FirstFinalizers, roster_height),
+        (CrosslinkPhase::Finality, activation_height),
+    ]
+    .into_iter()
+    .filter_map(|(phase, height)| {
+        let height = height?;
+        let reached = tip_height.is_some_and(|tip| tip >= height);
+        let blocks_remaining = tip_height.map_or(height, |tip| height.saturating_sub(tip));
+        let estimated_at = if reached || tip_height.is_none() {
+            None
+        } else {
+            estimated_transition_time(now, blocks_remaining, target_block_time_seconds)
+        };
+        Some(CrosslinkActivationMilestone {
+            phase,
+            height: height.to_string(),
+            reached,
+            blocks_remaining: blocks_remaining.to_string(),
+            estimated_at,
+        })
+    })
+    .collect();
+
+    let (current_phase, progress_percent) = match (
+        tip_height,
+        staking_height,
+        roster_height,
+        activation_height,
+    ) {
+        (None, _, _, _) => (None, None),
+        (Some(_), None, None, None) => (Some(CrosslinkPhase::Finality), None),
+        (Some(tip), Some(staking), Some(_), Some(_)) if tip < staking => (
+            Some(CrosslinkPhase::Mining),
+            Some(phase_progress_percent(tip, 0, staking)),
+        ),
+        (Some(tip), Some(staking), Some(roster), Some(_)) if tip < roster => (
+            Some(CrosslinkPhase::Staking),
+            Some(phase_progress_percent(tip, staking, roster)),
+        ),
+        (Some(tip), Some(_), Some(roster), Some(activation)) if tip < activation => (
+            Some(CrosslinkPhase::FirstFinalizers),
+            Some(phase_progress_percent(tip, roster, activation)),
+        ),
+        (Some(_), _, _, _) => (Some(CrosslinkPhase::Finality), None),
+    };
+
+    CrosslinkActivationOverview {
+        current_phase,
+        progress_percent,
+        milestones,
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn phase_progress_percent(height: u32, start: u32, end: u32) -> String {
+    let span = u64::from(end.saturating_sub(start));
+    if span == 0 {
+        return "100.0".to_string();
+    }
+
+    let elapsed = u64::from(height.saturating_sub(start)).min(span);
+    let tenths = elapsed.saturating_mul(1_000).saturating_add(span / 2) / span;
+    format!("{}.{:01}", tenths / 10, tenths % 10)
+}
+
+#[cfg(feature = "indexer")]
+fn estimated_transition_time(
+    now: i64,
+    blocks_remaining: u32,
+    target_block_time_seconds: Option<u64>,
+) -> Option<String> {
+    let seconds = u64::from(blocks_remaining).checked_mul(target_block_time_seconds?)?;
+    let seconds = i64::try_from(seconds).ok()?;
+    now.checked_add(seconds).map(|timestamp| timestamp.to_string())
+}
+
 #[cfg(not(feature = "indexer"))]
 fn explorer_index_disabled<T>() -> Result<T> {
     Err("explorer state index is not enabled in this zebrad process").map_misc_error()
@@ -643,7 +925,10 @@ fn indexer_status(
 mod tests {
     use zebra_chain::block::{Hash, Height};
 
-    use super::indexer_status;
+    use super::{
+        crosslink_activation_overview, crosslink_staking_overview, indexer_status, CrosslinkPhase,
+        CrosslinkStakingChange, CrosslinkStakingStatus,
+    };
 
     #[test]
     fn indexer_status_compares_height_and_hash() {
@@ -663,5 +948,59 @@ mod tests {
         let empty = indexer_status(None, None, None);
         assert!(empty.synced);
         assert_eq!(empty.sync_progress, "100.0000");
+    }
+
+    #[test]
+    fn crosslink_activation_matches_the_prototype_timeline() {
+        let overview = crosslink_activation_overview(
+            Some(20_091),
+            Some(20_736),
+            Some(34_560),
+            Some(36_288),
+            1_000,
+            Some(25),
+        );
+
+        assert_eq!(overview.current_phase, Some(CrosslinkPhase::Mining));
+        assert_eq!(overview.progress_percent.as_deref(), Some("96.9"));
+        assert_eq!(overview.milestones[0].blocks_remaining, "645");
+        assert_eq!(overview.milestones[0].estimated_at.as_deref(), Some("17125"));
+        assert_eq!(overview.milestones[2].height, "36288");
+    }
+
+    #[test]
+    fn crosslink_staking_reports_open_and_closed_windows() {
+        let open = crosslink_staking_overview(
+            Some(20_736),
+            Some(20_736),
+            10_368,
+            3_456,
+            1_000,
+            Some(25),
+            "1".to_string(),
+            "2".to_string(),
+            "3".to_string(),
+        );
+        assert_eq!(open.status, CrosslinkStakingStatus::Open);
+        assert_eq!(open.window_start_height.as_deref(), Some("20736"));
+        assert_eq!(open.window_end_height.as_deref(), Some("24191"));
+        assert_eq!(open.next_change, Some(CrosslinkStakingChange::Closes));
+        assert_eq!(open.blocks_remaining.as_deref(), Some("3456"));
+
+        let closed = crosslink_staking_overview(
+            Some(24_192),
+            Some(20_736),
+            10_368,
+            3_456,
+            1_000,
+            Some(25),
+            "1".to_string(),
+            "2".to_string(),
+            "3".to_string(),
+        );
+        assert_eq!(closed.status, CrosslinkStakingStatus::Closed);
+        assert_eq!(closed.next_change, Some(CrosslinkStakingChange::Opens));
+        assert_eq!(closed.next_change_height.as_deref(), Some("31104"));
+        assert_eq!(closed.blocks_remaining.as_deref(), Some("6912"));
     }
 }

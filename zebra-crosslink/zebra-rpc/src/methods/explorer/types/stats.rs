@@ -4,6 +4,8 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use zebra_indexer::{ChainTotals, RollingDayStats};
 
+use super::CrosslinkNetworkStats;
+
 /// Progress of the rebuildable explorer index relative to the node state tip.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct IndexerStatusResponse {
@@ -65,6 +67,12 @@ pub struct NodeSyncStats {
     pub estimated_network_height: String,
     /// Current locally verified canonical chain height.
     pub node_height: Option<String>,
+    /// Current locally verified canonical chain block hash.
+    pub node_block_hash: Option<String>,
+    /// Current locally verified canonical chain block timestamp as Unix seconds.
+    pub node_block_timestamp: Option<String>,
+    /// Seconds elapsed since the current canonical block timestamp.
+    pub node_block_age_seconds: Option<String>,
     /// Estimated number of blocks between the local node and the network tip.
     pub lag: Option<String>,
     /// Node verification progress, formatted with six decimal places.
@@ -132,6 +140,8 @@ pub struct ExplorerNetworkStatsResponse {
     pub supply: SupplyStats,
     /// Current node state data.
     pub blockchain: BlockchainRuntimeStats,
+    /// Crosslink finality, staking, miner, finalizer, and activation data.
+    pub crosslink: CrosslinkNetworkStats,
     /// Response creation time as Unix seconds.
     pub generated_at: String,
 }
