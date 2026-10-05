@@ -13,3 +13,37 @@ In the future, we would like to receive thorough reviews by bug-hunting teams, b
 # crosslink_monolith
 
 A subtree'd monorepo for all crosslink code/dependencies
+
+## Run the Crosslink Zebra RPC node with Docker
+
+From the repository root, build and start the single Zebra node container:
+
+```sh
+docker compose up --build -d
+docker compose logs -f zebra
+```
+
+The development endpoints are bound to localhost only:
+
+- JSON-RPC: `http://127.0.0.1:8232`
+- indexer gRPC: `http://127.0.0.1:8230`
+
+Check JSON-RPC after the node starts:
+
+```sh
+curl -sS http://127.0.0.1:8232 \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}'
+```
+
+Stop the node without deleting its chain state:
+
+```sh
+docker compose down
+```
+
+Delete the Docker chain state as well:
+
+```sh
+docker compose down -v
+```

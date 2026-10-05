@@ -1,0 +1,26 @@
+name: crosslink-zebra
+
+services:
+  zebra:
+    image: crosslink-zebrad:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 2m
+    ports:
+      # Keep unauthenticated development RPC endpoints local to this machine.
+      - "127.0.0.1:${ZEBRA_RPC_PORT:-8232}:8232"
+      - "127.0.0.1:${ZEBRA_INDEXER_PORT:-8230}:8230"
+    volumes:
+      - zebra-data:/home/zebra/.cache/zebra
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+
+volumes:
+  zebra-data:

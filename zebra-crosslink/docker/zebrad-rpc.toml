@@ -1,0 +1,36 @@
+# Docker development configuration for the Crosslink feature network.
+# RPC authentication is disabled, so compose.yaml only publishes it on localhost.
+
+[network]
+listen_addr = "[::]:8233"
+cache_dir = "/home/zebra/.cache/zebra/network"
+
+[state]
+cache_dir = "/home/zebra/.cache/zebra/state"
+ephemeral = false
+delete_old_database = true
+should_backup_non_finalized_state = true
+
+[rpc]
+listen_addr = "0.0.0.0:8232"
+indexer_listen_addr = "0.0.0.0:8230"
+cookie_dir = "/home/zebra/.cache/zebra/rpc"
+enable_cookie_auth = false
+
+[crosslink]
+disable_the_headless_wallet = true
+disable_zaino = true
+
+[mining]
+internal_miner = false
+
+[health]
+listen_addr = "0.0.0.0:8080"
+min_connected_peers = 1
+ready_max_blocks_behind = 2
+enforce_on_test_networks = false
+ready_max_tip_age = "5m"
+
+[tracing]
+filter = "info"
+use_color = false

@@ -1,0 +1,31 @@
+# Send only the source trees needed to compile zebrad. In particular, local
+# target directories are tens of gigabytes and must never enter the context.
+*
+
+!README.md
+
+!zebra-crosslink
+!zebra-crosslink/**
+!librustzcash
+!librustzcash/**
+!tenderlink
+!tenderlink/**
+!wallet
+!wallet/**
+!zebra-gui
+!zebra-gui/**
+!clay-rs
+!clay-rs/**
+!patches
+!patches/**
+!packaging
+!packaging/**
+
+**/.git
+**/.git/**
+**/target
+**/target/**
+**/ignored_dir
+**/ignored_dir/**
+**/*.local.toml
+**/.DS_Store
