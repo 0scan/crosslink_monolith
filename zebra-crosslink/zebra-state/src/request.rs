@@ -1219,6 +1219,10 @@ pub enum ReadRequest {
     /// * [`ReadResponse::Transaction(None)`](ReadResponse::Transaction) otherwise.
     Transaction(transaction::Hash),
 
+    /// Routes an explorer-only read through the state service's isolated facade.
+    #[cfg(feature = "indexer")]
+    Explorer(crate::ExplorerReadRequest),
+
     /// Looks up a transaction by hash in any chain.
     ///
     /// Returns
@@ -1697,6 +1701,8 @@ impl ReadRequest {
             ReadRequest::BlockAndSize(_) => "block_and_size",
             ReadRequest::BlockHeader(_) => "block_header",
             ReadRequest::Transaction(_) => "transaction",
+            #[cfg(feature = "indexer")]
+            ReadRequest::Explorer(request) => request.variant_name(),
             ReadRequest::AnyChainTransaction(_) => "any_chain_transaction",
             ReadRequest::TransactionIdsForBlock(_) => "transaction_ids_for_block",
             ReadRequest::AnyChainTransactionIdsForBlock(_) => "any_chain_transaction_ids_for_block",

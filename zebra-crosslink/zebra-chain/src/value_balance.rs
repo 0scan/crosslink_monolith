@@ -234,6 +234,9 @@ where
             self.orchard,
             self.deferred,
             self.ironwood,
+            self.staking_bonded,
+            self.staking_unbonded,
+            self.finalizer_rewards,
         ]
         .into_iter()
         .map(|amount| i128::from(amount.zatoshis()))

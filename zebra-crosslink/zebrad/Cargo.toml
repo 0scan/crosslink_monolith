@@ -91,7 +91,7 @@ default = ["default-release-binaries", "internal-miner"]
 # Production features that activate extra dependencies, or extra features in dependencies
 
 # Indexer support
-indexer = ["zebra-state/indexer"]
+indexer = ["zebra-state/indexer", "zebra-rpc/indexer"]
 
 # Experimental internal miner support
 internal-miner = [

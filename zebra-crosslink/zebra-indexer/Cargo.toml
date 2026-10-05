@@ -1,0 +1,30 @@
+[package]
+name = "zebra-indexer"
+version = "0.1.0"
+authors.workspace = true
+description = "Explorer response types and canonical-state adapters for Zebra Crosslink"
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+state-index = ["dep:zebra-state", "zebra-state/indexer"]
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["serde_derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tower = { workspace = true, features = ["util"] }
+
+zebra-chain = { path = "../zebra-chain" }
+zebra-state = { path = "../zebra-state", optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

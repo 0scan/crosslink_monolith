@@ -24,7 +24,7 @@ zebra-gui/icon-font/fontello-*/
 
 # Developer testing configs and database directories.
 *.local.toml
-ignored_dir/**
+**/ignored_dir/**
 BB_*
 NN_*
 ZZ*

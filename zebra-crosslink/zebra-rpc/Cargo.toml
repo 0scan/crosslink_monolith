@@ -30,6 +30,9 @@ exclude = ["*.proto"]
 # Experimental internal miner support
 internal-miner = []
 
+# In-process explorer indexes and JSON-RPC methods.
+indexer = ["zebra-state/indexer", "zebra-indexer/state-index"]
+
 # Test-only features
 proptest-impl = [
     "proptest",
@@ -112,6 +115,7 @@ zebra-chain = { path = "../zebra-chain", version = "11.3.0", features = [
     "json-conversion",
 ] }
 zebra-consensus = { path = "../zebra-consensus", version = "14.0.1" }
+zebra-indexer = { path = "../zebra-indexer", default-features = false }
 zebra-network = { path = "../zebra-network", version = "11.0.0" }
 zebra-node-services = { path = "../zebra-node-services", version = "9.1.2", features = [
     "rpc-client",

@@ -257,6 +257,7 @@ impl DiskWriteBatch {
         finalized: &FinalizedBlock,
         utxos_spent_by_block: HashMap<transparent::OutPoint, transparent::Utxo>,
         value_pool: ValueBalance<NonNegative>,
+        #[cfg(feature = "indexer")] explorer_context: crate::explorer::ExplorerBlockCommitContext,
     ) -> Result<(), ValidateContextError> {
         let block_value_pool_change = finalized
             .block
@@ -342,6 +343,18 @@ impl DiskWriteBatch {
         let _ = db.block_info_cf().with_batch_for_writing(self).zs_insert(
             &finalized.height,
             &BlockInfo::new(new_value_pool, block_size as u32),
+        );
+
+        #[cfg(feature = "indexer")]
+        self.prepare_explorer_analytics_batch(
+            db,
+            &db.network(),
+            finalized,
+            u32::try_from(block_size).expect("verified block size fits in u32"),
+            new_value_pool,
+            &utxos_spent_by_block,
+            0,
+            explorer_context.funded_transparent_address_count(),
         );
 
         Ok(())

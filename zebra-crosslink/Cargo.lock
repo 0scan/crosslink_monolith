@@ -8638,6 +8638,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zebra-indexer"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower 0.4.13",
+ "zebra-chain",
+ "zebra-state",
+]
+
+[[package]]
 name = "zebra-network"
 version = "11.0.0"
 dependencies = [
@@ -8752,6 +8769,7 @@ dependencies = [
  "zebra-chain",
  "zebra-consensus",
  "zebra-debug-time",
+ "zebra-indexer",
  "zebra-network",
  "zebra-node-services",
  "zebra-script",

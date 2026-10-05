@@ -13,6 +13,7 @@ mod serialize;
 mod sighash;
 mod txid;
 mod unmined;
+mod value_endpoints;
 
 #[cfg(any(test, feature = "proptest-impl"))]
 #[allow(clippy::unwrap_in_result)]
@@ -34,6 +35,10 @@ pub use serialize::{
 pub use sighash::{HashType, SigHash, SigHasher};
 pub use unmined::{
     zip317, UnminedTx, UnminedTxId, VerifiedUnminedTx, MEMPOOL_TRANSACTION_COST_THRESHOLD,
+};
+pub use value_endpoints::{
+    primary_value_endpoints, transaction_value_endpoints, PrimaryValueEndpointsError,
+    TransactionValueEndpoint, TransactionValueEndpoints,
 };
 use zcash_primitives::transaction::StakingActionKind;
 use zcash_protocol::consensus;
