@@ -19,7 +19,7 @@ pub use addresses::{
     address_utxos_page_from_state, top_balances_from_state,
 };
 #[cfg(feature = "state-index")]
-pub use blocks::{block_details_from_state, blocks_page_from_state};
+pub use blocks::{block_details_from_state, blocks_page_from_state, top_miners_from_state};
 pub use error::Error;
 #[cfg(feature = "state-index")]
 pub use stats::{chart_data_from_state, stats_from_state};
@@ -39,5 +39,6 @@ pub use types::{
     TopBalancesRequest, TopBalancesResponse, TopBalancesSummary, TransactionClassification,
     TransactionData, TransactionDetails, TransactionEndpoint, TransactionEndpointType,
     TransactionKind, TransactionListItem, TransactionStatus, TransactionsPagination,
-    TransactionsResponse, TreeSize, ValuePoolBalance,
+    TransactionsResponse, TreeSize, TopMinerEntry, TopMinersPagination, TopMinersRequest,
+    TopMinersResponse, TopMinersSummary, ValuePoolBalance,
 };

@@ -17,7 +17,7 @@ use zebra_indexer::{
     address_summary_from_state, address_transactions_page_from_state,
     address_utxos_page_from_state, block_details_from_state, blocks_page_from_state,
     chart_data_from_state, stats_from_state, top_balances_from_state,
-    transaction_details_from_state, transactions_page_from_state,
+    top_miners_from_state, transaction_details_from_state, transactions_page_from_state,
 };
 use zebra_network::address_book_peers::AddressBookPeers;
 use zebra_node_services::mempool::{self as node_mempool, MempoolService};
@@ -41,7 +41,7 @@ use super::{
         GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
         GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
         MempoolTransactionsResponse, TopBalancesRequest, TopBalancesResponse,
-        TransactionDetailsResponse, TransactionsResponse,
+        TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
     },
 };
 #[cfg(feature = "indexer")]
@@ -510,6 +510,34 @@ where
         #[cfg(feature = "indexer")]
         {
             match top_balances_from_state(self.read_state.clone(), request).await {
+                Ok(response) => Ok(response),
+                Err(error @ zebra_indexer::Error::InvalidCursor(_))
+                | Err(error @ zebra_indexer::Error::InvalidQuery(_)) => {
+                    Err(error).map_error(server::error::LegacyCode::InvalidParameter)
+                }
+                Err(error) => Err(error).map_misc_error(),
+            }
+        }
+    }
+
+    pub(in crate::methods) async fn explorer_get_top_miners(
+        &self,
+        request: Option<TopMinersRequest>,
+    ) -> Result<TopMinersResponse> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = request;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            match top_miners_from_state(
+                self.read_state.clone(),
+                &self.network,
+                request.unwrap_or_default(),
+            )
+            .await
+            {
                 Ok(response) => Ok(response),
                 Err(error @ zebra_indexer::Error::InvalidCursor(_))
                 | Err(error @ zebra_indexer::Error::InvalidQuery(_)) => {

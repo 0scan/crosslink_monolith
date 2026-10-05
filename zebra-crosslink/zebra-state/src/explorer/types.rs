@@ -149,6 +149,15 @@ pub enum ExplorerReadRequest {
         /// Exclusive stable ranking cursor.
         cursor: Option<ExplorerBalanceRankCursor>,
     },
+    /// Returns the finalized all-time miner ranking.
+    MinerPage {
+        /// Maximum number of ranked miners to return, clamped by state.
+        limit: u32,
+        /// Exclusive stable ranking cursor.
+        cursor: Option<ExplorerMinerRankCursor>,
+        /// Cursor traversal direction.
+        direction: ExplorerPageDirection,
+    },
 }
 
 impl ExplorerReadRequest {
@@ -165,6 +174,7 @@ impl ExplorerReadRequest {
             Self::StatsSnapshot => "explorer_stats_snapshot",
             Self::DailyStats { .. } => "explorer_daily_stats",
             Self::BalanceRankPage { .. } => "explorer_balance_rank_page",
+            Self::MinerPage { .. } => "explorer_miner_page",
         }
     }
 }
@@ -192,6 +202,8 @@ pub enum ExplorerReadResponse {
     DailyStats(Vec<ExplorerDailyStats>),
     /// Transparent-address balance ranking page.
     BalanceRankPage(ExplorerBalanceRankPage),
+    /// Finalized all-time miner ranking and summary.
+    MinerPage(ExplorerMinerPage),
 }
 
 impl ExplorerTransactionQuery {
@@ -355,6 +367,8 @@ pub struct ExplorerChainStats {
     pub fully_shielded_transaction_count: u64,
     pub mixed_pool_transaction_count: u64,
     pub funded_transparent_address_count: u64,
+    pub attributed_mined_block_count: u64,
+    pub miner_count: u64,
 }
 
 /// Additive metrics for one explorer chart interval.
@@ -455,6 +469,48 @@ pub struct ExplorerBlockStats {
     pub pool_nsm: i64,
     pub total_issuance: u64,
     pub interval: ExplorerIntervalStats,
+}
+
+/// Durable all-time mining totals for one transparent payout address.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ExplorerMinerRecord {
+    pub block_count: u64,
+    pub mined_zat: u128,
+    pub latest_height: u32,
+    pub latest_block_hash: block::Hash,
+    pub latest_timestamp: i64,
+}
+
+/// One miner's all-time totals in ranking order.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerMinerRankEntry {
+    pub address: transparent::Address,
+    pub record: ExplorerMinerRecord,
+}
+
+/// Stable state cursor for the all-time miner ranking.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerMinerRankCursor {
+    pub address: transparent::Address,
+    pub block_count: u64,
+    pub rank: u64,
+    pub block_hash: block::Hash,
+}
+
+/// One finalized all-time miner ranking.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExplorerMinerPage {
+    pub best_tip: Option<(block::Height, block::Hash)>,
+    pub cursor_valid: bool,
+    pub block_count: u64,
+    pub attributed_block_count: u64,
+    pub miner_count: u64,
+    pub entries: Vec<ExplorerMinerRankEntry>,
+    pub has_more: bool,
 }
 
 /// One UTC day's reversible snapshot and interval facts.

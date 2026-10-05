@@ -9,8 +9,8 @@ use zebra_chain::{transaction::Transaction, transparent};
 
 use crate::{
     explorer::{
-        ExplorerAddressPage, ExplorerAddressRecord, ExplorerBlockSummary, ExplorerPageDirection,
-        ExplorerReadRequest, ExplorerReadResponse, ExplorerTransactionPage,
+        ExplorerAddressPage, ExplorerAddressRecord, ExplorerBlockSummary, ExplorerMinerPage,
+        ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse, ExplorerTransactionPage,
         ExplorerTransactionQuery, ExplorerTransactionSummary,
     },
     request::Spend,
@@ -26,7 +26,6 @@ use super::storage::explorer_transaction_record_with_ordered_utxos;
 
 const EXPLORER_ROLLING_SCAN_LIMIT: u32 = 10_000;
 const ROLLING_WINDOW_SECONDS: i64 = 86_400;
-
 const MAX_EXPLORER_PAGE_SIZE: u32 = 100;
 
 /// Handles every explorer read behind the state service's single extension point.
@@ -104,7 +103,58 @@ pub fn handle(
         ExplorerReadRequest::BalanceRankPage { limit, cursor } => {
             ExplorerReadResponse::BalanceRankPage(explorer_balance_rank_page(db, limit, cursor))
         }
+        ExplorerReadRequest::MinerPage {
+            limit,
+            cursor,
+            direction,
+        } => ExplorerReadResponse::MinerPage(explorer_miner_page(db, limit, cursor, direction)),
     })
+}
+
+/// Returns the persisted all-time miner ranking without scanning blocks or all miners.
+pub fn explorer_miner_page(
+    db: &ZebraDb,
+    limit: u32,
+    cursor: Option<crate::ExplorerMinerRankCursor>,
+    direction: ExplorerPageDirection,
+) -> ExplorerMinerPage {
+    let best_tip = db.tip();
+    let cursor_valid = cursor.is_none_or(|cursor| {
+        best_tip.is_some_and(|(_, hash)| hash == cursor.block_hash)
+            && db.explorer_contains_miner_entry(cursor.address, cursor.block_count)
+    });
+    if !cursor_valid {
+        return ExplorerMinerPage {
+            best_tip,
+            cursor_valid,
+            ..Default::default()
+        };
+    }
+
+    let requested = usize::try_from(limit.clamp(1, MAX_EXPLORER_PAGE_SIZE))
+        .expect("explorer miner page limit fits in usize");
+    let mut entries = db.explorer_miner_entries(
+        cursor.map(|cursor| (cursor.address, cursor.block_count)),
+        direction,
+        requested.saturating_add(1),
+    );
+    let has_more = entries.len() > requested;
+    if direction == ExplorerPageDirection::Newer && has_more {
+        entries.remove(0);
+    } else {
+        entries.truncate(requested);
+    }
+    let totals = db.explorer_chain_stats();
+
+    ExplorerMinerPage {
+        best_tip,
+        cursor_valid,
+        block_count: totals.block_count,
+        attributed_block_count: totals.attributed_mined_block_count,
+        miner_count: totals.miner_count,
+        entries,
+        has_more,
+    }
 }
 
 /// Returns canonical block summaries for `heights`, preserving request order.

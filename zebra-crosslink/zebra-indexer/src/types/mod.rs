@@ -9,6 +9,7 @@ mod block_details;
 mod block_page;
 mod block_transaction;
 mod chart;
+mod miner;
 mod pagination;
 mod stats;
 mod top_balances;
@@ -27,6 +28,9 @@ pub use block_transaction::{
     BlockTransaction, BlockTransactionInput, BlockTransactionOutput, TransactionData,
 };
 pub use chart::{ChartDataEntry, ChartDataRequest, ChartDataResponse};
+pub use miner::{
+    TopMinerEntry, TopMinersPagination, TopMinersRequest, TopMinersResponse, TopMinersSummary,
+};
 pub use pagination::PageDirection;
 pub use stats::{ChainTotals, IndexerStats, RollingDayStats};
 pub use top_balances::{

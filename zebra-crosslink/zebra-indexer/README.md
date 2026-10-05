@@ -30,7 +30,7 @@ explorer methods use `rpc.listen_addr`.
 
 The feature adds these JSON-RPC methods:
 
-- Blocks: `getblocks`, `getblockdetails`
+- Blocks: `getblocks`, `getblockdetails`, `gettopminers`
 - Transactions: `gettransactions`, `getmempooltransactions`, `gettransactiondetails`
 - Addresses: `getaddresssummary`, `getaddresstransactions`, `getaddressutxospage`
 - Explorer: `getindexerstatus`, `getnetworkstats`, `getexplorerchartdata`,
@@ -43,3 +43,16 @@ curl -sS http://127.0.0.1:8232 \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"getblocks","params":[{"limit":20}]}'
 ```
+
+The all-time miner ranking is maintained incrementally. Each request reads only the requested
+ranking slice and the latest block for each returned miner to derive pool attribution:
+
+```sh
+curl -sS http://127.0.0.1:8232 \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"gettopminers","params":[{"limit":30,"direction":"next"}]}'
+```
+
+Pass `pagination.next_cursor` back as `cursor` with `direction: "next"`, or
+`pagination.prev_cursor` with `direction: "prev"`. Cursors are bound to the finalized chain tip;
+if that ranking generation changes, restart from the first page.

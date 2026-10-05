@@ -124,7 +124,7 @@ use explorer::types::{
     GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
     GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
     MempoolTransactionsResponse, TopBalancesRequest, TopBalancesResponse,
-    TransactionDetailsResponse, TransactionsResponse,
+    TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
 };
 use hex_data::HexData;
 use trees::{GetSubtreesByIndexResponse, GetTreestateResponse, SubtreeRpcData};
@@ -940,6 +940,13 @@ pub trait Rpc {
         &self,
         request: TopBalancesRequest,
     ) -> Result<TopBalancesResponse>;
+
+    /// Returns all-time miners ranked by attributed canonical blocks.
+    #[method(name = "gettopminers")]
+    async fn get_top_miners(
+        &self,
+        request: Option<TopMinersRequest>,
+    ) -> Result<TopMinersResponse>;
 
     /// Returns the hash of the block of a given height iff the index argument correspond
     /// to a block in the best chain.
@@ -3490,6 +3497,13 @@ where
         request: TopBalancesRequest,
     ) -> Result<TopBalancesResponse> {
         self.explorer_get_top_balances(request).await
+    }
+
+    async fn get_top_miners(
+        &self,
+        request: Option<TopMinersRequest>,
+    ) -> Result<TopMinersResponse> {
+        self.explorer_get_top_miners(request).await
     }
 
     async fn get_block_hash(&self, index: i32) -> Result<GetBlockHashResponse> {

@@ -13,7 +13,9 @@ use zebra_chain::{
 use crate::service::finalized_state::{
     FromDisk, IntoDisk, TransactionLocation, TRANSACTION_LOCATION_DISK_BYTES,
 };
-use crate::{ExplorerBlockStats, ExplorerChainStats, ExplorerDailyStats};
+use crate::{
+    ExplorerBlockStats, ExplorerChainStats, ExplorerDailyStats, ExplorerMinerRecord,
+};
 
 /// Independently versioned explorer schema marker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +47,10 @@ impl FromDisk for ExplorerSchemaVersion {
 /// Balance-first key. Inverting the balance makes the RocksDB forward order richest first.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ExplorerBalanceKey([u8; 29]);
+
+/// Block-count-first key. Inverting the count makes forward order most-mined first.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ExplorerMinerRankKey([u8; 29]);
 
 /// UTC day number encoded in chronological key order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -110,6 +116,38 @@ impl FromDisk for ExplorerBalanceKey {
     }
 }
 
+impl ExplorerMinerRankKey {
+    pub fn new(address: Address, block_count: u64) -> Self {
+        let mut bytes = [0; 29];
+        bytes[..8].copy_from_slice(&(u64::MAX - block_count).to_be_bytes());
+        bytes[8..].copy_from_slice(&address.as_bytes());
+        Self(bytes)
+    }
+
+    pub fn address(self) -> Address {
+        address_from_disk_bytes(&self.0[8..])
+    }
+}
+
+impl IntoDisk for ExplorerMinerRankKey {
+    type Bytes = [u8; 29];
+
+    fn as_bytes(&self) -> Self::Bytes {
+        self.0
+    }
+}
+
+impl FromDisk for ExplorerMinerRankKey {
+    fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+        Self(
+            bytes
+                .as_ref()
+                .try_into()
+                .expect("explorer miner rank keys are 29 bytes"),
+        )
+    }
+}
+
 fn address_from_disk_bytes(bytes: &[u8]) -> Address {
     let tag = *bytes
         .first()
@@ -169,6 +207,7 @@ macro_rules! impl_analytics_disk_value {
 impl_analytics_disk_value!(ExplorerBlockStats);
 impl_analytics_disk_value!(ExplorerChainStats);
 impl_analytics_disk_value!(ExplorerDailyStats);
+impl_analytics_disk_value!(ExplorerMinerRecord);
 
 /// Opaque fixed-width transparent-address key used by explorer metadata.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -599,7 +638,7 @@ fn amount_bucket_from_tag(tag: u8) -> ExplorerAmountBucket {
 
 #[cfg(test)]
 mod tests {
-    use zebra_chain::{block::Height, parameters::NetworkKind};
+    use zebra_chain::{block, block::Height, parameters::NetworkKind};
 
     use super::*;
 
@@ -682,6 +721,21 @@ mod tests {
     }
 
     #[test]
+    fn miner_keys_sort_most_blocks_first_and_round_trip() {
+        let lower_address = Address::from_pub_key_hash(NetworkKind::Mainnet, [1; 20]);
+        let higher_address = Address::from_pub_key_hash(NetworkKind::Mainnet, [2; 20]);
+        let most_blocks = ExplorerMinerRankKey::new(higher_address, 20);
+        let fewer_blocks = ExplorerMinerRankKey::new(lower_address, 10);
+
+        assert!(most_blocks.as_bytes() < fewer_blocks.as_bytes());
+        assert_eq!(
+            ExplorerMinerRankKey::from_bytes(most_blocks.as_bytes()),
+            most_blocks
+        );
+        assert_eq!(most_blocks.address(), higher_address);
+    }
+
+    #[test]
     fn day_keys_preserve_chronological_order_and_round_trip() {
         let earlier = ExplorerDayKey(1);
         let later = ExplorerDayKey(256);
@@ -702,8 +756,16 @@ mod tests {
             end_height: 2_000_000,
             ..Default::default()
         };
+        let miner = ExplorerMinerRecord {
+            block_count: 7,
+            mined_zat: 35_000_000_000,
+            latest_height: 42,
+            latest_block_hash: block::Hash([3; 32]),
+            latest_timestamp: 1_700_000_000,
+        };
 
         assert_eq!(ExplorerChainStats::from_bytes(chain.as_bytes()), chain);
         assert_eq!(ExplorerDailyStats::from_bytes(daily.as_bytes()), daily);
+        assert_eq!(ExplorerMinerRecord::from_bytes(miner.as_bytes()), miner);
     }
 }

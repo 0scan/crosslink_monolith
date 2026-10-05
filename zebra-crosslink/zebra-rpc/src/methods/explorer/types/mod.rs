@@ -7,7 +7,7 @@ mod stats;
 pub(in crate::methods) use zebra_indexer::{
     AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
     BlocksResponse, ChartDataRequest, ChartDataResponse, TopBalancesRequest, TopBalancesResponse,
-    TransactionsResponse,
+    TopMinersRequest, TopMinersResponse, TransactionsResponse,
 };
 
 pub use mempool::{

@@ -6,8 +6,8 @@ use crate::service::finalized_state::{
 
 use super::disk_format::{
     ExplorerAddressKey, ExplorerAddressRecord, ExplorerBalanceKey, ExplorerDayKey,
-    ExplorerSchemaVersion, ExplorerShieldedClassLocation, ExplorerTransactionKindLocation,
-    ExplorerTransactionRecord,
+    ExplorerMinerRankKey, ExplorerSchemaVersion, ExplorerShieldedClassLocation,
+    ExplorerTransactionKindLocation, ExplorerTransactionRecord,
 };
 
 /// Fixed-width metadata keyed once per finalized transaction.
@@ -28,6 +28,10 @@ pub const EXPLORER_CHAIN_STATS: &str = "explorer_chain_stats";
 pub const EXPLORER_DAILY_STATS: &str = "explorer_daily_stats";
 /// Funded transparent addresses ordered by descending balance.
 pub const EXPLORER_BALANCE_ORDER: &str = "explorer_balance_order";
+/// All-time mining totals keyed by attributed transparent payout address.
+pub const EXPLORER_MINER_META: &str = "explorer_miner_meta";
+/// Attributed miners ordered by descending all-time block count.
+pub const EXPLORER_MINER_ORDER: &str = "explorer_miner_order";
 
 pub(super) type ExplorerTransactionMetaCf<'cf> =
     TypedColumnFamily<'cf, TransactionLocation, ExplorerTransactionRecord>;
@@ -44,6 +48,9 @@ pub(super) type ExplorerChainStatsCf<'cf> = TypedColumnFamily<'cf, (), crate::Ex
 pub(super) type ExplorerDailyStatsCf<'cf> =
     TypedColumnFamily<'cf, ExplorerDayKey, crate::ExplorerDailyStats>;
 pub(super) type ExplorerBalanceOrderCf<'cf> = TypedColumnFamily<'cf, ExplorerBalanceKey, ()>;
+pub(super) type ExplorerMinerMetaCf<'cf> =
+    TypedColumnFamily<'cf, ExplorerAddressKey, crate::ExplorerMinerRecord>;
+pub(super) type ExplorerMinerOrderCf<'cf> = TypedColumnFamily<'cf, ExplorerMinerRankKey, ()>;
 
 impl ZebraDb {
     fn explorer_schema_cf(&self) -> ExplorerSchemaCf<'_> {
@@ -128,6 +135,16 @@ impl ZebraDb {
     pub(super) fn explorer_balance_order_cf(&self) -> ExplorerBalanceOrderCf<'_> {
         ExplorerBalanceOrderCf::new(self.disk_db(), EXPLORER_BALANCE_ORDER)
             .expect("explorer balance order column family is registered")
+    }
+
+    pub(super) fn explorer_miner_meta_cf(&self) -> ExplorerMinerMetaCf<'_> {
+        ExplorerMinerMetaCf::new(self.disk_db(), EXPLORER_MINER_META)
+            .expect("explorer miner metadata column family is registered")
+    }
+
+    pub(super) fn explorer_miner_order_cf(&self) -> ExplorerMinerOrderCf<'_> {
+        ExplorerMinerOrderCf::new(self.disk_db(), EXPLORER_MINER_ORDER)
+            .expect("explorer miner ranking column family is registered")
     }
 }
 

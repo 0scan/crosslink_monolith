@@ -66,6 +66,21 @@ impl DiskWriteBatch {
         );
         let mut chain = zebra_db.explorer_chain_stats();
         crate::explorer::analytics::add_block_to_chain_stats(&mut chain, &block);
+        if let Some(address) =
+            crate::explorer::analytics::miner_address(&finalized.block, network)
+        {
+            let is_new_miner = self.prepare_explorer_miner_batch(zebra_db, address, &block);
+            chain.attributed_mined_block_count = chain
+                .attributed_mined_block_count
+                .checked_add(1)
+                .expect("attributed canonical block count fits in u64");
+            if is_new_miner {
+                chain.miner_count = chain
+                    .miner_count
+                    .checked_add(1)
+                    .expect("canonical miner count fits in u64");
+            }
+        }
 
         let day = crate::explorer::analytics::day_number(block.timestamp);
         let mut daily = zebra_db
@@ -109,17 +124,36 @@ impl DiskWriteBatch {
     ) {
         let mut chain = zebra_db.explorer_chain_stats();
         let mut affected_days = BTreeSet::new();
+        let mut removed_miners = Vec::with_capacity(removed_heights.len());
         for &height in removed_heights {
             let block = zebra_db
                 .explorer_block_stats(height)
                 .expect("rolled-back finalized blocks have explorer analytics");
             crate::explorer::analytics::remove_block_from_chain_stats(&mut chain, &block);
+            let canonical = zebra_db
+                .block(height.into())
+                .expect("rolled-back finalized heights have canonical blocks");
+            if let Some(address) =
+                crate::explorer::analytics::miner_address(&canonical, &zebra_db.network())
+            {
+                removed_miners.push((address, block.clone()));
+            }
             affected_days.insert(crate::explorer::analytics::day_number(block.timestamp));
             let _ = zebra_db
                 .explorer_block_stats_cf()
                 .with_batch_for_writing(self)
                 .zs_delete(&height);
         }
+        let (attributed_removed, miners_removed) =
+            self.prepare_explorer_miner_rollback(zebra_db, &removed_miners, target_height);
+        chain.attributed_mined_block_count = chain
+            .attributed_mined_block_count
+            .checked_sub(attributed_removed)
+            .expect("rolled-back attributed blocks were previously counted");
+        chain.miner_count = chain
+            .miner_count
+            .checked_sub(miners_removed)
+            .expect("rolled-back miners were previously counted");
         chain.funded_transparent_address_count = funded_transparent_address_count;
         let _ = zebra_db
             .explorer_chain_stats_cf()

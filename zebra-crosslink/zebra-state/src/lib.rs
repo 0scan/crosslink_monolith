@@ -58,6 +58,7 @@ pub use explorer::{
     ExplorerAddressPage, ExplorerAddressRecord, ExplorerAmountFilter, ExplorerBalanceRankCursor,
     ExplorerBalanceRankEntry, ExplorerBalanceRankPage, ExplorerBlockStats, ExplorerBlockSummary,
     ExplorerChainStats, ExplorerDailyStats, ExplorerIntervalStats, ExplorerPageDirection,
+    ExplorerMinerPage, ExplorerMinerRankCursor, ExplorerMinerRankEntry, ExplorerMinerRecord,
     ExplorerReadRequest, ExplorerReadResponse, ExplorerRollingStats, ExplorerShieldedFlow,
     ExplorerShieldedFlowFilter, ExplorerShieldedPool, ExplorerShieldedPoolFilter,
     ExplorerStatsSnapshot, ExplorerTransactionKind, ExplorerTransactionKindFilter,
