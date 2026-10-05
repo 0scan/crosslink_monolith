@@ -73,8 +73,7 @@
       # entries for git dependencies without the `git+` scheme prefix that
       # `cargo` itself requires there (compare `cargo vendor`'s own output).
       # The mismatch means `cargo` doesn't recognize the replacement for
-      # crates patched via `[patch.crates-io]` onto a git source (e.g.
-      # `core2`, patched because it was yanked from crates.io), and tries
+      # crates patched via `[patch.crates-io]` onto a git source, and tries
       # to reach the network in the sandboxed build. Patch the prefix back in.
       cargoVendorDir = pkgs.runCommand "crosslink-monolith-vendor" { } ''
         cp -r --no-preserve=mode ${craneLib.vendorCargoDeps { src = crateSrc; }} "$out"

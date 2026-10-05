@@ -9154,12 +9154,3 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
-
-[[patch.unused]]
-name = "core2"
-version = "0.3.3"
-source = "git+https://github.com/technocreatives/core2.git?rev=7bf2611bd9a52b438300c640e142ad5c1298b05b#7bf2611bd9a52b438300c640e142ad5c1298b05b"
-
-[[patch.unused]]
-name = "sqlx-sqlite"
-version = "0.8.6"
