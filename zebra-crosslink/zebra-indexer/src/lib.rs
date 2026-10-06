@@ -20,7 +20,8 @@ pub use addresses::{
 };
 #[cfg(feature = "state-index")]
 pub use blocks::{
-    block_details_from_state, blocks_page_from_state, miner_info_from_state, top_miners_from_state,
+    block_details_from_state, blocks_page_from_state, miner_info_from_state,
+    miner_stake_from_state, top_miners_from_state,
 };
 pub use error::Error;
 #[cfg(feature = "state-index")]
@@ -36,11 +37,14 @@ pub use types::{
     AddressTransactionsPagination, AddressTransactionsResponse, AddressUtxoSummary,
     AddressUtxosPagination, AddressUtxosResponse, BlockDetails, BlockRecord, BlockTransaction,
     BlockTransactionInput, BlockTransactionOutput, BlockTrees, BlocksPagination, BlocksResponse,
-    ChainTotals, ChartDataEntry, ChartDataRequest, ChartDataResponse, IndexerStats,
-    MinerInfoResponse, PageDirection, RollingDayStats, ShieldedFlow, ShieldedPool, TopBalanceEntry,
-    TopBalancesPagination, TopBalancesRequest, TopBalancesResponse, TopBalancesSummary,
-    TopMinerEntry, TopMinersPagination, TopMinersRequest, TopMinersResponse, TopMinersSummary,
-    TransactionClassification, TransactionData, TransactionDetails, TransactionEndpoint,
-    TransactionEndpointType, TransactionKind, TransactionListItem, TransactionStatus,
-    TransactionsPagination, TransactionsResponse, TreeSize, ValuePoolBalance,
+    ChainTotals, ChartDataEntry, ChartDataRequest, ChartDataResponse, CrosslinkMinerStakeEntry,
+    CrosslinkMinerStakePagination, CrosslinkMinerStakeRequest, CrosslinkMinerStakeResponse,
+    CrosslinkMinerStakeSummary, CrosslinkStakeSourceAmount, CrosslinkStakeSourceBreakdown,
+    CrosslinkStakeSourceGroup, IndexerStats, MinerInfoResponse, PageDirection, RollingDayStats,
+    ShieldedFlow, ShieldedPool, TopBalanceEntry, TopBalancesPagination, TopBalancesRequest,
+    TopBalancesResponse, TopBalancesSummary, TopMinerEntry, TopMinersPagination, TopMinersRequest,
+    TopMinersResponse, TopMinersSummary, TransactionClassification, TransactionData,
+    TransactionDetails, TransactionEndpoint, TransactionEndpointType, TransactionKind,
+    TransactionListItem, TransactionStatus, TransactionsPagination, TransactionsResponse, TreeSize,
+    ValuePoolBalance,
 };

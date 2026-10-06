@@ -10,7 +10,7 @@ use tower::Service;
 #[cfg(feature = "indexer")]
 use zcash_primitives::{
     bft::{
-        FinalizerAddress, FinalizerRecencyStatus, PubKeyID, TFLRecencyStatus, ACTIVE_ROSTER_MAX_N,
+        FinalizerAddress, FinalizerRecencyStatus, TFLRecencyStatus, ACTIVE_ROSTER_MAX_N,
     },
     transaction::RosterMember,
 };
@@ -26,8 +26,9 @@ use zebra_consensus::router::service_trait::BlockVerifierService;
 use zebra_indexer::{
     address_summary_from_state, address_transactions_page_from_state,
     address_utxos_page_from_state, block_details_from_state, blocks_page_from_state,
-    chart_data_from_state, miner_info_from_state, stats_from_state, top_balances_from_state,
-    top_miners_from_state, transaction_details_from_state, transactions_page_from_state,
+    chart_data_from_state, miner_info_from_state, miner_stake_from_state, stats_from_state,
+    top_balances_from_state, top_miners_from_state, transaction_details_from_state,
+    transactions_page_from_state,
 };
 use zebra_network::address_book_peers::AddressBookPeers;
 use zebra_node_services::mempool::{self as node_mempool, MempoolService};
@@ -52,11 +53,13 @@ use super::{
     types::{
         AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
         BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkFinalizerLivenessResponse,
-        CrosslinkFinalizersResponse, ExplorerNetworkStatsResponse, GetAddressTransactionsRequest,
-        GetAddressUtxosPageRequest, GetBlocksRequest, GetMempoolTransactionsRequest,
-        GetTransactionsRequest, IndexerStatusResponse, MempoolTransactionsResponse,
-        MinerInfoResponse, TopBalancesRequest, TopBalancesResponse, TopMinersRequest,
-        TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
+        CrosslinkFinalizerRequest, CrosslinkFinalizerResponse,
+        CrosslinkFinalizerStakeSourcesRequest, CrosslinkFinalizersResponse,
+        CrosslinkMinerStakeRequest, CrosslinkMinerStakeResponse, ExplorerNetworkStatsResponse,
+        GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
+        GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
+        MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
+        TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
     },
 };
 #[cfg(feature = "indexer")]
@@ -712,6 +715,128 @@ where
         }
     }
 
+    pub(in crate::methods) async fn explorer_get_crosslink_miner_stake(
+        &self,
+        request: Option<CrosslinkMinerStakeRequest>,
+    ) -> Result<CrosslinkMinerStakeResponse> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = request;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            match miner_stake_from_state(
+                self.read_state.clone(),
+                &self.network,
+                None,
+                request.unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(response) => Ok(response),
+                Err(error @ zebra_indexer::Error::InvalidCursor(_))
+                | Err(error @ zebra_indexer::Error::InvalidQuery(_)) => {
+                    Err(error).map_error(server::error::LegacyCode::InvalidParameter)
+                }
+                Err(error) => Err(error).map_misc_error(),
+            }
+        }
+    }
+
+    pub(in crate::methods) async fn explorer_get_crosslink_finalizer(
+        &self,
+        request: CrosslinkFinalizerRequest,
+    ) -> Result<Option<CrosslinkFinalizerResponse>> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = request;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            let public_key = parse_finalizer_public_key(&request.public_key)
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
+            let canonical_public_key = hex::encode(public_key);
+            let finalizers = self.explorer_get_crosslink_finalizers().await?;
+            let Some(finalizer) = finalizers
+                .items
+                .iter()
+                .find(|entry| entry.public_key == canonical_public_key)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let snapshot_height = finalizers
+                .snapshot_height
+                .as_deref()
+                .and_then(|height| height.parse::<u32>().ok());
+            let blocks_until = |target: Option<&String>| {
+                snapshot_height
+                    .zip(target.and_then(|height| height.parse::<u32>().ok()))
+                    .map(|(tip, target)| target.saturating_sub(tip).to_string())
+            };
+
+            Ok(Some(CrosslinkFinalizerResponse {
+                available: true,
+                finalizer,
+                status: finalizers.status,
+                snapshot_height: finalizers.snapshot_height.clone(),
+                snapshot_hash: finalizers.snapshot_hash.clone(),
+                selection_height: finalizers.selection_height.clone(),
+                activation_height: finalizers.activation_height.clone(),
+                blocks_until_selection: blocks_until(finalizers.selection_height.as_ref()),
+                blocks_until_activation: blocks_until(finalizers.activation_height.as_ref()),
+            }))
+        }
+    }
+
+    pub(in crate::methods) async fn explorer_get_crosslink_finalizer_stake_sources(
+        &self,
+        request: CrosslinkFinalizerStakeSourcesRequest,
+    ) -> Result<Option<CrosslinkMinerStakeResponse>> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = request;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            let public_key = parse_finalizer_public_key(&request.public_key)
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
+            let canonical_public_key = hex::encode(public_key);
+            let finalizers = self.explorer_get_crosslink_finalizers().await?;
+            if !finalizers
+                .items
+                .iter()
+                .any(|entry| entry.public_key == canonical_public_key)
+            {
+                return Ok(None);
+            }
+
+            let source_request = CrosslinkMinerStakeRequest {
+                limit: request.limit,
+                cursor: request.cursor,
+                direction: request.direction,
+            };
+            match miner_stake_from_state(
+                self.read_state.clone(),
+                &self.network,
+                Some(public_key),
+                source_request,
+            )
+            .await
+            {
+                Ok(response) => Ok(Some(response)),
+                Err(error @ zebra_indexer::Error::InvalidCursor(_))
+                | Err(error @ zebra_indexer::Error::InvalidQuery(_)) => {
+                    Err(error).map_error(server::error::LegacyCode::InvalidParameter)
+                }
+                Err(error) => Err(error).map_misc_error(),
+            }
+        }
+    }
+
     pub(in crate::methods) async fn explorer_get_chart_data(
         &self,
         request: ChartDataRequest,
@@ -858,7 +983,7 @@ fn crosslink_finalizers_response(
             let active = index < active_count;
             CrosslinkFinalizerEntry {
                 rank: index.saturating_add(1).to_string(),
-                public_key: PubKeyID(member.pub_key).to_string(),
+                public_key: hex::encode(member.pub_key),
                 finalizer_address: finalizer_address
                     .filter(|address| address.pub_key.0 == member.pub_key && address.verify())
                     .map(|address| address.encode()),
@@ -1014,6 +1139,24 @@ fn percentage_one_decimal(numerator: u64, denominator: u64) -> String {
 }
 
 #[cfg(feature = "indexer")]
+fn parse_finalizer_public_key(
+    public_key: &str,
+) -> std::result::Result<[u8; 32], zebra_indexer::Error> {
+    if public_key.len() != 64 {
+        return Err(zebra_indexer::Error::InvalidQuery(
+            "finalizer public key must contain 64 hexadecimal characters".to_string(),
+        ));
+    }
+    let mut bytes = [0; 32];
+    hex::decode_to_slice(public_key, &mut bytes).map_err(|_| {
+        zebra_indexer::Error::InvalidQuery(
+            "finalizer public key must contain 64 hexadecimal characters".to_string(),
+        )
+    })?;
+    Ok(bytes)
+}
+
+#[cfg(feature = "indexer")]
 #[allow(clippy::too_many_arguments)]
 fn crosslink_staking_overview(
     tip_height: Option<u32>,
@@ -1124,28 +1267,24 @@ fn crosslink_activation_overview(
     })
     .collect();
 
-    let (current_phase, progress_percent) = match (
-        tip_height,
-        staking_height,
-        roster_height,
-        activation_height,
-    ) {
-        (None, _, _, _) => (None, None),
-        (Some(_), None, None, None) => (Some(CrosslinkPhase::Finality), None),
-        (Some(tip), Some(staking), Some(_), Some(_)) if tip < staking => (
-            Some(CrosslinkPhase::Mining),
-            Some(phase_progress_percent(tip, 0, staking)),
-        ),
-        (Some(tip), Some(staking), Some(roster), Some(_)) if tip < roster => (
-            Some(CrosslinkPhase::Staking),
-            Some(phase_progress_percent(tip, staking, roster)),
-        ),
-        (Some(tip), Some(_), Some(roster), Some(activation)) if tip < activation => (
-            Some(CrosslinkPhase::FirstFinalizers),
-            Some(phase_progress_percent(tip, roster, activation)),
-        ),
-        (Some(_), _, _, _) => (Some(CrosslinkPhase::Finality), None),
-    };
+    let (current_phase, progress_percent) =
+        match (tip_height, staking_height, roster_height, activation_height) {
+            (None, _, _, _) => (None, None),
+            (Some(_), None, None, None) => (Some(CrosslinkPhase::Finality), None),
+            (Some(tip), Some(staking), Some(_), Some(_)) if tip < staking => (
+                Some(CrosslinkPhase::Mining),
+                Some(phase_progress_percent(tip, 0, staking)),
+            ),
+            (Some(tip), Some(staking), Some(roster), Some(_)) if tip < roster => (
+                Some(CrosslinkPhase::Staking),
+                Some(phase_progress_percent(tip, staking, roster)),
+            ),
+            (Some(tip), Some(_), Some(roster), Some(activation)) if tip < activation => (
+                Some(CrosslinkPhase::FirstFinalizers),
+                Some(phase_progress_percent(tip, roster, activation)),
+            ),
+            (Some(_), _, _, _) => (Some(CrosslinkPhase::Finality), None),
+        };
 
     CrosslinkActivationOverview {
         current_phase,
@@ -1174,7 +1313,8 @@ fn estimated_transition_time(
 ) -> Option<String> {
     let seconds = u64::from(blocks_remaining).checked_mul(target_block_time_seconds?)?;
     let seconds = i64::try_from(seconds).ok()?;
-    now.checked_add(seconds).map(|timestamp| timestamp.to_string())
+    now.checked_add(seconds)
+        .map(|timestamp| timestamp.to_string())
 }
 
 #[cfg(not(feature = "indexer"))]
@@ -1259,8 +1399,8 @@ mod tests {
     use super::{
         crosslink_activation_overview, crosslink_finalizer_liveness_response,
         crosslink_finalizers_response, crosslink_staking_overview, indexer_status,
-        CrosslinkBftStep, CrosslinkFinalizerSetStatus, CrosslinkPhase, CrosslinkStakingChange,
-        CrosslinkStakingStatus,
+        parse_finalizer_public_key, CrosslinkBftStep, CrosslinkFinalizerSetStatus, CrosslinkPhase,
+        CrosslinkStakingChange, CrosslinkStakingStatus,
     };
 
     fn finalizer(byte: u8, voting_power: u64) -> (RosterMember, Option<FinalizerAddress>) {
@@ -1309,7 +1449,10 @@ mod tests {
         assert_eq!(overview.current_phase, Some(CrosslinkPhase::Mining));
         assert_eq!(overview.progress_percent.as_deref(), Some("96.9"));
         assert_eq!(overview.milestones[0].blocks_remaining, "645");
-        assert_eq!(overview.milestones[0].estimated_at.as_deref(), Some("17125"));
+        assert_eq!(
+            overview.milestones[0].estimated_at.as_deref(),
+            Some("17125")
+        );
         assert_eq!(overview.milestones[2].height, "36288");
     }
 
@@ -1376,6 +1519,15 @@ mod tests {
         assert!(response.items[11].active);
         assert!(!response.items[12].active);
         assert_eq!(response.items[12].active_stake_share_percent, None);
+    }
+
+    #[test]
+    fn finalizer_public_key_parser_accepts_display_byte_order() {
+        let internal = std::array::from_fn(|index| index as u8);
+        let displayed = hex::encode(internal);
+
+        assert_eq!(parse_finalizer_public_key(&displayed).unwrap(), internal);
+        assert!(parse_finalizer_public_key("not-a-public-key").is_err());
     }
 
     #[test]

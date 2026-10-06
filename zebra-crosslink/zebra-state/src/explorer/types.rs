@@ -3,6 +3,7 @@
 use std::{ops::RangeInclusive, sync::Arc};
 
 use serde::{Deserialize, Serialize};
+use zcash_primitives::bft::FinalizerAddress;
 use zebra_chain::{block, transaction, transparent};
 
 pub use super::storage::disk_format::{
@@ -163,6 +164,17 @@ pub enum ExplorerReadRequest {
         /// Transparent coinbase payout address.
         address: transparent::Address,
     },
+    /// Returns current miner-attributed stake pairs in descending stake order.
+    MinerStakePage {
+        /// Restrict rows to one finalizer, or return every miner-finalizer pair.
+        finalizer: Option<[u8; 32]>,
+        /// Maximum number of ranked pairs to return, clamped by state.
+        limit: u32,
+        /// Exclusive stable ranking cursor.
+        cursor: Option<ExplorerMinerStakeRankCursor>,
+        /// Cursor traversal direction.
+        direction: ExplorerPageDirection,
+    },
 }
 
 impl ExplorerReadRequest {
@@ -181,6 +193,7 @@ impl ExplorerReadRequest {
             Self::BalanceRankPage { .. } => "explorer_balance_rank_page",
             Self::MinerPage { .. } => "explorer_miner_page",
             Self::Miner { .. } => "explorer_miner",
+            Self::MinerStakePage { .. } => "explorer_miner_stake_page",
         }
     }
 }
@@ -212,6 +225,8 @@ pub enum ExplorerReadResponse {
     MinerPage(ExplorerMinerPage),
     /// All-time mining totals for one transparent payout address.
     Miner(ExplorerMiner),
+    /// Current miner-attributed stake ranking and summary.
+    MinerStakePage(ExplorerMinerStakePage),
 }
 
 impl ExplorerTransactionQuery {
@@ -528,6 +543,87 @@ pub struct ExplorerMiner {
     pub best_tip: Option<(block::Height, block::Hash)>,
     pub chain_block_count: u64,
     pub record: Option<ExplorerMinerRecord>,
+}
+
+/// Durable current stake attributed to one miner-finalizer pair.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ExplorerMinerFinalizerRecord {
+    pub current_stake_zat: u64,
+    pub active_bond_count: u64,
+    pub stake_action_count: u64,
+    pub latest_height: u32,
+    pub latest_block_hash: block::Hash,
+    pub latest_timestamp: i64,
+}
+
+/// Observable source of the value that created an active bond.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum ExplorerStakeSource {
+    Transparent(transparent::Address),
+    Shielded,
+    Unknown,
+    Rewards,
+}
+
+/// Explorer attribution retained while a bond remains active.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ExplorerBondAttributionRecord {
+    pub source: ExplorerStakeSource,
+    pub current_finalizer: [u8; 32],
+    pub current_stake_zat: u64,
+}
+
+/// Current stake-source totals for the network or one finalizer.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ExplorerMinerStakeTotals {
+    pub miner_stake_zat: u64,
+    pub miner_address_count: u64,
+    pub other_transparent_stake_zat: u64,
+    pub other_transparent_address_count: u64,
+    pub shielded_stake_zat: u64,
+    pub shielded_bond_count: u64,
+    pub unknown_stake_zat: u64,
+    pub unknown_bond_count: u64,
+    pub reward_bond_stake_zat: u64,
+    pub reward_bond_count: u64,
+}
+
+/// One current miner-finalizer stake pair in ranking order.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerMinerStakeRankEntry {
+    pub miner_address: transparent::Address,
+    pub miner_record: ExplorerMinerRecord,
+    pub finalizer: [u8; 32],
+    pub finalizer_address: Option<FinalizerAddress>,
+    pub record: ExplorerMinerFinalizerRecord,
+}
+
+/// Stable cursor for current miner-attributed stake rankings.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerMinerStakeRankCursor {
+    pub miner_address: transparent::Address,
+    pub finalizer: [u8; 32],
+    pub current_stake_zat: u64,
+    pub rank: u64,
+    pub block_hash: block::Hash,
+}
+
+/// One finalized current miner-attributed stake ranking page.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExplorerMinerStakePage {
+    pub best_tip: Option<(block::Height, block::Hash)>,
+    pub cursor_valid: bool,
+    pub total_current_stake_zat: u64,
+    pub totals: ExplorerMinerStakeTotals,
+    pub entries: Vec<ExplorerMinerStakeRankEntry>,
+    pub has_more: bool,
 }
 
 /// One UTC day's reversible snapshot and interval facts.

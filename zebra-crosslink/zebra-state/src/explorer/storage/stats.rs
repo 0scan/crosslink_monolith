@@ -66,10 +66,11 @@ impl DiskWriteBatch {
         );
         let mut chain = zebra_db.explorer_chain_stats();
         crate::explorer::analytics::add_block_to_chain_stats(&mut chain, &block);
-        if let Some(address) =
-            crate::explorer::analytics::miner_address(&finalized.block, network)
-        {
-            let is_new_miner = self.prepare_explorer_miner_batch(zebra_db, address, &block);
+        let current_block_miner =
+            crate::explorer::analytics::miner_address(&finalized.block, network);
+        let mut is_new_miner = false;
+        if let Some(address) = current_block_miner {
+            is_new_miner = self.prepare_explorer_miner_batch(zebra_db, address, &block);
             chain.attributed_mined_block_count = chain
                 .attributed_mined_block_count
                 .checked_add(1)
@@ -81,6 +82,14 @@ impl DiskWriteBatch {
                     .expect("canonical miner count fits in u64");
             }
         }
+        self.prepare_explorer_miner_stake_batch(
+            zebra_db,
+            network,
+            finalized,
+            spent_utxos,
+            current_block_miner,
+            is_new_miner,
+        );
 
         let day = crate::explorer::analytics::day_number(block.timestamp);
         let mut daily = zebra_db

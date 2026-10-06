@@ -1,7 +1,9 @@
 //! Crosslink explorer overview response types.
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use zebra_indexer::PageDirection;
 
 /// Current Crosslink activation phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -197,6 +199,44 @@ pub struct CrosslinkFinalizersResponse {
     pub active_stake_zat: String,
     /// Complete candidate ranking. The server does not truncate this list.
     pub items: Vec<CrosslinkFinalizerEntry>,
+}
+
+/// Parameters for one finalizer detail.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CrosslinkFinalizerRequest {
+    /// Finalizer public key in the display byte order used by list responses.
+    pub public_key: String,
+}
+
+/// Parameters for one finalizer's current miner-source page.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CrosslinkFinalizerStakeSourcesRequest {
+    /// Finalizer public key in the display byte order used by list responses.
+    pub public_key: String,
+    /// Maximum number of miner sources to return, from 1 through 100.
+    pub limit: Option<u32>,
+    /// Opaque cursor returned by a previous page.
+    pub cursor: Option<String>,
+    /// Direction to move from `cursor`.
+    #[serde(default)]
+    pub direction: PageDirection,
+}
+
+/// Current detail for one finalizer candidate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkFinalizerResponse {
+    /// True when the finalizer exists in the current stake snapshot.
+    pub available: bool,
+    pub finalizer: CrosslinkFinalizerEntry,
+    pub status: CrosslinkFinalizerSetStatus,
+    pub snapshot_height: Option<String>,
+    pub snapshot_hash: Option<String>,
+    pub selection_height: Option<String>,
+    pub activation_height: Option<String>,
+    pub blocks_until_selection: Option<String>,
+    pub blocks_until_activation: Option<String>,
 }
 
 /// Vote messages observed by this node at its current BFT height.

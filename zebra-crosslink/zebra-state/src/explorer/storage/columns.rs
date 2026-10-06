@@ -6,6 +6,7 @@ use crate::service::finalized_state::{
 
 use super::disk_format::{
     ExplorerAddressKey, ExplorerAddressRecord, ExplorerBalanceKey, ExplorerDayKey,
+    ExplorerFinalizerMinerRankKey, ExplorerMinerFinalizerKey, ExplorerMinerFinalizerRankKey,
     ExplorerMinerRankKey, ExplorerSchemaVersion, ExplorerShieldedClassLocation,
     ExplorerTransactionKindLocation, ExplorerTransactionRecord,
 };
@@ -32,6 +33,18 @@ pub const EXPLORER_BALANCE_ORDER: &str = "explorer_balance_order";
 pub const EXPLORER_MINER_META: &str = "explorer_miner_meta";
 /// Attributed miners ordered by descending all-time block count.
 pub const EXPLORER_MINER_ORDER: &str = "explorer_miner_order";
+/// Active miner-funded bonds keyed by bond public key.
+pub const EXPLORER_BOND_ATTRIBUTION: &str = "explorer_bond_attribution";
+/// Current miner-finalizer pair aggregates keyed by both identities.
+pub const EXPLORER_MINER_FINALIZER_META: &str = "explorer_miner_finalizer_meta";
+/// Current miner-finalizer pairs ordered by descending stake.
+pub const EXPLORER_MINER_FINALIZER_ORDER: &str = "explorer_miner_finalizer_order";
+/// Current miners ordered within each finalizer by descending stake.
+pub const EXPLORER_FINALIZER_MINER_ORDER: &str = "explorer_finalizer_miner_order";
+/// Current global miner-attributed stake totals.
+pub const EXPLORER_MINER_STAKE_TOTALS: &str = "explorer_miner_stake_totals";
+/// Current miner-attributed totals keyed by finalizer public key.
+pub const EXPLORER_FINALIZER_MINER_TOTALS: &str = "explorer_finalizer_miner_totals";
 
 pub(super) type ExplorerTransactionMetaCf<'cf> =
     TypedColumnFamily<'cf, TransactionLocation, ExplorerTransactionRecord>;
@@ -51,6 +64,18 @@ pub(super) type ExplorerBalanceOrderCf<'cf> = TypedColumnFamily<'cf, ExplorerBal
 pub(super) type ExplorerMinerMetaCf<'cf> =
     TypedColumnFamily<'cf, ExplorerAddressKey, crate::ExplorerMinerRecord>;
 pub(super) type ExplorerMinerOrderCf<'cf> = TypedColumnFamily<'cf, ExplorerMinerRankKey, ()>;
+pub(super) type ExplorerBondAttributionCf<'cf> =
+    TypedColumnFamily<'cf, [u8; 32], crate::ExplorerBondAttributionRecord>;
+pub(super) type ExplorerMinerFinalizerMetaCf<'cf> =
+    TypedColumnFamily<'cf, ExplorerMinerFinalizerKey, crate::ExplorerMinerFinalizerRecord>;
+pub(super) type ExplorerMinerFinalizerOrderCf<'cf> =
+    TypedColumnFamily<'cf, ExplorerMinerFinalizerRankKey, ()>;
+pub(super) type ExplorerFinalizerMinerOrderCf<'cf> =
+    TypedColumnFamily<'cf, ExplorerFinalizerMinerRankKey, ()>;
+pub(super) type ExplorerMinerStakeTotalsCf<'cf> =
+    TypedColumnFamily<'cf, (), crate::ExplorerMinerStakeTotals>;
+pub(super) type ExplorerFinalizerMinerTotalsCf<'cf> =
+    TypedColumnFamily<'cf, [u8; 32], crate::ExplorerMinerStakeTotals>;
 
 impl ZebraDb {
     fn explorer_schema_cf(&self) -> ExplorerSchemaCf<'_> {
@@ -145,6 +170,36 @@ impl ZebraDb {
     pub(super) fn explorer_miner_order_cf(&self) -> ExplorerMinerOrderCf<'_> {
         ExplorerMinerOrderCf::new(self.disk_db(), EXPLORER_MINER_ORDER)
             .expect("explorer miner ranking column family is registered")
+    }
+
+    pub(super) fn explorer_bond_attribution_cf(&self) -> ExplorerBondAttributionCf<'_> {
+        ExplorerBondAttributionCf::new(self.disk_db(), EXPLORER_BOND_ATTRIBUTION)
+            .expect("explorer bond attribution column family is registered")
+    }
+
+    pub(super) fn explorer_miner_finalizer_meta_cf(&self) -> ExplorerMinerFinalizerMetaCf<'_> {
+        ExplorerMinerFinalizerMetaCf::new(self.disk_db(), EXPLORER_MINER_FINALIZER_META)
+            .expect("explorer miner-finalizer metadata column family is registered")
+    }
+
+    pub(super) fn explorer_miner_finalizer_order_cf(&self) -> ExplorerMinerFinalizerOrderCf<'_> {
+        ExplorerMinerFinalizerOrderCf::new(self.disk_db(), EXPLORER_MINER_FINALIZER_ORDER)
+            .expect("explorer miner-finalizer ranking column family is registered")
+    }
+
+    pub(super) fn explorer_finalizer_miner_order_cf(&self) -> ExplorerFinalizerMinerOrderCf<'_> {
+        ExplorerFinalizerMinerOrderCf::new(self.disk_db(), EXPLORER_FINALIZER_MINER_ORDER)
+            .expect("explorer finalizer-miner ranking column family is registered")
+    }
+
+    pub(super) fn explorer_miner_stake_totals_cf(&self) -> ExplorerMinerStakeTotalsCf<'_> {
+        ExplorerMinerStakeTotalsCf::new(self.disk_db(), EXPLORER_MINER_STAKE_TOTALS)
+            .expect("explorer miner stake totals column family is registered")
+    }
+
+    pub(super) fn explorer_finalizer_miner_totals_cf(&self) -> ExplorerFinalizerMinerTotalsCf<'_> {
+        ExplorerFinalizerMinerTotalsCf::new(self.disk_db(), EXPLORER_FINALIZER_MINER_TOTALS)
+            .expect("explorer finalizer miner totals column family is registered")
     }
 }
 

@@ -58,15 +58,13 @@ use tower::{Service, ServiceExt};
 use tracing::Instrument;
 
 use zcash_address::{unified::Encoding, TryFromAddress};
-use zcash_protocol::consensus::{self, Parameters};
-use zcash_primitives::transaction::RosterMember;
 use zcash_primitives::bft::{FatPointerToBftBlock, ScanInfo};
+use zcash_primitives::transaction::RosterMember;
+use zcash_protocol::consensus::{self, Parameters};
 
 use zebra_chain::{
     amount::{Amount, NegativeAllowed, NonNegative},
-    block::{
-        self, Block, Commitment, Height, SerializedBlock, TryIntoHeight,
-    },
+    block::{self, Block, Commitment, Height, SerializedBlock, TryIntoHeight},
     chain_sync_status::ChainSyncStatus,
     chain_tip::{ChainTip, NetworkChainTipHeightEstimator},
     parameters::{
@@ -86,18 +84,16 @@ use zebra_chain::{
         equihash::Solution,
     },
 };
-use zebra_consensus::{
-    funding_stream_address, router::service_trait::BlockVerifierService,
-};
 #[cfg(test)]
 use zebra_consensus::RouterError;
+use zebra_consensus::{funding_stream_address, router::service_trait::BlockVerifierService};
 use zebra_network::{address_book_peers::AddressBookPeers, types::PeerServices, PeerSocketAddr};
 use zebra_node_services::mempool::{self, CreatedOrSpent, MempoolService};
+use zebra_state::crosslink::{TFLBlockFinality, TFLServiceRequest, TFLServiceResponse};
 use zebra_state::{
     AnyTx, HashOrHeight, OutputLocation, ReadRequest, ReadResponse, ReadState as ReadStateService,
     State as StateService, TransactionLocation,
 };
-use zebra_state::crosslink::{TFLBlockFinality, TFLServiceRequest, TFLServiceResponse};
 
 use crate::{
     client::TransactionTemplate,
@@ -121,11 +117,12 @@ pub mod types;
 use explorer::types::{
     AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
     BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkFinalizerLivenessResponse,
-    CrosslinkFinalizersResponse, ExplorerNetworkStatsResponse, GetAddressTransactionsRequest,
-    GetAddressUtxosPageRequest, GetBlocksRequest, GetMempoolTransactionsRequest,
-    GetTransactionsRequest, IndexerStatusResponse, MempoolTransactionsResponse,
-    MinerInfoResponse, TopBalancesRequest, TopBalancesResponse, TopMinersRequest,
-    TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
+    CrosslinkFinalizerRequest, CrosslinkFinalizerResponse, CrosslinkFinalizerStakeSourcesRequest,
+    CrosslinkFinalizersResponse, CrosslinkMinerStakeRequest, CrosslinkMinerStakeResponse,
+    ExplorerNetworkStatsResponse, GetAddressTransactionsRequest, GetAddressUtxosPageRequest,
+    GetBlocksRequest, GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
+    MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
+    TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
 };
 use hex_data::HexData;
 use trees::{GetSubtreesByIndexResponse, GetTreestateResponse, SubtreeRpcData};
@@ -180,8 +177,7 @@ pub(super) const PARAM_STRING_DESC: &str = "A Crosslink staking command string."
 #[allow(dead_code)]
 pub(super) const PARAM_STAKING_ACTION_DESC: &str =
     "The staking action to submit from the attached wallet.";
-pub(super) const PARAM_VALUE_ZATS_DESC: &str =
-    "The exact value to send, in zatoshis.";
+pub(super) const PARAM_VALUE_ZATS_DESC: &str = "The exact value to send, in zatoshis.";
 pub(super) const PARAM_DST_ADDRESS_DESC: &str =
     "The unified address to send to; it must have an Ironwood receiver.";
 pub(super) const PARAM_BOND_KEY_DESC: &str = "The 32-byte delegation bond key, hex-encoded.";
@@ -722,7 +718,12 @@ pub trait Rpc {
     /// - `first_height`: (numeric, required) The first block height to scan, inclusive.
     /// - `last_height`: (numeric, required) The last block height to scan, inclusive.
     #[method(name = "get_total_issuance")]
-    async fn get_total_issuance(&self, ufvk_strs: UfvkList, first_height: u32, last_height: u32) -> Result<Vec<ScanInfo>>;
+    async fn get_total_issuance(
+        &self,
+        ufvk_strs: UfvkList,
+        first_height: u32,
+        last_height: u32,
+    ) -> Result<Vec<ScanInfo>>;
 
     /// Returns all transaction ids in the memory pool, as a JSON array.
     ///
@@ -936,9 +937,28 @@ pub trait Rpc {
 
     /// Returns node-local connection and voting observations for the active finalizer set.
     #[method(name = "getcrosslinkfinalizerliveness")]
-    async fn get_crosslink_finalizer_liveness(
+    async fn get_crosslink_finalizer_liveness(&self) -> Result<CrosslinkFinalizerLivenessResponse>;
+
+    /// Returns current stake in active bonds directly attributable to known miner addresses.
+    #[method(name = "getcrosslinkminerstake")]
+    async fn get_crosslink_miner_stake(
         &self,
-    ) -> Result<CrosslinkFinalizerLivenessResponse>;
+        request: Option<CrosslinkMinerStakeRequest>,
+    ) -> Result<CrosslinkMinerStakeResponse>;
+
+    /// Returns one finalizer candidate.
+    #[method(name = "getcrosslinkfinalizer")]
+    async fn get_crosslink_finalizer(
+        &self,
+        request: CrosslinkFinalizerRequest,
+    ) -> Result<Option<CrosslinkFinalizerResponse>>;
+
+    /// Returns current miner-attributed stake sources for one finalizer candidate.
+    #[method(name = "getcrosslinkfinalizerstakesources")]
+    async fn get_crosslink_finalizer_stake_sources(
+        &self,
+        request: CrosslinkFinalizerStakeSourcesRequest,
+    ) -> Result<Option<CrosslinkMinerStakeResponse>>;
 
     /// Returns date-paginated daily explorer chart snapshots.
     #[method(name = "getexplorerchartdata")]
@@ -954,10 +974,7 @@ pub trait Rpc {
 
     /// Returns all-time miners ranked by attributed canonical blocks.
     #[method(name = "gettopminers")]
-    async fn get_top_miners(
-        &self,
-        request: Option<TopMinersRequest>,
-    ) -> Result<TopMinersResponse>;
+    async fn get_top_miners(&self, request: Option<TopMinersRequest>) -> Result<TopMinersResponse>;
 
     /// Returns all-time mining information for one transparent payout address.
     #[method(name = "getminerinfo")]
@@ -1281,8 +1298,7 @@ pub struct RpcImpl<
     AddressBook,
     BlockVerifierRouter,
     SyncStatus,
->
-where
+> where
     Mempool: MempoolService,
     TFLService: Service<
             TFLServiceRequest,
@@ -1517,7 +1533,12 @@ where
     async fn crosslink_finalized_tip(
         &self,
     ) -> Option<(zebra_chain::block::Height, zebra_chain::block::Hash)> {
-        match self.read_state.clone().oneshot(ReadRequest::CrosslinkFinalizedTip).await {
+        match self
+            .read_state
+            .clone()
+            .oneshot(ReadRequest::CrosslinkFinalizedTip)
+            .await
+        {
             Ok(ReadResponse::CrosslinkFinalizedTip(tip)) => tip,
             other => {
                 tracing::error!(?other, "bad state service return");
@@ -1534,7 +1555,12 @@ where
             Option<(zebra_chain::block::Height, zebra_chain::block::Hash)>,
         >,
     > {
-        match self.read_state.clone().oneshot(ReadRequest::CrosslinkFinalizedTipChange).await {
+        match self
+            .read_state
+            .clone()
+            .oneshot(ReadRequest::CrosslinkFinalizedTipChange)
+            .await
+        {
             Ok(ReadResponse::CrosslinkFinalizedTipChange(listener)) => Some(listener.0),
             other => {
                 tracing::error!(?other, "bad state service return");
@@ -1824,17 +1850,21 @@ where
 
     async fn get_bond_info(&self, bond_key: String) -> Result<Option<GetBondInfoResponse>> {
         let bond_key_bytes: [u8; 32] = Vec::from_hex(&bond_key)
-            .map_err(|_| ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                "invalid hex string for bond_key",
-                None::<()>,
-            ))?
+            .map_err(|_| {
+                ErrorObject::owned(
+                    ErrorCode::InvalidParams.code(),
+                    "invalid hex string for bond_key",
+                    None::<()>,
+                )
+            })?
             .try_into()
-            .map_err(|_| ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                "bond_key must be exactly 32 bytes",
-                None::<()>,
-            ))?;
+            .map_err(|_| {
+                ErrorObject::owned(
+                    ErrorCode::InvalidParams.code(),
+                    "bond_key must be exactly 32 bytes",
+                    None::<()>,
+                )
+            })?;
 
         let request = zebra_state::ReadRequest::BondInfo(bond_key_bytes);
         let response = self
@@ -1845,13 +1875,11 @@ where
             .map_misc_error()?;
 
         match response {
-            zebra_state::ReadResponse::BondInfo(Some(info)) => {
-                Ok(Some(GetBondInfoResponse {
-                    amount: u64::from(info.amount),
-                    status: info.status,
-                    last_action_height: info.last_action_height,
-                }))
-            }
+            zebra_state::ReadResponse::BondInfo(Some(info)) => Ok(Some(GetBondInfoResponse {
+                amount: u64::from(info.amount),
+                status: info.status,
+                last_action_height: info.last_action_height,
+            })),
             zebra_state::ReadResponse::BondInfo(None) => Ok(None),
             _ => unreachable!("Unexpected response from state service: {response:?}"),
         }
@@ -1859,17 +1887,21 @@ where
 
     async fn get_finalizer_reward_balance(&self, finalizer: String) -> Result<u64> {
         let finalizer: [u8; 32] = Vec::from_hex(&finalizer)
-            .map_err(|_| ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                "invalid hex string for finalizer",
-                None::<()>,
-            ))?
+            .map_err(|_| {
+                ErrorObject::owned(
+                    ErrorCode::InvalidParams.code(),
+                    "invalid hex string for finalizer",
+                    None::<()>,
+                )
+            })?
             .try_into()
-            .map_err(|_| ErrorObject::owned(
-                ErrorCode::InvalidParams.code(),
-                "finalizer must be exactly 32 bytes",
-                None::<()>,
-            ))?;
+            .map_err(|_| {
+                ErrorObject::owned(
+                    ErrorCode::InvalidParams.code(),
+                    "finalizer must be exactly 32 bytes",
+                    None::<()>,
+                )
+            })?;
 
         let response = self
             .read_state
@@ -1898,18 +1930,18 @@ where
             .await;
 
         match ret {
-            Ok(TFLServiceResponse::Faucet(Ok(amount))) => Ok(FaucetResponse{ amount }),
+            Ok(TFLServiceResponse::Faucet(Ok(amount))) => Ok(FaucetResponse { amount }),
             Ok(TFLServiceResponse::Faucet(Err(err))) => Err(ErrorObject::owned(
-                    server::error::LegacyCode::Verify.into(),
-                    format!("Faucet request for \"{ua_str}\" failed: {err}"),
-                    None::<()>,
+                server::error::LegacyCode::Verify.into(),
+                format!("Faucet request for \"{ua_str}\" failed: {err}"),
+                None::<()>,
             )),
             Err(err) => {
                 // tracing::error!(?ret, "Bad tfl service return.");
                 Err(ErrorObject::owned(
-                        server::error::LegacyCode::Verify.into(),
-                        format!("Faucet request for \"{ua_str}\" failed: {err}"),
-                        None::<()>,
+                    server::error::LegacyCode::Verify.into(),
+                    format!("Faucet request for \"{ua_str}\" failed: {err}"),
+                    None::<()>,
                 ))
             }
             _ => unreachable!(""),
@@ -2245,7 +2277,11 @@ where
     }
 
     async fn is_tfl_activated(&self) -> Option<bool> {
-        let ret = self.read_state.clone().oneshot(ReadRequest::CrosslinkIsActivated).await;
+        let ret = self
+            .read_state
+            .clone()
+            .oneshot(ReadRequest::CrosslinkIsActivated)
+            .await;
         if let Ok(ReadResponse::CrosslinkIsActivated(is_activated)) = ret {
             Some(is_activated)
         } else {
@@ -2325,7 +2361,9 @@ where
     }
 
     async fn get_tfl_final_block_hash(&self) -> Option<GetBlockHash> {
-        self.crosslink_finalized_tip().await.map(|(_, hash)| GetBlockHash(hash))
+        self.crosslink_finalized_tip()
+            .await
+            .map(|(_, hash)| GetBlockHash(hash))
     }
 
     async fn get_tfl_final_block_height_and_hash(&self) -> Option<GetBlockHeightAndHashResponse> {
@@ -2354,7 +2392,11 @@ where
     }
 
     async fn get_tfl_tx_finality_from_hash(&self, hash: GetTxHash) -> Option<TFLBlockFinality> {
-        let ret = self.read_state.clone().oneshot(ReadRequest::CrosslinkTxFinality(hash.0)).await;
+        let ret = self
+            .read_state
+            .clone()
+            .oneshot(ReadRequest::CrosslinkTxFinality(hash.0))
+            .await;
         if let Ok(ReadResponse::CrosslinkTxFinality(finality)) = ret {
             finality
         } else {
@@ -2447,7 +2489,9 @@ where
             let txs_res = self
                 .read_state
                 .clone()
-                .oneshot(zebra_state::ReadRequest::TransactionIdsForBlock(block_hash.into()))
+                .oneshot(zebra_state::ReadRequest::TransactionIdsForBlock(
+                    block_hash.into(),
+                ))
                 .await;
             if let Ok(txs) = txs_res {
                 tracing::info!(
@@ -2499,9 +2543,7 @@ where
             .oneshot(ReadRequest::CrosslinkRecencyStatus)
             .await;
         match res {
-            Ok(ReadResponse::CrosslinkRecencyStatus(status)) => {
-                Some(status)
-            }
+            Ok(ReadResponse::CrosslinkRecencyStatus(status)) => Some(status),
             Err(err) => {
                 tracing::error!("{err:?}");
                 None
@@ -2521,7 +2563,7 @@ where
             .await;
         match res {
             Ok(TFLServiceResponse::WalletUfvk(ufvk_str)) => ufvk_str,
-            _ => None
+            _ => None,
         }
     }
 
@@ -2539,13 +2581,22 @@ where
             Ok(TFLServiceResponse::WalletStakingPositions((active, withdrawable))) => {
                 // present each (bond, latest value) pair as one flat JSON object
                 let position = |(bond, latest_zats): &(zebra_state::crosslink::ScanBond, u64)| {
-                    let mut val = serde_json::to_value(bond).expect("ScanBond serializes to an object");
-                    val.as_object_mut().unwrap().insert("latest_val".to_string(), (*latest_zats).into());
+                    let mut val =
+                        serde_json::to_value(bond).expect("ScanBond serializes to an object");
+                    val.as_object_mut()
+                        .unwrap()
+                        .insert("latest_val".to_string(), (*latest_zats).into());
                     val
                 };
 
-                let active: serde_json::Map<String, serde_json::Value> = active.iter()
-                    .map(|(finalizer, positions)| (finalizer.to_string(), positions.iter().map(position).collect()))
+                let active: serde_json::Map<String, serde_json::Value> = active
+                    .iter()
+                    .map(|(finalizer, positions)| {
+                        (
+                            finalizer.to_string(),
+                            positions.iter().map(position).collect(),
+                        )
+                    })
                     .collect();
 
                 Ok(serde_json::json!({
@@ -2555,9 +2606,9 @@ where
             }
             Ok(_) => unreachable!("unmatched response to a WalletStakingPositions request"),
             Err(err) => Err(ErrorObject::owned(
-                    server::error::LegacyCode::Verify.into(),
-                    format!("Staking positions query failed: {err}"),
-                    None::<()>,
+                server::error::LegacyCode::Verify.into(),
+                format!("Staking positions query failed: {err}"),
+                None::<()>,
             )),
         }
     }
@@ -2578,15 +2629,15 @@ where
             }
             // The wallet loop has not completed a pass yet, so no answer would be truthful.
             Ok(TFLServiceResponse::WalletSpendableFunds(None)) => Err(ErrorObject::owned(
-                    server::error::LegacyCode::InWarmup.into(),
-                    "Wallet has not finished its first sync pass".to_string(),
-                    None::<()>,
+                server::error::LegacyCode::InWarmup.into(),
+                "Wallet has not finished its first sync pass".to_string(),
+                None::<()>,
             )),
             Ok(_) => unreachable!("unmatched response to a WalletSpendableFunds request"),
             Err(err) => Err(ErrorObject::owned(
-                    server::error::LegacyCode::Verify.into(),
-                    format!("Spendable funds query failed: {err}"),
-                    None::<()>,
+                server::error::LegacyCode::Verify.into(),
+                format!("Spendable funds query failed: {err}"),
+                None::<()>,
             )),
         }
     }
@@ -2598,21 +2649,24 @@ where
             .ready()
             .await
             .unwrap()
-            .call(TFLServiceRequest::WalletBasicSend(value_zats, dst_address.clone()))
+            .call(TFLServiceRequest::WalletBasicSend(
+                value_zats,
+                dst_address.clone(),
+            ))
             .await;
 
         match res {
             Ok(TFLServiceResponse::WalletBasicSend(Ok(res))) => Ok(res),
             Ok(TFLServiceResponse::WalletBasicSend(Err(err))) => Err(ErrorObject::owned(
-                    server::error::LegacyCode::Verify.into(),
-                    format!("Send of {value_zats} zats to \"{dst_address}\" failed: {err}"),
-                    None::<()>,
+                server::error::LegacyCode::Verify.into(),
+                format!("Send of {value_zats} zats to \"{dst_address}\" failed: {err}"),
+                None::<()>,
             )),
             Ok(_) => unreachable!("unmatched response to a WalletBasicSend request"),
             Err(err) => Err(ErrorObject::owned(
-                    server::error::LegacyCode::Verify.into(),
-                    format!("Send of {value_zats} zats to \"{dst_address}\" failed: {err}"),
-                    None::<()>,
+                server::error::LegacyCode::Verify.into(),
+                format!("Send of {value_zats} zats to \"{dst_address}\" failed: {err}"),
+                None::<()>,
             )),
         }
     }
@@ -2790,7 +2844,12 @@ where
         }
     }
 
-    async fn get_total_issuance(&self, ufvk_strs: UfvkList, first_height: u32, last_height: u32) -> Result<Vec<ScanInfo>> {
+    async fn get_total_issuance(
+        &self,
+        ufvk_strs: UfvkList,
+        first_height: u32,
+        last_height: u32,
+    ) -> Result<Vec<ScanInfo>> {
         let ufvk_strs = ufvk_strs.0;
         // TODO: @Prod @Testnet
         let network = &zcash_protocol::consensus::TEST_NETWORK;
@@ -2804,7 +2863,11 @@ where
         let res = self
             .tfl_service
             .clone()
-            .oneshot(TFLServiceRequest::TotalIssuanceFromKey(ufvks, Height(first_height), Height(last_height)))
+            .oneshot(TFLServiceRequest::TotalIssuanceFromKey(
+                ufvks,
+                Height(first_height),
+                Height(last_height),
+            ))
             .await;
         if let Ok(TFLServiceResponse::TotalIssuanceFromKey(res)) = res {
             res.map_error(server::error::LegacyCode::InvalidAddressOrKey)
@@ -3504,10 +3567,30 @@ where
         self.explorer_get_crosslink_finalizers().await
     }
 
-    async fn get_crosslink_finalizer_liveness(
-        &self,
-    ) -> Result<CrosslinkFinalizerLivenessResponse> {
+    async fn get_crosslink_finalizer_liveness(&self) -> Result<CrosslinkFinalizerLivenessResponse> {
         self.explorer_get_crosslink_finalizer_liveness().await
+    }
+
+    async fn get_crosslink_miner_stake(
+        &self,
+        request: Option<CrosslinkMinerStakeRequest>,
+    ) -> Result<CrosslinkMinerStakeResponse> {
+        self.explorer_get_crosslink_miner_stake(request).await
+    }
+
+    async fn get_crosslink_finalizer(
+        &self,
+        request: CrosslinkFinalizerRequest,
+    ) -> Result<Option<CrosslinkFinalizerResponse>> {
+        self.explorer_get_crosslink_finalizer(request).await
+    }
+
+    async fn get_crosslink_finalizer_stake_sources(
+        &self,
+        request: CrosslinkFinalizerStakeSourcesRequest,
+    ) -> Result<Option<CrosslinkMinerStakeResponse>> {
+        self.explorer_get_crosslink_finalizer_stake_sources(request)
+            .await
     }
 
     async fn get_explorer_chart_data(
@@ -3524,10 +3607,7 @@ where
         self.explorer_get_top_balances(request).await
     }
 
-    async fn get_top_miners(
-        &self,
-        request: Option<TopMinersRequest>,
-    ) -> Result<TopMinersResponse> {
+    async fn get_top_miners(&self, request: Option<TopMinersRequest>) -> Result<TopMinersResponse> {
         self.explorer_get_top_miners(request).await
     }
 
@@ -3909,7 +3989,9 @@ where
             let ret = self
                 .read_state
                 .clone()
-                .oneshot(ReadRequest::CrosslinkFatPointerToBftChainTip(height.0 as u64))
+                .oneshot(ReadRequest::CrosslinkFatPointerToBftChainTip(
+                    height.0 as u64,
+                ))
                 .await;
             match ret {
                 Ok(ReadResponse::CrosslinkFatPointerToBftChainTip(fp)) => fp,
@@ -3938,7 +4020,10 @@ where
             .iter()
             .enumerate()
             .filter_map(|(i, selected)| {
-                let staking_action = selected_transaction(selected).transaction.transaction.staking_action()?;
+                let staking_action = selected_transaction(selected)
+                    .transaction
+                    .transaction
+                    .staking_action()?;
                 Some((i, *staking_action))
             })
             .unzip();
@@ -3948,7 +4033,10 @@ where
             let response = self
                 .read_state
                 .clone()
-                .oneshot(ReadRequest::InvalidStakingActions { height, staking_actions })
+                .oneshot(ReadRequest::InvalidStakingActions {
+                    height,
+                    staking_actions,
+                })
                 .await;
             // This check is a safety net, so it must not stop mining: if the state can't answer,
             // the template goes out without its staking transactions rather than not at all.
@@ -3962,7 +4050,9 @@ where
                     }
                     invalid.into_iter().map(|i| staking_positions[i]).collect()
                 }
-                Ok(_) => unreachable!("InvalidStakingActions request always responds with InvalidStakingActions"),
+                Ok(_) => unreachable!(
+                    "InvalidStakingActions request always responds with InvalidStakingActions"
+                ),
                 Err(error) => {
                     tracing::warn!(
                         ?error,
@@ -4057,23 +4147,43 @@ where
                 // TODO (#5487): a side-chain block is Inconclusive rather than Duplicate -- the
                 // distinction matters to miners, who want to be on the best chain. The location
                 // is carried here now, so that can be refined without more plumbing.
-                tracing::info!(?block_hash, ?height, ?location, "submit block already known");
+                tracing::info!(
+                    ?block_hash,
+                    ?height,
+                    ?location,
+                    "submit block already known"
+                );
                 Ok(SubmitBlockErrorResponse::Duplicate.into())
             }
 
             Ok(zebra_state::new_network::IngestOutcome::Failed { reason, .. }) => {
-                tracing::info!(?block_hash, ?height, ?reason, "submit block failed verification");
+                tracing::info!(
+                    ?block_hash,
+                    ?height,
+                    ?reason,
+                    "submit block failed verification"
+                );
                 Ok(SubmitBlockErrorResponse::Rejected.into())
             }
 
             // Held until its parent or a BFT decision arrives; it may still commit.
             Ok(zebra_state::new_network::IngestOutcome::Pending { reason }) => {
-                tracing::info!(?block_hash, ?height, ?reason, "submit block held in the commit queue");
+                tracing::info!(
+                    ?block_hash,
+                    ?height,
+                    ?reason,
+                    "submit block held in the commit queue"
+                );
                 Ok(SubmitBlockErrorResponse::Inconclusive.into())
             }
 
             Err(error) => {
-                tracing::warn!(?block_hash, ?height, ?error, "submit block could not be ingested");
+                tracing::warn!(
+                    ?block_hash,
+                    ?height,
+                    ?error,
+                    "submit block could not be ingested"
+                );
                 Ok(SubmitBlockErrorResponse::Rejected.into())
             }
         }
@@ -4364,7 +4474,6 @@ where
             orchard, sapling, p2pkh, p2sh,
         ))
     }
-
 
     async fn generate(&self, num_blocks: u32) -> Result<Vec<Hash>> {
         let mut rpc = self.clone();
@@ -5139,17 +5248,7 @@ impl ValidateAddresses for GetAddressUtxosRequest {
 }
 
 /// Response to a `getbondinfo` RPC request.
-#[derive(
-    Clone,
-    Debug,
-    Eq,
-    PartialEq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    Getters,
-    new,
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize, Getters, new)]
 pub struct GetBondInfoResponse {
     /// The bond amount in zatoshis.
     #[getter(copy)]
@@ -5669,7 +5768,9 @@ impl GetBlockHashResponse {
 /// A newtype rather than a bare `Vec<String>`: the OpenRPC schema generator cannot infer whether
 /// a bare `Vec` parameter is required, and falls back to a helper const it cannot resolve through
 /// the `Result` alias.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct UfvkList(pub Vec<String>);
 

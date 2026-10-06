@@ -14,7 +14,8 @@ use crate::service::finalized_state::{
     FromDisk, IntoDisk, TransactionLocation, TRANSACTION_LOCATION_DISK_BYTES,
 };
 use crate::{
-    ExplorerBlockStats, ExplorerChainStats, ExplorerDailyStats, ExplorerMinerRecord,
+    ExplorerBlockStats, ExplorerBondAttributionRecord, ExplorerChainStats, ExplorerDailyStats,
+    ExplorerMinerFinalizerRecord, ExplorerMinerRecord, ExplorerMinerStakeTotals,
 };
 
 /// Independently versioned explorer schema marker.
@@ -51,6 +52,18 @@ pub struct ExplorerBalanceKey([u8; 29]);
 /// Block-count-first key. Inverting the count makes forward order most-mined first.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ExplorerMinerRankKey([u8; 29]);
+
+/// Miner and finalizer identity for a current attributed stake pair.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExplorerMinerFinalizerKey([u8; 53]);
+
+/// Stake-first key. Inverting stake makes forward order largest first.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ExplorerMinerFinalizerRankKey([u8; 61]);
+
+/// Finalizer-prefixed stake key for one finalizer's miner ranking.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ExplorerFinalizerMinerRankKey([u8; 61]);
 
 /// UTC day number encoded in chronological key order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -148,6 +161,136 @@ impl FromDisk for ExplorerMinerRankKey {
     }
 }
 
+impl ExplorerMinerFinalizerKey {
+    pub fn new(address: Address, finalizer: [u8; 32]) -> Self {
+        let mut bytes = [0; 53];
+        bytes[..21].copy_from_slice(&address.as_bytes());
+        bytes[21..].copy_from_slice(&finalizer);
+        Self(bytes)
+    }
+
+    pub fn address(self) -> Address {
+        address_from_disk_bytes(&self.0[..21])
+    }
+
+    pub fn finalizer(self) -> [u8; 32] {
+        self.0[21..]
+            .try_into()
+            .expect("miner-finalizer key ends with 32 finalizer bytes")
+    }
+
+    pub fn min_for_address(address: Address) -> Self {
+        Self::new(address, [0; 32])
+    }
+
+    pub fn max_for_address(address: Address) -> Self {
+        Self::new(address, [u8::MAX; 32])
+    }
+}
+
+impl IntoDisk for ExplorerMinerFinalizerKey {
+    type Bytes = [u8; 53];
+
+    fn as_bytes(&self) -> Self::Bytes {
+        self.0
+    }
+}
+
+impl FromDisk for ExplorerMinerFinalizerKey {
+    fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+        Self(
+            bytes
+                .as_ref()
+                .try_into()
+                .expect("explorer miner-finalizer keys are 53 bytes"),
+        )
+    }
+}
+
+impl ExplorerMinerFinalizerRankKey {
+    pub fn new(address: Address, finalizer: [u8; 32], current_stake_zat: u64) -> Self {
+        let mut bytes = [0; 61];
+        bytes[..8].copy_from_slice(&(u64::MAX - current_stake_zat).to_be_bytes());
+        bytes[8..29].copy_from_slice(&address.as_bytes());
+        bytes[29..].copy_from_slice(&finalizer);
+        Self(bytes)
+    }
+
+    pub fn address(self) -> Address {
+        address_from_disk_bytes(&self.0[8..29])
+    }
+
+    pub fn finalizer(self) -> [u8; 32] {
+        self.0[29..]
+            .try_into()
+            .expect("miner-finalizer rank key ends with 32 finalizer bytes")
+    }
+}
+
+impl IntoDisk for ExplorerMinerFinalizerRankKey {
+    type Bytes = [u8; 61];
+
+    fn as_bytes(&self) -> Self::Bytes {
+        self.0
+    }
+}
+
+impl FromDisk for ExplorerMinerFinalizerRankKey {
+    fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+        Self(
+            bytes
+                .as_ref()
+                .try_into()
+                .expect("explorer miner-finalizer rank keys are 61 bytes"),
+        )
+    }
+}
+
+impl ExplorerFinalizerMinerRankKey {
+    pub fn new(finalizer: [u8; 32], address: Address, current_stake_zat: u64) -> Self {
+        let mut bytes = [0; 61];
+        bytes[..32].copy_from_slice(&finalizer);
+        bytes[32..40].copy_from_slice(&(u64::MAX - current_stake_zat).to_be_bytes());
+        bytes[40..].copy_from_slice(&address.as_bytes());
+        Self(bytes)
+    }
+
+    pub fn min_for_finalizer(finalizer: [u8; 32]) -> Self {
+        let mut bytes = [0; 61];
+        bytes[..32].copy_from_slice(&finalizer);
+        Self(bytes)
+    }
+
+    pub fn max_for_finalizer(finalizer: [u8; 32]) -> Self {
+        let mut bytes = [u8::MAX; 61];
+        bytes[..32].copy_from_slice(&finalizer);
+        Self(bytes)
+    }
+
+    pub fn address(self) -> Address {
+        address_from_disk_bytes(&self.0[40..])
+    }
+}
+
+impl IntoDisk for ExplorerFinalizerMinerRankKey {
+    type Bytes = [u8; 61];
+
+    fn as_bytes(&self) -> Self::Bytes {
+        self.0
+    }
+}
+
+impl FromDisk for ExplorerFinalizerMinerRankKey {
+    fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+        Self(
+            bytes
+                .as_ref()
+                .try_into()
+                .expect("explorer finalizer-miner rank keys are 61 bytes"),
+        )
+    }
+}
+
 fn address_from_disk_bytes(bytes: &[u8]) -> Address {
     let tag = *bytes
         .first()
@@ -208,6 +351,9 @@ impl_analytics_disk_value!(ExplorerBlockStats);
 impl_analytics_disk_value!(ExplorerChainStats);
 impl_analytics_disk_value!(ExplorerDailyStats);
 impl_analytics_disk_value!(ExplorerMinerRecord);
+impl_analytics_disk_value!(ExplorerBondAttributionRecord);
+impl_analytics_disk_value!(ExplorerMinerFinalizerRecord);
+impl_analytics_disk_value!(ExplorerMinerStakeTotals);
 
 /// Opaque fixed-width transparent-address key used by explorer metadata.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -736,6 +882,40 @@ mod tests {
     }
 
     #[test]
+    fn miner_finalizer_keys_sort_most_stake_first_and_round_trip() {
+        let lower_address = Address::from_pub_key_hash(NetworkKind::Mainnet, [1; 20]);
+        let higher_address = Address::from_pub_key_hash(NetworkKind::Mainnet, [2; 20]);
+        let finalizer = [3; 32];
+        let richest = ExplorerMinerFinalizerRankKey::new(higher_address, finalizer, 20);
+        let poorer = ExplorerMinerFinalizerRankKey::new(lower_address, finalizer, 10);
+
+        assert!(richest.as_bytes() < poorer.as_bytes());
+        assert_eq!(
+            ExplorerMinerFinalizerRankKey::from_bytes(richest.as_bytes()),
+            richest
+        );
+        assert_eq!(richest.address(), higher_address);
+        assert_eq!(richest.finalizer(), finalizer);
+
+        let scoped_richest = ExplorerFinalizerMinerRankKey::new(finalizer, higher_address, 20);
+        let scoped_poorer = ExplorerFinalizerMinerRankKey::new(finalizer, lower_address, 10);
+        assert!(scoped_richest.as_bytes() < scoped_poorer.as_bytes());
+        assert_eq!(
+            ExplorerFinalizerMinerRankKey::from_bytes(scoped_richest.as_bytes()),
+            scoped_richest
+        );
+        assert_eq!(scoped_richest.address(), higher_address);
+
+        let identity = ExplorerMinerFinalizerKey::new(higher_address, finalizer);
+        assert_eq!(
+            ExplorerMinerFinalizerKey::from_bytes(identity.as_bytes()),
+            identity
+        );
+        assert_eq!(identity.address(), higher_address);
+        assert_eq!(identity.finalizer(), finalizer);
+    }
+
+    #[test]
     fn day_keys_preserve_chronological_order_and_round_trip() {
         let earlier = ExplorerDayKey(1);
         let later = ExplorerDayKey(256);
@@ -763,9 +943,49 @@ mod tests {
             latest_block_hash: block::Hash([3; 32]),
             latest_timestamp: 1_700_000_000,
         };
+        let bond = ExplorerBondAttributionRecord {
+            source: crate::ExplorerStakeSource::Transparent(Address::from_pub_key_hash(
+                NetworkKind::Mainnet,
+                [4; 20],
+            )),
+            current_finalizer: [5; 32],
+            current_stake_zat: 6,
+        };
+        let pair = ExplorerMinerFinalizerRecord {
+            current_stake_zat: 7,
+            active_bond_count: 8,
+            stake_action_count: 9,
+            latest_height: 10,
+            latest_block_hash: block::Hash([11; 32]),
+            latest_timestamp: 12,
+        };
+        let totals = ExplorerMinerStakeTotals {
+            miner_stake_zat: 13,
+            miner_address_count: 14,
+            other_transparent_stake_zat: 15,
+            other_transparent_address_count: 16,
+            shielded_stake_zat: 17,
+            shielded_bond_count: 18,
+            unknown_stake_zat: 19,
+            unknown_bond_count: 20,
+            reward_bond_stake_zat: 21,
+            reward_bond_count: 22,
+        };
 
         assert_eq!(ExplorerChainStats::from_bytes(chain.as_bytes()), chain);
         assert_eq!(ExplorerDailyStats::from_bytes(daily.as_bytes()), daily);
         assert_eq!(ExplorerMinerRecord::from_bytes(miner.as_bytes()), miner);
+        assert_eq!(
+            ExplorerBondAttributionRecord::from_bytes(bond.as_bytes()),
+            bond
+        );
+        assert_eq!(
+            ExplorerMinerFinalizerRecord::from_bytes(pair.as_bytes()),
+            pair
+        );
+        assert_eq!(
+            ExplorerMinerStakeTotals::from_bytes(totals.as_bytes()),
+            totals
+        );
     }
 }

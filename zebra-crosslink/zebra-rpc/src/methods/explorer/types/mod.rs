@@ -7,8 +7,9 @@ mod stats;
 
 pub(in crate::methods) use zebra_indexer::{
     AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
-    BlocksResponse, ChartDataRequest, ChartDataResponse, MinerInfoResponse, TopBalancesRequest,
-    TopBalancesResponse, TopMinersRequest, TopMinersResponse, TransactionsResponse,
+    BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkMinerStakeRequest,
+    CrosslinkMinerStakeResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
+    TopMinersRequest, TopMinersResponse, TransactionsResponse,
 };
 
 #[cfg(feature = "indexer")]
@@ -20,7 +21,8 @@ pub(super) use crosslink::{
     CrosslinkVoteSummary,
 };
 pub use crosslink::{
-    CrosslinkFinalizerLivenessResponse, CrosslinkFinalizersResponse, CrosslinkNetworkStats,
+    CrosslinkFinalizerLivenessResponse, CrosslinkFinalizerRequest, CrosslinkFinalizerResponse,
+    CrosslinkFinalizerStakeSourcesRequest, CrosslinkFinalizersResponse, CrosslinkNetworkStats,
 };
 pub use mempool::{
     MempoolTransactionListItem, MempoolTransactionMetadata, MempoolTransactionSummary,

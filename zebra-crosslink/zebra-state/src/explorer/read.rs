@@ -10,8 +10,8 @@ use zebra_chain::{transaction::Transaction, transparent};
 use crate::{
     explorer::{
         ExplorerAddressPage, ExplorerAddressRecord, ExplorerBlockSummary, ExplorerMinerPage,
-        ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse, ExplorerTransactionPage,
-        ExplorerTransactionQuery, ExplorerTransactionSummary,
+        ExplorerMinerStakePage, ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse,
+        ExplorerTransactionPage, ExplorerTransactionQuery, ExplorerTransactionSummary,
     },
     request::Spend,
     service::{
@@ -111,6 +111,14 @@ pub fn handle(
         ExplorerReadRequest::Miner { address } => {
             ExplorerReadResponse::Miner(explorer_miner(db, address))
         }
+        ExplorerReadRequest::MinerStakePage {
+            finalizer,
+            limit,
+            cursor,
+            direction,
+        } => ExplorerReadResponse::MinerStakePage(explorer_miner_stake_page(
+            db, finalizer, limit, cursor, direction,
+        )),
     })
 }
 
@@ -169,6 +177,77 @@ pub fn explorer_miner(
         best_tip: db.tip(),
         chain_block_count: db.explorer_chain_stats().block_count,
         record: db.explorer_miner_record(address),
+    }
+}
+
+/// Returns current miner-attributed stake without scanning blocks or all bonds.
+pub fn explorer_miner_stake_page(
+    db: &ZebraDb,
+    finalizer: Option<[u8; 32]>,
+    limit: u32,
+    cursor: Option<crate::ExplorerMinerStakeRankCursor>,
+    direction: ExplorerPageDirection,
+) -> ExplorerMinerStakePage {
+    let best_tip = db.tip();
+    let cursor_valid = cursor.is_none_or(|cursor| {
+        best_tip.is_some_and(|(_, hash)| hash == cursor.block_hash)
+            && db.explorer_contains_miner_stake_entry(
+                finalizer,
+                cursor.miner_address,
+                cursor.finalizer,
+                cursor.current_stake_zat,
+            )
+    });
+    if !cursor_valid {
+        return ExplorerMinerStakePage {
+            best_tip,
+            cursor_valid,
+            ..Default::default()
+        };
+    }
+
+    let requested = usize::try_from(limit.clamp(1, MAX_EXPLORER_PAGE_SIZE))
+        .expect("explorer miner stake page limit fits in usize");
+    let mut entries = db.explorer_miner_stake_entries(
+        finalizer,
+        cursor.map(|cursor| {
+            (
+                cursor.miner_address,
+                cursor.finalizer,
+                cursor.current_stake_zat,
+            )
+        }),
+        direction,
+        requested.saturating_add(1),
+    );
+    let has_more = entries.len() > requested;
+    if direction == ExplorerPageDirection::Newer && has_more {
+        entries.remove(0);
+    } else {
+        entries.truncate(requested);
+    }
+
+    let totals = db.explorer_miner_stake_totals(finalizer);
+    let total_current_stake_zat = best_tip
+        .and_then(|(_, hash)| db.aggregated_stakes(&hash))
+        .map(|stakes| {
+            stakes.into_iter().fold(0_u64, |total, (key, stake)| {
+                if finalizer.is_none_or(|finalizer| finalizer == key) {
+                    total.saturating_add(stake)
+                } else {
+                    total
+                }
+            })
+        })
+        .unwrap_or(0);
+
+    ExplorerMinerStakePage {
+        best_tip,
+        cursor_valid,
+        total_current_stake_zat,
+        totals,
+        entries,
+        has_more,
     }
 }
 
