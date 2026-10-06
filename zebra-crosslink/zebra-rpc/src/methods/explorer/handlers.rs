@@ -24,9 +24,9 @@ use zebra_consensus::router::service_trait::BlockVerifierService;
 use zebra_indexer::{
     address_summary_from_state, address_transactions_page_from_state,
     address_utxos_page_from_state, block_details_from_state, blocks_page_from_state,
-    chart_data_from_state, miner_info_from_state, miner_stake_from_state, stats_from_state,
-    top_balances_from_state, top_miners_from_state, transaction_details_from_state,
-    transactions_page_from_state,
+    chart_data_from_state, miner_info_from_state, miner_stake_from_state, stake_history_from_state,
+    stats_from_state, top_balances_from_state, top_miners_from_state,
+    transaction_details_from_state, transactions_page_from_state,
 };
 use zebra_network::address_book_peers::AddressBookPeers;
 use zebra_node_services::mempool::{self as node_mempool, MempoolService};
@@ -56,11 +56,12 @@ use super::{
         BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkFinalizerLivenessResponse,
         CrosslinkFinalizerRequest, CrosslinkFinalizerResponse,
         CrosslinkFinalizerStakeSourcesRequest, CrosslinkFinalizersResponse,
-        CrosslinkMinerStakeRequest, CrosslinkMinerStakeResponse, ExplorerNetworkStatsResponse,
-        GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
-        GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
-        MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
-        TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
+        CrosslinkMinerStakeRequest, CrosslinkMinerStakeResponse, CrosslinkStakeHistoryRequest,
+        CrosslinkStakeHistoryResponse, ExplorerNetworkStatsResponse, GetAddressTransactionsRequest,
+        GetAddressUtxosPageRequest, GetBlocksRequest, GetMempoolTransactionsRequest,
+        GetTransactionsRequest, IndexerStatusResponse, MempoolTransactionsResponse,
+        MinerInfoResponse, TopBalancesRequest, TopBalancesResponse, TopMinersRequest,
+        TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
     },
 };
 #[cfg(feature = "indexer")]
@@ -763,6 +764,56 @@ where
         }
     }
 
+    pub(in crate::methods) async fn explorer_get_crosslink_stake_history(
+        &self,
+        request: Option<CrosslinkStakeHistoryRequest>,
+    ) -> Result<CrosslinkStakeHistoryResponse> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = request;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            let request = request.unwrap_or_default();
+            let address = request
+                .address
+                .as_deref()
+                .map(|address| explorer_transparent_address(&self.network, address))
+                .transpose()
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
+            let finalizer = request
+                .finalizer_public_key
+                .as_deref()
+                .map(parse_finalizer_public_key)
+                .transpose()
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
+            let bond_key = request
+                .bond_key
+                .as_deref()
+                .map(parse_bond_key)
+                .transpose()
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
+
+            match stake_history_from_state(
+                self.read_state.clone(),
+                address,
+                finalizer,
+                bond_key,
+                request,
+            )
+            .await
+            {
+                Ok(response) => Ok(response),
+                Err(error @ zebra_indexer::Error::InvalidCursor(_))
+                | Err(error @ zebra_indexer::Error::InvalidQuery(_)) => {
+                    Err(error).map_error(server::error::LegacyCode::InvalidParameter)
+                }
+                Err(error) => Err(error).map_misc_error(),
+            }
+        }
+    }
+
     pub(in crate::methods) async fn explorer_get_crosslink_finalizer(
         &self,
         request: CrosslinkFinalizerRequest,
@@ -1179,6 +1230,22 @@ fn parse_finalizer_public_key(
     hex::decode_to_slice(public_key, &mut bytes).map_err(|_| {
         zebra_indexer::Error::InvalidQuery(
             "finalizer public key must contain 64 hexadecimal characters".to_string(),
+        )
+    })?;
+    Ok(bytes)
+}
+
+#[cfg(feature = "indexer")]
+fn parse_bond_key(key: &str) -> std::result::Result<[u8; 32], zebra_indexer::Error> {
+    if key.len() != 64 {
+        return Err(zebra_indexer::Error::InvalidQuery(
+            "bond key must contain 64 hexadecimal characters".to_string(),
+        ));
+    }
+    let mut bytes = [0; 32];
+    hex::decode_to_slice(key, &mut bytes).map_err(|_| {
+        zebra_indexer::Error::InvalidQuery(
+            "bond key must contain 64 hexadecimal characters".to_string(),
         )
     })?;
     Ok(bytes)

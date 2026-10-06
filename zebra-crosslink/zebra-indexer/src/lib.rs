@@ -9,6 +9,8 @@ mod error;
 mod height_range;
 mod models;
 #[cfg(feature = "state-index")]
+mod stake_history;
+#[cfg(feature = "state-index")]
 mod stats;
 mod transactions;
 mod types;
@@ -25,6 +27,8 @@ pub use blocks::{
 };
 pub use error::Error;
 #[cfg(feature = "state-index")]
+pub use stake_history::stake_history_from_state;
+#[cfg(feature = "state-index")]
 pub use stats::{chart_data_from_state, stats_from_state};
 pub use transactions::{
     classify_unmined_transaction, primary_transaction_endpoints, AmountFilter, ShieldedFlowFilter,
@@ -39,7 +43,9 @@ pub use types::{
     BlockTransactionInput, BlockTransactionOutput, BlockTrees, BlocksPagination, BlocksResponse,
     ChainTotals, ChartDataEntry, ChartDataRequest, ChartDataResponse, CrosslinkMinerStakeEntry,
     CrosslinkMinerStakePagination, CrosslinkMinerStakeRequest, CrosslinkMinerStakeResponse,
-    CrosslinkMinerStakeSummary, CrosslinkStakeSourceAmount, CrosslinkStakeSourceBreakdown,
+    CrosslinkMinerStakeSummary, CrosslinkStakeAction, CrosslinkStakeHistoryEntry,
+    CrosslinkStakeHistoryPagination, CrosslinkStakeHistoryRequest, CrosslinkStakeHistoryResponse,
+    CrosslinkStakeHistorySource, CrosslinkStakeSourceAmount, CrosslinkStakeSourceBreakdown,
     CrosslinkStakeSourceGroup, IndexerStats, MinerInfoResponse, PageDirection, RollingDayStats,
     ShieldedFlow, ShieldedPool, TopBalanceEntry, TopBalancesPagination, TopBalancesRequest,
     TopBalancesResponse, TopBalancesSummary, TopMinerEntry, TopMinersPagination, TopMinersRequest,

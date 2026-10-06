@@ -8,8 +8,9 @@ mod stats;
 pub(in crate::methods) use zebra_indexer::{
     AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
     BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkMinerStakeRequest,
-    CrosslinkMinerStakeResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
-    TopMinersRequest, TopMinersResponse, TransactionsResponse,
+    CrosslinkMinerStakeResponse, CrosslinkStakeHistoryRequest, CrosslinkStakeHistoryResponse,
+    MinerInfoResponse, TopBalancesRequest, TopBalancesResponse, TopMinersRequest,
+    TopMinersResponse, TransactionsResponse,
 };
 
 #[cfg(feature = "indexer")]

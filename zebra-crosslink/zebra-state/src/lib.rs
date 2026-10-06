@@ -64,7 +64,9 @@ pub use explorer::{
     ExplorerMinerStakeRankCursor, ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals,
     ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse, ExplorerRollingStats,
     ExplorerShieldedFlow, ExplorerShieldedFlowFilter, ExplorerShieldedPool,
-    ExplorerShieldedPoolFilter, ExplorerStakeSource, ExplorerStatsSnapshot,
+    ExplorerShieldedPoolFilter, ExplorerStakeAction, ExplorerStakeHistoryCursor,
+    ExplorerStakeHistoryEntry, ExplorerStakeHistoryFilter, ExplorerStakeHistoryPage,
+    ExplorerStakeHistoryRecord, ExplorerStakeSource, ExplorerStatsSnapshot,
     ExplorerTransactionKind, ExplorerTransactionKindFilter, ExplorerTransactionPage,
     ExplorerTransactionQuery, ExplorerTransactionRecord, ExplorerTransactionSummary,
 };

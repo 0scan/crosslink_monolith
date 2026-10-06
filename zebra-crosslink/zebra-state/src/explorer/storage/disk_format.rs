@@ -16,6 +16,7 @@ use crate::service::finalized_state::{
 use crate::{
     ExplorerBlockStats, ExplorerBondAttributionRecord, ExplorerChainStats, ExplorerDailyStats,
     ExplorerMinerFinalizerRecord, ExplorerMinerRecord, ExplorerMinerStakeTotals,
+    ExplorerStakeHistoryRecord,
 };
 
 /// Independently versioned explorer schema marker.
@@ -23,7 +24,7 @@ use crate::{
 pub(crate) struct ExplorerSchemaVersion(pub(crate) u32);
 
 impl ExplorerSchemaVersion {
-    pub(crate) const CURRENT: Self = Self(3);
+    pub(crate) const CURRENT: Self = Self(4);
 }
 
 impl IntoDisk for ExplorerSchemaVersion {
@@ -354,6 +355,7 @@ impl_analytics_disk_value!(ExplorerMinerRecord);
 impl_analytics_disk_value!(ExplorerBondAttributionRecord);
 impl_analytics_disk_value!(ExplorerMinerFinalizerRecord);
 impl_analytics_disk_value!(ExplorerMinerStakeTotals);
+impl_analytics_disk_value!(ExplorerStakeHistoryRecord);
 
 /// Opaque fixed-width transparent-address key used by explorer metadata.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

@@ -11,7 +11,9 @@ use crate::{
     explorer::{
         ExplorerAddressPage, ExplorerAddressRecord, ExplorerBlockSummary, ExplorerMinerPage,
         ExplorerMinerStakePage, ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse,
-        ExplorerTransactionPage, ExplorerTransactionQuery, ExplorerTransactionSummary,
+        ExplorerStakeHistoryCursor, ExplorerStakeHistoryEntry, ExplorerStakeHistoryFilter,
+        ExplorerStakeHistoryPage, ExplorerTransactionPage, ExplorerTransactionQuery,
+        ExplorerTransactionSummary,
     },
     request::Spend,
     service::{
@@ -119,6 +121,20 @@ pub fn handle(
         } => ExplorerReadResponse::MinerStakePage(explorer_miner_stake_page(
             db, finalizer, limit, cursor, direction,
         )),
+        ExplorerReadRequest::StakeHistoryPage {
+            filter,
+            limit,
+            cursor,
+            direction,
+            height_range,
+        } => ExplorerReadResponse::StakeHistoryPage(explorer_stake_history_page(
+            db,
+            filter,
+            limit,
+            cursor,
+            direction,
+            height_range,
+        )),
         ExplorerReadRequest::FinalizerMinerSummaries(finalizers) => {
             ExplorerReadResponse::FinalizerMinerSummaries(
                 finalizers
@@ -128,6 +144,71 @@ pub fn handle(
             )
         }
     })
+}
+
+/// Returns one finalized staking-action history page.
+pub fn explorer_stake_history_page(
+    db: &ZebraDb,
+    filter: ExplorerStakeHistoryFilter,
+    limit: u32,
+    cursor: Option<ExplorerStakeHistoryCursor>,
+    direction: ExplorerPageDirection,
+    height_range: std::ops::RangeInclusive<zebra_chain::block::Height>,
+) -> ExplorerStakeHistoryPage {
+    let best_tip = db.tip();
+    let from_height = *height_range.start();
+    let to_height = *height_range.end();
+    let cursor_valid = cursor.is_none_or(|cursor| {
+        db.hash(cursor.location.height) == Some(cursor.block_hash)
+            && (from_height..=to_height).contains(&cursor.location.height)
+            && db
+                .explorer_stake_history_record(cursor.location)
+                .is_some_and(|record| filter.matches(record))
+    });
+    if !cursor_valid || from_height > to_height {
+        return ExplorerStakeHistoryPage {
+            best_tip,
+            cursor_valid,
+            ..Default::default()
+        };
+    }
+
+    let limit = limit.clamp(1, MAX_EXPLORER_PAGE_SIZE) as usize;
+    let mut records = db.explorer_stake_history_records(
+        filter,
+        cursor.map(|cursor| cursor.location),
+        direction,
+        from_height,
+        to_height,
+        limit.saturating_add(1),
+    );
+    let has_more = records.len() > limit;
+    records.truncate(limit);
+    let entries = records
+        .into_iter()
+        .map(|(location, record)| ExplorerStakeHistoryEntry {
+            location,
+            txid: db
+                .transaction_hash(location)
+                .expect("stake history location has a transaction hash"),
+            block_hash: db
+                .hash(location.height)
+                .expect("stake history location has a block hash"),
+            block_time: db
+                .block_header(location.height.into())
+                .expect("stake history location has a block header")
+                .time
+                .timestamp(),
+            record,
+        })
+        .collect();
+
+    ExplorerStakeHistoryPage {
+        best_tip,
+        cursor_valid,
+        entries,
+        has_more,
+    }
 }
 
 /// Returns the persisted all-time miner ranking without scanning blocks or all miners.

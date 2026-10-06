@@ -12,6 +12,7 @@ mod chart;
 mod miner;
 mod miner_stake;
 mod pagination;
+mod stake_history;
 mod stats;
 mod top_balances;
 mod transaction;
@@ -39,6 +40,10 @@ pub use miner_stake::{
     CrosslinkStakeSourceBreakdown, CrosslinkStakeSourceGroup,
 };
 pub use pagination::PageDirection;
+pub use stake_history::{
+    CrosslinkStakeAction, CrosslinkStakeHistoryEntry, CrosslinkStakeHistoryPagination,
+    CrosslinkStakeHistoryRequest, CrosslinkStakeHistoryResponse, CrosslinkStakeHistorySource,
+};
 pub use stats::{ChainTotals, IndexerStats, RollingDayStats};
 pub use top_balances::{
     TopBalanceEntry, TopBalancesPagination, TopBalancesRequest, TopBalancesResponse,

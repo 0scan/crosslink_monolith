@@ -119,8 +119,9 @@ use explorer::types::{
     BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkFinalizerLivenessResponse,
     CrosslinkFinalizerRequest, CrosslinkFinalizerResponse, CrosslinkFinalizerStakeSourcesRequest,
     CrosslinkFinalizersResponse, CrosslinkMinerStakeRequest, CrosslinkMinerStakeResponse,
-    ExplorerNetworkStatsResponse, GetAddressTransactionsRequest, GetAddressUtxosPageRequest,
-    GetBlocksRequest, GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
+    CrosslinkStakeHistoryRequest, CrosslinkStakeHistoryResponse, ExplorerNetworkStatsResponse,
+    GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
+    GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
     MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
     TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
 };
@@ -945,6 +946,13 @@ pub trait Rpc {
         &self,
         request: Option<CrosslinkMinerStakeRequest>,
     ) -> Result<CrosslinkMinerStakeResponse>;
+
+    /// Returns finalized Crosslink staking actions, with optional source and identity filters.
+    #[method(name = "getcrosslinkstakehistory")]
+    async fn get_crosslink_stake_history(
+        &self,
+        request: Option<CrosslinkStakeHistoryRequest>,
+    ) -> Result<CrosslinkStakeHistoryResponse>;
 
     /// Returns one finalizer candidate.
     #[method(name = "getcrosslinkfinalizer")]
@@ -3576,6 +3584,13 @@ where
         request: Option<CrosslinkMinerStakeRequest>,
     ) -> Result<CrosslinkMinerStakeResponse> {
         self.explorer_get_crosslink_miner_stake(request).await
+    }
+
+    async fn get_crosslink_stake_history(
+        &self,
+        request: Option<CrosslinkStakeHistoryRequest>,
+    ) -> Result<CrosslinkStakeHistoryResponse> {
+        self.explorer_get_crosslink_stake_history(request).await
     }
 
     async fn get_crosslink_finalizer(

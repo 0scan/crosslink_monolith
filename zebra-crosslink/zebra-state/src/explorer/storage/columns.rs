@@ -45,6 +45,8 @@ pub const EXPLORER_FINALIZER_MINER_ORDER: &str = "explorer_finalizer_miner_order
 pub const EXPLORER_MINER_STAKE_TOTALS: &str = "explorer_miner_stake_totals";
 /// Current miner-attributed totals keyed by finalizer public key.
 pub const EXPLORER_FINALIZER_MINER_TOTALS: &str = "explorer_finalizer_miner_totals";
+/// Finalized staking actions keyed in canonical transaction order.
+pub const EXPLORER_STAKE_HISTORY_BY_LOC: &str = "explorer_stake_history_by_loc";
 
 pub(super) type ExplorerTransactionMetaCf<'cf> =
     TypedColumnFamily<'cf, TransactionLocation, ExplorerTransactionRecord>;
@@ -76,6 +78,8 @@ pub(super) type ExplorerMinerStakeTotalsCf<'cf> =
     TypedColumnFamily<'cf, (), crate::ExplorerMinerStakeTotals>;
 pub(super) type ExplorerFinalizerMinerTotalsCf<'cf> =
     TypedColumnFamily<'cf, [u8; 32], crate::ExplorerMinerStakeTotals>;
+pub(super) type ExplorerStakeHistoryCf<'cf> =
+    TypedColumnFamily<'cf, TransactionLocation, crate::ExplorerStakeHistoryRecord>;
 
 impl ZebraDb {
     fn explorer_schema_cf(&self) -> ExplorerSchemaCf<'_> {
@@ -200,6 +204,11 @@ impl ZebraDb {
     pub(super) fn explorer_finalizer_miner_totals_cf(&self) -> ExplorerFinalizerMinerTotalsCf<'_> {
         ExplorerFinalizerMinerTotalsCf::new(self.disk_db(), EXPLORER_FINALIZER_MINER_TOTALS)
             .expect("explorer finalizer miner totals column family is registered")
+    }
+
+    pub(super) fn explorer_stake_history_cf(&self) -> ExplorerStakeHistoryCf<'_> {
+        ExplorerStakeHistoryCf::new(self.disk_db(), EXPLORER_STAKE_HISTORY_BY_LOC)
+            .expect("explorer stake history column family is registered")
     }
 }
 

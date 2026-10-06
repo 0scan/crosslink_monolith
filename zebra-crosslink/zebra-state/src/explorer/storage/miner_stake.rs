@@ -195,6 +195,8 @@ impl DiskWriteBatch {
         current_block_miner: Option<Address>,
         new_miner: bool,
     ) {
+        self.prepare_explorer_stake_history_batch(db, network, finalized, spent_utxos);
+
         let mut updates = MinerStakeUpdates::new(db, current_block_miner);
         let latest_timestamp = finalized.block.header.time.timestamp();
         if new_miner {
@@ -667,7 +669,7 @@ impl<'db> MinerStakeUpdates<'db> {
     }
 }
 
-fn classify_stake_source(
+pub(super) fn classify_stake_source(
     network: &Network,
     transaction: &Transaction,
     spent_utxos: &HashMap<OutPoint, Utxo>,

@@ -84,6 +84,34 @@ pub enum ExplorerPageDirection {
     Newer,
 }
 
+/// A Crosslink staking action stored in the explorer history index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum ExplorerStakeAction {
+    /// Creates a delegation bond funded by a transaction value source.
+    Create,
+    /// Starts the unbonding delay for an existing bond.
+    BeginUnbonding,
+    /// Withdraws a bond after its unbonding delay.
+    Withdraw,
+    /// Moves an active bond from one finalizer to another.
+    Retarget,
+    /// Converts a finalizer reward-bank balance into a delegation bond.
+    ConvertReward,
+}
+
+/// Validated filters for the finalized staking-action history.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExplorerStakeHistoryFilter {
+    /// Match a transparent address that originally funded the bond.
+    pub address: Option<transparent::Address>,
+    /// Match either the source or destination finalizer of the action.
+    pub finalizer: Option<[u8; 32]>,
+    /// Match one delegation bond public key.
+    pub bond_key: Option<[u8; 32]>,
+    /// Match one staking action kind.
+    pub action: Option<ExplorerStakeAction>,
+}
+
 /// A validated transaction filter set.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ExplorerTransactionQuery {
@@ -175,6 +203,19 @@ pub enum ExplorerReadRequest {
         /// Cursor traversal direction.
         direction: ExplorerPageDirection,
     },
+    /// Returns finalized Crosslink staking actions in reverse chain order.
+    StakeHistoryPage {
+        /// Staking-action filters.
+        filter: ExplorerStakeHistoryFilter,
+        /// Maximum number of entries to return, clamped by state.
+        limit: u32,
+        /// Exclusive stable chain location and indexed tip.
+        cursor: Option<ExplorerStakeHistoryCursor>,
+        /// Cursor traversal direction.
+        direction: ExplorerPageDirection,
+        /// Inclusive block-height bounds.
+        height_range: RangeInclusive<block::Height>,
+    },
     /// Returns compact miner-source summaries for finalizers in request order.
     FinalizerMinerSummaries(Arc<[[u8; 32]]>),
 }
@@ -196,6 +237,7 @@ impl ExplorerReadRequest {
             Self::MinerPage { .. } => "explorer_miner_page",
             Self::Miner { .. } => "explorer_miner",
             Self::MinerStakePage { .. } => "explorer_miner_stake_page",
+            Self::StakeHistoryPage { .. } => "explorer_stake_history_page",
             Self::FinalizerMinerSummaries(_) => "explorer_finalizer_miner_summaries",
         }
     }
@@ -230,6 +272,8 @@ pub enum ExplorerReadResponse {
     Miner(ExplorerMiner),
     /// Current miner-attributed stake ranking and summary.
     MinerStakePage(ExplorerMinerStakePage),
+    /// Finalized Crosslink staking-action history.
+    StakeHistoryPage(ExplorerStakeHistoryPage),
     /// Compact miner-source summaries parallel to the requested finalizer keys.
     FinalizerMinerSummaries(Vec<ExplorerFinalizerMinerSummary>),
 }
@@ -579,6 +623,63 @@ pub struct ExplorerBondAttributionRecord {
     pub source: ExplorerStakeSource,
     pub current_finalizer: [u8; 32],
     pub current_stake_zat: u64,
+}
+
+/// One durable staking-action event keyed by its canonical transaction location.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ExplorerStakeHistoryRecord {
+    pub action: ExplorerStakeAction,
+    pub bond_key: [u8; 32],
+    pub source: ExplorerStakeSource,
+    pub from_finalizer: Option<[u8; 32]>,
+    pub to_finalizer: Option<[u8; 32]>,
+    /// Bond value affected by the action when it can be recovered from canonical state.
+    pub amount_zat: Option<u64>,
+}
+
+impl ExplorerStakeHistoryFilter {
+    /// Returns whether `record` satisfies every requested filter.
+    pub fn matches(self, record: ExplorerStakeHistoryRecord) -> bool {
+        self.address
+            .is_none_or(|address| record.source == ExplorerStakeSource::Transparent(address))
+            && self
+                .bond_key
+                .is_none_or(|bond_key| record.bond_key == bond_key)
+            && self.action.is_none_or(|action| record.action == action)
+            && self.finalizer.is_none_or(|finalizer| {
+                record.from_finalizer == Some(finalizer) || record.to_finalizer == Some(finalizer)
+            })
+    }
+}
+
+/// Stable cursor for finalized staking-action history.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerStakeHistoryCursor {
+    pub location: TransactionLocation,
+    pub block_hash: block::Hash,
+}
+
+/// One staking-action event with canonical chain metadata.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerStakeHistoryEntry {
+    pub location: TransactionLocation,
+    pub txid: transaction::Hash,
+    pub block_hash: block::Hash,
+    pub block_time: i64,
+    pub record: ExplorerStakeHistoryRecord,
+}
+
+/// One finalized staking-action history page.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExplorerStakeHistoryPage {
+    pub best_tip: Option<(block::Height, block::Hash)>,
+    pub cursor_valid: bool,
+    pub entries: Vec<ExplorerStakeHistoryEntry>,
+    pub has_more: bool,
 }
 
 /// Current stake-source totals for the network or one finalizer.
