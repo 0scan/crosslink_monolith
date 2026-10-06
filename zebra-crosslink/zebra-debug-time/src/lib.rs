@@ -92,8 +92,25 @@ pub fn is_active() -> bool {
     MULTIPLIER.load(Ordering::Relaxed) > 1
 }
 
+/// A time supplied from outside, in whole UNIX seconds; `0` is none. A test that sets it decides
+/// what "now" is for every opted-in clock read, so its outcome does not depend on when it runs.
+static SUPPLIED_UNIX_TIME: AtomicI64 = AtomicI64::new(0);
+
+/// Makes [`now`] answer `unix_time` (whole seconds) until it is set again; `0` returns to the
+/// real clock. The supplied time does not advance by itself. The timers are not affected: they
+/// wait in real time.
+pub fn supply_time(unix_time: i64) {
+    SUPPLIED_UNIX_TIME.store(unix_time, Ordering::Relaxed);
+}
+
 /// The current apparent time.
 pub fn now() -> DateTime<Utc> {
+    let supplied = SUPPLIED_UNIX_TIME.load(Ordering::Relaxed);
+    if supplied != 0 {
+        if let Some(time) = DateTime::from_timestamp(supplied, 0) {
+            return time;
+        }
+    }
     dilate(Utc::now())
 }
 

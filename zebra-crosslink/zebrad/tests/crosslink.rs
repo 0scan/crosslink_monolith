@@ -1806,6 +1806,118 @@ fn crosslink_honest_block_accepted_after_forged_body_with_its_hash() {
     test_bytes(tf.write_to_bytes());
 }
 
+/// The clock is the test's. A block's timestamp is judged against a time the test supplies:
+/// asked of the checks directly, which answer at once, and through the node on a supplied clock.
+/// Nothing here depends on when the test runs or on how long anything takes.
+#[test]
+fn crosslink_block_time_is_judged_against_a_supplied_clock() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let miner_addr = Address::decode(&network, "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v").unwrap();
+    let mut gen = BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner_addr);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    let block = gen.next_block(&miner_addr);
+    let block_time = block.header.time.timestamp() as u64;
+    let three_hours = 3 * 60 * 60;
+
+    // directly: a header more than two hours ahead of the clock is refused, and a body that
+    // doesn't match its header is refused by the next stage
+    tf.push_instr_check_pow(&block, block_time, 0);
+    tf.push_instr_check_pow(&block, block_time - three_hours, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("header", 0);
+    let mut tampered = block.as_ref().clone();
+    tampered.transactions.push(tampered.transactions[0].clone());
+    tf.push_instr_check_pow(&tampered, block_time, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("body", 0);
+    tf.push_instr_expect_pow_chain_length(2, 0);
+
+    // through the node: the same block is refused while the clock is behind it, and accepted
+    // once the clock reaches it
+    tf.push_instr_set_time(block_time - three_hours, 0);
+    tf.push_instr_load_pow(&block, SHOULD_FAIL);
+    tf.push_instr_expect_rejection_reason("header", 0);
+    tf.push_instr_set_time(block_time, 0);
+    tf.push_instr_load_pow(&block, 0);
+    tf.push_instr_expect_pow_tip(&block.hash(), 0);
+    tf.push_instr_set_time(0, 0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
+/// CHECK_POS asks whether a PoS block is valid now and stores nothing: the answer is immediate,
+/// and the BFT chain is as it was.
+#[test]
+fn crosslink_check_pos_answers_without_storing() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+    let sigma = HARNESS_PARAMETERS.bc_confirmation_depth_sigma as usize;
+    let (_gen, _miner_addr, pow) = pow_chain_for(&mut tf, 8);
+
+    let valid = pos_from_headers(0, FatPointerToBftBlock::null(), &pow[4..4 + sigma]);
+    let short = pos_from_headers(0, FatPointerToBftBlock::null(), &pow[4..3 + sigma]);
+    tf.push_instr_check_pos(&valid, 0);
+    tf.push_instr_check_pos(&short, SHOULD_FAIL);
+    tf.push_instr_expect_pos_chain_length(0, 0);
+    tf.push_instr_load_pos(&valid, 0);
+    tf.push_instr_expect_pos_chain_length(1, 0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
+/// Which block is the tip, not just how long the chain is.
+///
+/// Of two siblings with equal work the node's tip is the one with the greater hash, whichever
+/// arrived first (`Chain::cmp` in zebra-state). That departs from the protocol, which prefers the
+/// block received first; upstream zebra changed to first-received in PR 11341, which this fork
+/// does not have. This pins what the node does today, in both arrival orders, so the day the tie
+/// rule changes this fails and says so.
+///
+/// A block the node mines itself is named by the slot it was mined into.
+#[test]
+fn crosslink_pow_tip_by_hash() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+
+    let network = regtest_network(&HARNESS_PARAMETERS);
+    let key = TestKey::new(b"crosslink test miner");
+    let miner = key.address();
+    let other_miner = Address::Transparent(zcash_transparent::address::TransparentAddress::PublicKeyHash([1u8; 20]));
+    let mut gen = BlockGen::init_at_genesis_plus_1(network, BlockGen::REGTEST_GENESIS_HASH, &miner);
+    tf.push_instr_load_pow(&gen.tip, 0);
+    tf.push_instr_expect_pow_tip(&gen.tip.hash(), 0);
+    tf.push_instr_expect_finalized_tip(None, 0);
+
+    // two sibling pairs: the lesser hash arrives first in one, the greater in the other
+    for greater_arrives_first in [false, true] {
+        let mut sibling_gen = gen.clone();
+        let ours = gen.next_block(&miner);
+        let theirs = sibling_gen.next_block(&other_miner);
+        let (lesser, greater) = if ours.hash().0 < theirs.hash().0 { (&ours, &theirs) } else { (&theirs, &ours) };
+        if greater_arrives_first {
+            tf.push_instr_load_pow(greater, 0);
+            tf.push_instr_load_pow(lesser, 0);
+        } else {
+            tf.push_instr_load_pow(lesser, 0);
+            tf.push_instr_load_pow(greater, 0);
+        }
+        tf.push_instr_expect_pow_tip(&greater.hash(), 0);
+        tf.push_instr_expect_pow_tip(&lesser.hash(), SHOULD_FAIL);
+
+        // more work ends the tie: a block on our branch makes it the best chain either way
+        let heavier = gen.next_block(&miner);
+        tf.push_instr_load_pow(&heavier, 0);
+        tf.push_instr_expect_pow_tip(&heavier.hash(), 0);
+    }
+
+    tf.push_instr_mine_from_template_into(1, 0);
+    tf.push_instr_expect_pow_tip_slot(1, 0);
+    tf.push_instr_expect_pow_tip(&gen.tip.hash(), SHOULD_FAIL);
+
+    test_bytes(tf.write_to_bytes());
+}
+
 #[test]
 fn crosslink_recv_pow_over_stp() {
     set_test_name(function_name!());

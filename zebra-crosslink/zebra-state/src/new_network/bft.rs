@@ -273,6 +273,16 @@ pub async fn force_feed_bft_block(
     rx.await.map_err(|_| "new_network dropped the force-feed reply".to_string())?
 }
 
+/// Whether `block` is valid on the current BFT chain: the check a proposal gets, answered at
+/// once, with nothing stored or decided.
+pub async fn validate_bft_block(block: BftBlock) -> Result<(TMStatus, TMStatusReason), String> {
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    if !send_request(BftRequest::Validate { block, reply }) {
+        return Err("new_network is not running".to_string());
+    }
+    rx.await.map_err(|_| "new_network dropped the validate reply".to_string())
+}
+
 /// Everything BFT needs from outside the state: the node's finalizer identity, where it listens,
 /// and who to connect to. The decided chain is persisted in the finalized database.
 pub struct BftLaunch {

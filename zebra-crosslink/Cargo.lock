@@ -8604,6 +8604,8 @@ dependencies = [
  "zcash_primitives",
  "zcash_protocol",
  "zebra-chain",
+ "zebra-consensus",
+ "zebra-debug-time",
  "zebra-gui",
  "zebra-node-services",
  "zebra-state",

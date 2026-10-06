@@ -100,8 +100,13 @@ static TF_INSTR_KIND_STRS: [&str; TFInstr::COUNT as usize] = {
     strs[TFInstr::RECV_POW as usize] = "RECV_POW";
     strs[TFInstr::RECV_STP_PACKET as usize] = "RECV_STP_PACKET";
     strs[TFInstr::MINE_FROM_TEMPLATE as usize] = "MINE_FROM_TEMPLATE";
+    strs[TFInstr::EXPECT_POW_TIP as usize] = "EXPECT_POW_TIP";
+    strs[TFInstr::EXPECT_FINALIZED_TIP as usize] = "EXPECT_FINALIZED_TIP";
+    strs[TFInstr::CHECK_POW as usize] = "CHECK_POW";
+    strs[TFInstr::CHECK_POS as usize] = "CHECK_POS";
+    strs[TFInstr::SET_TIME as usize] = "SET_TIME";
 
-    const_assert!(TFInstr::COUNT == 21);
+    const_assert!(TFInstr::COUNT == 26);
     strs
 };
 
@@ -161,9 +166,31 @@ impl TFInstr {
     pub const RECV_STP_PACKET: TFInstrKind = 19;
     /// The node builds a block from its own getblocktemplate response, as its miner does, and
     /// the block is submitted through the LOAD_POW doorway. Accepted and rejected as LOAD_POW is;
-    /// also rejected when no template or block could be made.
+    /// also rejected when no template or block could be made. A non-zero `val[0]` names a slot
+    /// that remembers the block's hash, for instructions that take a slot in place of a hash:
+    /// the hash of a block the node builds is not known when the file is written.
     pub const MINE_FROM_TEMPLATE: TFInstrKind = 20;
-    pub const COUNT: TFInstrKind = 21;
+    /// The best chain's tip is the block whose hash is the data, or, with no data, the block
+    /// remembered in slot `val[0]`. Says which of two equally long branches the node is on.
+    pub const EXPECT_POW_TIP: TFInstrKind = 21;
+    /// `fin`, the finalized tip, is the block named as for EXPECT_POW_TIP. With no data and
+    /// slot 0, nothing is finalized yet.
+    pub const EXPECT_FINALIZED_TIP: TFInstrKind = 22;
+    /// The node's header and body checks, run on the PoW block in the data at once, with the
+    /// current time taken to be `val[0]` (UNIX seconds). Nothing is queued or stored, so the
+    /// answer needs no wait and no chain context: it covers the rules a block can break by
+    /// itself (its timestamp against the clock, its merkle root, its coinbase), not the ones
+    /// that need its ancestors. The message says which stage refused.
+    pub const CHECK_POW: TFInstrKind = 23;
+    /// Whether the PoS block in the data (a LOAD_POS payload) is valid on the node's current BFT
+    /// chain: the check a proposal gets, answered at once, with nothing stored or decided. An
+    /// indeterminate answer (a PoW block it needs is missing) is pending, as for SHOULD_DEFER.
+    pub const CHECK_POS: TFInstrKind = 24;
+    /// The node's clock reads `val[0]` (UNIX seconds) from now on, and does not advance; 0
+    /// returns it to the real clock. Covers the clock reads that go through zebra_debug_time
+    /// (header timestamp rules, template times), not the node's real-time timers.
+    pub const SET_TIME: TFInstrKind = 25;
+    pub const COUNT: TFInstrKind = 26;
 
     pub fn str_from_kind(kind: TFInstrKind) -> &'static str {
         let kind = kind as usize;
@@ -239,7 +266,21 @@ impl TFInstr {
                     Err(_) => format!("{} unparseable bytes from peer {peer}", block.len()),
                 }
             }
-            Some(TestInstr::MineFromTemplate) => {}
+            Some(TestInstr::MineFromTemplate { slot }) => {
+                if slot != 0 {
+                    str += &format!("into slot {slot}")
+                }
+            }
+            Some(TestInstr::CheckPoW { block, now }) => str += &format!("{} at time {now}", block.hash()),
+            Some(TestInstr::CheckPoS(block)) => str += &block.blake3_hash().to_string(),
+            Some(TestInstr::SetTime(unix_time)) => str += &unix_time.to_string(),
+            Some(TestInstr::ExpectPoWTip { hash, slot }) | Some(TestInstr::ExpectFinalizedTip { hash, slot }) => {
+                str += &match hash {
+                    Some(hash) => hash.to_string(),
+                    None if slot != 0 => format!("slot {slot}"),
+                    None => "none".to_string(),
+                }
+            }
             Some(TestInstr::RecvStpPacket { packet, peer }) => {
                 str += &format!("type {:?}, {} bytes from peer {peer}", packet.first(), packet.len())
             }
@@ -524,6 +565,46 @@ impl TF {
 
     pub fn push_instr_mine_from_template(&mut self, flags: u32) {
         self.push_instr_ex(TFInstr::MINE_FROM_TEMPLATE, flags, &[0; 0], [0; 2])
+    }
+
+    /// As push_instr_mine_from_template, remembering the mined block's hash in `slot` (non-zero).
+    pub fn push_instr_mine_from_template_into(&mut self, slot: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::MINE_FROM_TEMPLATE, flags, &[0; 0], [slot, 0])
+    }
+
+    pub fn push_instr_expect_pow_tip(&mut self, hash: &ZebBlockHash, flags: u32) {
+        self.push_instr_ex(TFInstr::EXPECT_POW_TIP, flags, &hash.0, [0; 2])
+    }
+
+    pub fn push_instr_expect_pow_tip_slot(&mut self, slot: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::EXPECT_POW_TIP, flags, &[0; 0], [slot, 0])
+    }
+
+    /// `None` expects that nothing is finalized yet.
+    pub fn push_instr_expect_finalized_tip(&mut self, hash: Option<&ZebBlockHash>, flags: u32) {
+        match hash {
+            Some(hash) => self.push_instr_ex(TFInstr::EXPECT_FINALIZED_TIP, flags, &hash.0, [0; 2]),
+            None => self.push_instr_ex(TFInstr::EXPECT_FINALIZED_TIP, flags, &[0; 0], [0; 2]),
+        }
+    }
+
+    pub fn push_instr_expect_finalized_tip_slot(&mut self, slot: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::EXPECT_FINALIZED_TIP, flags, &[0; 0], [slot, 0])
+    }
+
+    /// The header and body checks on `block`, taking the current time to be `now_unix_time`.
+    pub fn push_instr_check_pow(&mut self, block: &Block, now_unix_time: u64, flags: u32) {
+        self.push_instr_serialize_ex(TFInstr::CHECK_POW, flags, block, [now_unix_time, 0])
+    }
+
+    /// Whether the node would accept this PoS block as a proposal now, without storing it.
+    pub fn push_instr_check_pos(&mut self, data: &BftBlockAndFatPointerToItWrap, flags: u32) {
+        self.push_instr_serialize_ex(TFInstr::CHECK_POS, flags, data, [0; 2])
+    }
+
+    /// The node's clock reads `unix_time` until set again; 0 returns it to the real clock.
+    pub fn push_instr_set_time(&mut self, unix_time: u64, flags: u32) {
+        self.push_instr_ex(TFInstr::SET_TIME, flags, &[0; 0], [unix_time, 0])
     }
 
     /// A block the node must reject for `reason`, and must survive rejecting: the load, the
@@ -864,7 +945,7 @@ pub fn crosslink_parameters_for_test(bytes: &[u8]) -> ZcashCrosslinkParameters {
 }
 
 pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> {
-    const_assert!(TFInstr::COUNT == 21);
+    const_assert!(TFInstr::COUNT == 26);
     match instr.kind {
         TFInstr::LOAD_POW => {
             let block = Block::zcash_deserialize(instr.data_slice(bytes)).ok()?;
@@ -952,7 +1033,26 @@ pub(crate) fn tf_read_instr(bytes: &[u8], instr: &TFInstr) -> Option<TestInstr> 
             block: instr.data_slice(bytes).to_vec(),
             peer: instr.val[0],
         }),
-        TFInstr::MINE_FROM_TEMPLATE => Some(TestInstr::MineFromTemplate),
+        TFInstr::MINE_FROM_TEMPLATE => Some(TestInstr::MineFromTemplate { slot: instr.val[0] }),
+        TFInstr::CHECK_POW => Some(TestInstr::CheckPoW {
+            block: Block::zcash_deserialize(instr.data_slice(bytes)).ok()?,
+            now: instr.val[0],
+        }),
+        TFInstr::CHECK_POS => {
+            let block_and_fat_ptr = BftBlockAndFatPointerToItWrap::zcash_deserialize(instr.data_slice(bytes)).ok()?;
+            Some(TestInstr::CheckPoS(block_and_fat_ptr.0.block))
+        }
+        TFInstr::SET_TIME => Some(TestInstr::SetTime(instr.val[0])),
+        TFInstr::EXPECT_POW_TIP | TFInstr::EXPECT_FINALIZED_TIP => {
+            let data = instr.data_slice(bytes);
+            let hash = if data.is_empty() { None } else { Some(ZebBlockHash(data.try_into().ok()?)) };
+            let slot = instr.val[0];
+            if instr.kind == TFInstr::EXPECT_POW_TIP {
+                Some(TestInstr::ExpectPoWTip { hash, slot })
+            } else {
+                Some(TestInstr::ExpectFinalizedTip { hash, slot })
+            }
+        }
         TFInstr::RECV_STP_PACKET => Some(TestInstr::RecvStpPacket {
             packet: instr.data_slice(bytes).to_vec(),
             peer: instr.val[0],
@@ -987,7 +1087,14 @@ pub(crate) enum TestInstr {
     /// Raw bytes: the peer serves exactly what the file holds, parseable or not.
     RecvPoW { block: Vec<u8>, peer: u64 },
     RecvStpPacket { packet: Vec<u8>, peer: u64 },
-    MineFromTemplate,
+    MineFromTemplate { slot: u64 },
+    /// The block named by `hash`, or by `slot` when there is no hash.
+    ExpectPoWTip { hash: Option<ZebBlockHash>, slot: u64 },
+    ExpectFinalizedTip { hash: Option<ZebBlockHash>, slot: u64 },
+    /// `now` is the time the checks take as the present, in UNIX seconds.
+    CheckPoW { block: Block, now: u64 },
+    CheckPoS(BftBlock),
+    SetTime(u64),
     RosterForceInclude([u8; 32], u64),   // public address
     ExpectRosterIncludes([u8; 32], u64), // public address
 }
@@ -1012,7 +1119,7 @@ pub(crate) async fn handle_instr(
             check_ingest(flags, "", outcome);
         }
 
-        TestInstr::MineFromTemplate => match internal_handle.call.block_from_template.get() {
+        TestInstr::MineFromTemplate { slot } => match internal_handle.call.block_from_template.get() {
             None => check_ingest(
                 flags,
                 "MINE_FROM_TEMPLATE: ",
@@ -1027,10 +1134,98 @@ pub(crate) async fn handle_instr(
                         block.coinbase_height().map(|height| height.0),
                         block.transactions.len()
                     );
+                    if slot != 0 {
+                        let mut slots = TEST_BLOCK_SLOTS.lock().unwrap();
+                        slots.retain(|(taken, _)| *taken != slot);
+                        slots.push((slot, block.hash()));
+                    }
                     let outcome = zebra_state::new_network::submit_block_to_new_network(Arc::new(block), NODE_ANSWER_WAIT).await;
                     check_ingest(flags, &label, outcome);
                 }
             },
+        },
+
+        TestInstr::CheckPoW { block, now } => {
+            use zebra_consensus::sync_verify::{block_check_body, block_check_header};
+            let network = &internal_handle.network;
+            let label = format!("CHECK_POW {} at time {now}", block.hash());
+            let (Some(height), Some(time)) = (block.coinbase_height(), chrono::DateTime::from_timestamp(now as i64, 0)) else {
+                test_check(flags, false, &format!("{label}: rejected: no coinbase height, or a time out of range"));
+                return;
+            };
+            // The order the commit loop runs them in: the header, then the body.
+            let verdict = match block_check_header(&block.header, network, height, time, !network.disable_pow()) {
+                Err(err) => Err(format!("header: {}", err.msg)),
+                Ok(()) => match block_check_body(&block, network, height) {
+                    Err(err) => Err(format!("body: {}", err.msg)),
+                    Ok(_) => Ok(()),
+                },
+            };
+            match verdict {
+                Ok(()) => test_check(flags, true, &format!("{label}: accepted: the header and body checks pass")),
+                Err(reason) => test_check(flags, false, &format!("{label}: rejected: {reason}")),
+            }
+        }
+
+        TestInstr::CheckPoS(block) => {
+            use tenderlink::TMStatus;
+            let expect_pending = flags & SHOULD_DEFER != 0;
+            let expect_rejected = !expect_pending && flags & SHOULD_FAIL != 0;
+            let expect_accepted = !expect_pending && !expect_rejected;
+            let answer = tokio::time::timeout(NODE_ANSWER_WAIT, zebra_state::new_network::bft::validate_bft_block(block)).await;
+            match answer {
+                Ok(Ok((TMStatus::Pass, _))) => test_check_outcome(true, expect_accepted, "CHECK_POS: accepted"),
+                Ok(Ok((TMStatus::Fail, reason))) => {
+                    test_check_outcome(false, expect_rejected, &format!("CHECK_POS: rejected: {reason:?}"))
+                }
+                Ok(Ok((TMStatus::Indeterminate, reason))) => {
+                    test_check_outcome(false, expect_pending, &format!("CHECK_POS: pending: {reason:?}"))
+                }
+                Ok(Err(msg)) => test_check_outcome(false, false, &format!("CHECK_POS: no verdict: {msg}")),
+                Err(_) => test_check_outcome(false, false, &format!("CHECK_POS: no verdict within {NODE_ANSWER_WAIT:?}")),
+            }
+        }
+
+        TestInstr::SetTime(unix_time) => {
+            zebra_debug_time::supply_time(unix_time as i64);
+            let message = if unix_time == 0 {
+                "SET_TIME: the node reads the real clock".to_string()
+            } else {
+                format!("SET_TIME: the node's clock reads {unix_time}")
+            };
+            test_check(flags, true, &message);
+        }
+
+        TestInstr::ExpectPoWTip { hash, slot } => match named_block(hash, slot) {
+            Err(err) => test_check_outcome(false, false, &format!("PoW tip: {err}")),
+            Ok(expect) => {
+                let answer = tokio::time::timeout(NODE_ANSWER_WAIT, (internal_handle.call.state)(StateRequest::Tip)).await;
+                match answer {
+                    Ok(Ok(StateResponse::Tip(Some((height, actual))))) => test_check(
+                        flags,
+                        Some(actual) == expect,
+                        &format!("PoW tip: expected {expect:?}, actually {actual} @ {}", height.0),
+                    ),
+                    Ok(Ok(StateResponse::Tip(None))) => {
+                        test_check(flags, expect.is_none(), &format!("PoW tip: expected {expect:?}, but the node has no tip"))
+                    }
+                    Ok(other) => test_check_outcome(false, false, &format!("PoW tip: no verdict, the tip request answered {other:?}")),
+                    Err(_) => test_check_outcome(false, false, &format!("PoW tip: no verdict within {NODE_ANSWER_WAIT:?}")),
+                }
+            }
+        },
+
+        TestInstr::ExpectFinalizedTip { hash, slot } => match named_block(hash, slot) {
+            Err(err) => test_check_outcome(false, false, &format!("finalized tip: {err}")),
+            Ok(expect) => {
+                let fin = zebra_state::new_network::fin::fin();
+                let actual = fin.map(|(_, hash)| hash);
+                test_check(
+                    flags,
+                    actual == expect,
+                    &format!("finalized tip: expected {expect:?}, actually {:?}", fin.map(|(height, hash)| (height.0, hash))),
+                );
+            }
         },
 
         TestInstr::LoadPoS((block, fat_ptr)) => {
@@ -1391,6 +1586,20 @@ const STP_PACKET_SETTLE: Duration = Duration::from_secs(1);
 /// How long to watch a peer advertise a block the node already has. The node never requests it,
 /// so there is no verdict to wait for, only a kill to rule out.
 const KNOWN_BLOCK_SETTLE: Duration = Duration::from_secs(2);
+
+/// Hashes of blocks the node built during the test, by the slot MINE_FROM_TEMPLATE put them in.
+static TEST_BLOCK_SLOTS: Mutex<Vec<(u64, ZebBlockHash)>> = Mutex::new(Vec::new());
+
+/// The block an instruction names: its hash, else the one remembered in its slot, else none.
+fn named_block(hash: Option<ZebBlockHash>, slot: u64) -> Result<Option<ZebBlockHash>, String> {
+    if hash.is_some() || slot == 0 {
+        return Ok(hash);
+    }
+    match TEST_BLOCK_SLOTS.lock().unwrap().iter().find(|(taken, _)| *taken == slot) {
+        Some((_, hash)) => Ok(Some(*hash)),
+        None => Err(format!("slot {slot} holds no block; MINE_FROM_TEMPLATE fills slots")),
+    }
+}
 
 fn take_stp_peer(index: u64) -> Result<HarnessStpPeer, String> {
     let mut peers = TEST_STP_PEERS.lock().unwrap();
