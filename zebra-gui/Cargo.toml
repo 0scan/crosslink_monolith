@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # Pinned to a commit: the clipboard and the Windows request_frame fix are in no crates.io release yet.
-softer_gui = { git = "https://github.com/ShieldedLabs/softer_gui", rev = "28086165d3c4c0755483a2ab78e98b7775bf03b4" }
+softer_gui = { git = "https://github.com/ShieldedLabs/softer_gui", rev = "9f6789d9a3a354951d497ffa060df361ae68fbf1" }
 num_cpus = "1.17.0"
 ahash = "0.8.12"
 rand = "0.9.2"
