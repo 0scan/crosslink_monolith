@@ -918,7 +918,7 @@ impl BftRunner {
         // Linearity (FINALITY.md §3.4): a proposal whose snapshot does not extend the parent
         // bft-block's snapshot is invalid, so there is no point proposing it. Honest proposal
         // says to repeat the parent's `headers_bc` instead of declining; how often a node should
-        // repeat them is design question 3 in IMPLEMENTATION.md, so this keeps declining until
+        // repeat them is undecided, so this keeps declining until
         // that is settled. The common cause is a bc reorganization onto a branch that forks
         // below the parent's snapshot, which resolves on its own once a chain containing that
         // snapshot is best again.

@@ -1,21 +1,75 @@
 # Removing the `zebra-crosslink` crate and splitting off the GUI
 
-[`IMPLEMENTATION.md`](./IMPLEMENTATION.md) stages 5 to 8 move finality state into `zebra-state`
-(FINALITY.md §7.1). They leave `zebra-crosslink/zebra-crosslink` holding no finality state and
-sitting on no consensus path. This file is the work that removes what is left of it, and it
-implements the closing paragraph of FINALITY.md §7.1.
+Finality state lives in `zebra-state` (FINALITY.md §7.1), so `zebra-crosslink/zebra-crosslink`
+holds no finality state and sits on no consensus path. This file is the work that removes what
+is left of it, and it implements the closing paragraph of FINALITY.md §7.1.
 
-It depends on stage 8 and nothing depends on it. It changes no behavior: a tree that stops after
-stage 8 meets FINALITY.md while keeping a crate that holds a GUI feed, a test driver, the wallet,
-faucet and staking relays, and a configuration type. Whether that crate is worth removing is a
-packaging judgement, decided separately from the finality work and at any later time.
+Nothing depends on it. It changes no behavior: the tree as it stands meets FINALITY.md while
+keeping a crate that holds a GUI feed, a test driver, the wallet, faucet and staking relays, and
+a configuration type. Whether that crate is worth removing is a packaging judgement, decided
+separately from the finality work and at any later time.
 
 Part 1 is where the crate's contents go. Part 2 is how the visualizer feed is reached once it is
 served by the node, and what a client of it may ask for.
 
-The rules and the per-stage discipline of IMPLEMENTATION.md apply here unchanged: read the
-FINALITY.md sections before changing code, and the node tests and the dilated two-node regtest
-(DILATED_REGTEST.md) pass against a build of the commit.
+## Rules for every change
+
+- Read the FINALITY.md sections a change touches before changing code. FINALITY.md labels each
+  statement as **Book**, **Zebra Crosslink**, or **current tree**. Zebra Crosslink statements
+  are requirements, Book statements are requirements wherever FINALITY.md does not record a
+  Zebra Crosslink departure, and current-tree statements describe code that changes.
+- Nothing new is written in `zebra-crosslink/zebra-crosslink`. Work that would land there lands
+  in `zebra-state` instead, even where the crate's existing structure would take it
+  (FINALITY.md §7.1). That a change fits the TFL service's main loop is an argument against it.
+- `σ` and the staking reward and payout code belong to other work. Nothing here changes
+  `bc_confirmation_depth_sigma`, `pos_subsidy`, `update_bonds_with_pos_issuance`,
+  `fixup_aggregated_stakes`, or the wallet reward projection.
+- Databases written by an earlier derivation are deleted, not migrated. No code is added that
+  loads them.
+- A change to code FINALITY.md describes as current tree updates those FINALITY.md statements
+  in the same commit (FINALITY.md §§5, 6, 8).
+- `VIZ_GUI_FINALITY_RULES.md` is untracked on purpose and is never committed.
+- One agent at a time in one tree, and nothing is pushed.
+- Tests run through `phest.bat zebra-crosslink`, with a test-name filter as the fourth
+  argument: `phest.bat zebra-crosslink Debug Win64 <filter>`. Never call `cargo` directly.
+  The node tests in `zebrad/tests/crosslink.rs` run headless (FINALITY.md §8.1); a non-empty
+  `ZEBRA_TEST_GUI` opens the visualizer window for them instead.
+  Each node test boots a zebrad in the test process and ends it with `process::exit`, so a
+  test run is one process per test, and the harness's capture is turned off so the
+  runner's per-instruction dump survives an abort:
+  `$env:RUST_TEST_THREADS=1; $env:RUST_TEST_NOCAPTURE=1; .\phest.bat zebra-crosslink Debug Win64 -p zebrad --test crosslink <test name>`.
+  Both settings are environment variables because `phargo.bat` forwards `%4` through
+  `%9` and splits `--test-threads=1` at the `=`, so a trailing `-- --nocapture
+  --test-threads=1` never reaches the harness.
+- After a change is committed, `zebra-crosslink/dilated_regtest/run.sh` runs against a debug
+  build of the commit and must print `PASS` (DILATED_REGTEST.md). It is the system test the
+  node tests are not: wallet, staking, BFT bootstrap and finality under 90x time dilation.
+  No `PASS` is recorded against the tree since finality state moved into `zebra-state`.
+- A block loaded with `SHOULD_FAIL` costs the harness's full 30-second submission deadline:
+  a rejected block never gets an answer from the ingest queue. The fork-rejection tests and
+  diagram scene 3 therefore take minutes, not seconds.
+- `REGTEST_BLOCK_BYTES` and `REGTEST_POS_BLOCK_BYTES` are written by the `#[ignore]`d
+  `regen_test_data` in `zebrad/tests/crosslink.rs`; the diagram scenes by
+  `crosslink_write_finality_diagram_scenes`. Both are regenerated, never hand-edited, whenever
+  the block format or the header count of a BFT block changes.
+- The build uses `panic = abort`: a new `assert!`, `unwrap`, or `expect` on a consensus path
+  terminates the node when it fails.
+- A gap between what a change asks for and what the test format can express is reported in the
+  commit message and left as an `@Todo` beside the test. It never changes the test format.
+
+## Open: one writer thread, or one logical authority
+
+FINALITY.md §7.1 requires one authoritative state, coherent chain views, and serialized
+consensus mutations. The tree meets that by running proposal, validation, decisions, bootstrap,
+persistence and `fin` on the one `new_network::sync` thread. That couples BFT responsiveness and
+liveness to PoW synchronization, and gives one loop several unrelated jobs.
+
+The requirement is narrower than the implementation: related reads use one versioned snapshot,
+and mutations that cross domains pass through one serialized authority. A dedicated BFT actor,
+or atomic state-service operations, meets it without the shared thread.
+
+To decide: whether FINALITY.md §7.1 states the requirement in that form. If it does, the moves
+in Part 1 are written against it rather than against the sync loop.
 
 ## Part 1: What moves
 
@@ -43,7 +97,7 @@ FINALITY.md sections before changing code, and the node tests and the dilated tw
   the node's machine. In one process they are a debugging convenience; across a connection they
   are privileged operations, and they are either authorized as node commands are or kept off the
   remote surface entirely.
-- Splitting the GUI into its own application is later work. This stage only declines the two
+- Splitting the GUI into its own application is later work. This work only declines the two
   placements that would make it harder: node crates inside `zebra-gui`, and the visualizer inside
   `zebrad`.
 - `test_format.rs` splits along a line it already has. The framing — `TFHdr`, `TFSlice`,

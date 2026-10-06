@@ -27,10 +27,7 @@ It keeps three layers apart:
 | §8 Implementation status and pitfalls | current-tree facts that constrain the implementation |
 | §9 Open decisions | outside this document's implementation work |
 
-Where a section mixes layers, a paragraph opens with its layer in bold. The ordered
-implementation work, and the questions that still need a design pass, are in
-[`IMPLEMENTATION.md`](../../IMPLEMENTATION.md).
-
+Where a section mixes layers, a paragraph opens with its layer in bold.
 A companion visual explanation is in
 [`FINALITY_DIAGRAM.html`](../../FINALITY_DIAGRAM.html).
 
@@ -566,7 +563,7 @@ The Book makes three statements that bear on a change of this kind:
 #### Properties
 
 These follow from the definitions of `candidate` and `fin` (§3.1, §3.2) and the switch
-condition, and hold in Zebra Crosslink. The current tree does not compute `fin` (§6.1).
+condition, and hold in Zebra Crosslink.
 
 - `fin ⪯ bc_best` holds on the node at all times. The raw-CL2 state in which `fin` stays fixed
   on a branch that `bc_best` no longer contains (§4.1) does not arise.
@@ -727,12 +724,8 @@ reorganizations).
 
 #### Current tree
 
-- The rule needs protocol `fin`, which the current tree does not compute (§6.1). Its collapse
-  onto a BFT-decided branch (§4.2, §6.3) is a related rule with a different floor: the stored
-  marker, taken directly from a decided BFT block when it is decided rather than from
-  `candidate(bc_best)`. With that floor, the invariant above does not follow: the marker need not
-  lie on the node's best chain when it advances, and a known side-chain hash becomes canonical
-  (§5.2).
+- It computes `fin` where the best chain changes and commits up to it, which discards the
+  non-finalized branches that do not hold it (§4.2, §6.3). A decision alone moves nothing.
 - It enforces Linearity and Last Final Snapshot (§6.2).
 
 ## 5. Current tree: implementation inventory
@@ -1253,8 +1246,7 @@ headers, satisfies every dependency.
 
 ## 8. Implementation status and pitfalls
 
-The ordered implementation work is in [`IMPLEMENTATION.md`](../../IMPLEMENTATION.md). This section
-records the current-tree facts that work starts from.
+This section records the current-tree facts that further work starts from.
 
 **Current tree.** The final-block accessor returns only the stored Crosslink value and never
 substitutes the legacy reorg-depth marker; `tfl_reorg_final_block_height_hash` and
@@ -1395,8 +1387,7 @@ stored, or consumed.
 
 ## 9. Open decisions
 
-Payout design belongs to separate work, recorded here for context. Implementation questions
-that need a design pass are in [`IMPLEMENTATION.md`](../../IMPLEMENTATION.md).
+Payout design belongs to separate work, recorded here for context.
 
 ### 9.1 Objective reward trigger and reward economics
 

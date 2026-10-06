@@ -37,7 +37,7 @@ One file per finding, in the format of the zeronym review files (`C:\zero\zerony
 5. **Finding 3:** expiring, capped `MISSING_POW_BLOCKS` with a fixed share of the download budget. It must still allow snapshots of decisions the node stored itself, which finding 1's fix relies on.
 6. **Findings 8 and 9 as one change:** the template parent goes into the request, and the scan is bounded at the parent's pointer. Finding 11 makes the template's commitments depend on the chosen pointer, so coordinate the `getblocktemplate` edits.
 7. **Finding 10:** the casts, `snapshot_stakes`, and the sigma bound. Findings 5 and 7 already fix some of the casts.
-8. **Finding 5:** land it together with the new bootstrap heights planned in `IMPLEMENTATION.md` item 5.
+8. **Finding 5:** land it together with the new bootstrap heights that raising `MAX_BLOCK_REORG_HEIGHT` to 999 needs (FINALITY.md §4.3).
 
 ## Open points for the owner
 

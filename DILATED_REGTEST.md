@@ -94,6 +94,6 @@ round number, so a pause of three minutes has cost seven minutes of BFT recovery
   between heights 300 and 600.
 - A `generate` that returns as soon as the block is submitted, rather than after the template
   round trip, would give the same speedup without a new RPC.
-- The run is a step of every stage in `IMPLEMENTATION.md`, after the stage's node tests pass
+- The run is a step of every change under the rules in `CRATE_REMOVAL.md`, after the node tests pass
   and before its commit is pushed. Wired to a post-commit hook or a self-hosted runner it
   becomes the system test for every commit on `dev`.

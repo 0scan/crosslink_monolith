@@ -2471,8 +2471,8 @@ fn diagram_scene_2() -> (TF, Vec<Arc<Block>>, Vec<Arc<Block>>) {
 /// longer than P4..P8, so it is the heaviest chain -- and citing `bft0`, whose own headers
 /// sit on the branch it conflicts with.
 ///
-/// This node will not hold this state: `CrosslinkFinalizeBlock` collapses the
-/// non-finalized state onto the finalized branch, and a fork below the finalized block is
+/// This node will not hold this state: committing `fin` discards the non-finalized
+/// branches that do not hold it, and a fork below the finalized block is
 /// refused on ingest. It is a view-only scene, and there is no test that runs it through
 /// the node, because the behaviour under test would be the refusal rather than the
 /// picture.

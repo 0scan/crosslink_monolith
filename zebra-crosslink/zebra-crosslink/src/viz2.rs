@@ -151,7 +151,7 @@ fn work_from_difficulty(difficulty: zebra_chain::work::difficulty::CompactDiffic
 ///
 /// The visualizer's usual source is this node's own state, so it can only draw what this
 /// node accepted. Several of the states worth drawing are ones it refuses: a best chain
-/// that forks below the finalized block is collapsed by `CrosslinkFinalizeBlock`, and
+/// that forks below the finalized block is refused by sticky fork choice, and
 /// `sidechain_forks` reads only non-finalized state, so nothing of that branch would
 /// survive to be served even if it had been admitted. Building the same GUI records from
 /// the file's own blocks makes those pictures visible without asking the node to believe
