@@ -1026,6 +1026,7 @@ pub struct NetworkThreadPull {
 
 struct NetworkThreadInner {
     state: std::sync::atomic::AtomicUsize, // 0 empty, 1 full
+    stop: std::sync::atomic::AtomicBool,
     push: std::cell::UnsafeCell<NetworkThreadPush>,
     pull: std::cell::UnsafeCell<NetworkThreadPull>,
 }
@@ -1037,6 +1038,14 @@ unsafe impl std::marker::Sync for NetworkThreadInner {}
 pub struct NetworkThreadHandle {
     inner: std::sync::Arc<NetworkThreadInner>,
     thread: std::thread::JoinHandle<()>,
+}
+
+// The network thread owns the socket, so it has to end for the port to close and for peers to
+// see this node go quiet. Nothing is sent to them: they time the connection out.
+impl Drop for NetworkThreadHandle {
+    fn drop(&mut self) {
+        self.inner.stop.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 pub fn new_network_thread(my_keypairs: Vec<IdentityKeyPair>, my_port: u16, max_pps: Option<u64>, send_buffer_params: (u32, u32, u32)) -> NetworkThreadHandle {
@@ -1052,6 +1061,7 @@ pub fn new_network_thread(my_keypairs: Vec<IdentityKeyPair>, my_port: u16, max_p
 
     let inner = std::sync::Arc::new(NetworkThreadInner {
         state: std::sync::atomic::AtomicUsize::new(0),
+        stop: std::sync::atomic::AtomicBool::new(false),
         push: std::cell::UnsafeCell::new(NetworkThreadPush::default()),
         pull: std::cell::UnsafeCell::new(NetworkThreadPull::default()),
     });
@@ -1071,6 +1081,9 @@ pub fn new_network_thread(my_keypairs: Vec<IdentityKeyPair>, my_port: u16, max_p
         let mut server_nym_sockets: Vec<NymSockHandle> = Vec::new();
 
         loop {
+            if thread_inner.stop.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
             if thread_inner.state.load(std::sync::atomic::Ordering::Acquire) == 1 {
                 let mut req = NetworkThreadPush::default();
 

@@ -8,10 +8,8 @@ right and this file is corrected.
 Stages 1 to 8 are done, so `zebra-crosslink/zebra-crosslink` holds no finality state and
 answers no finality question. Their text is in this file's history
 (`git show 30ac270a:IMPLEMENTATION.md`).
-Stage 9 gives the node the second chain state that FINALITY.md §4.3 requires, so that a BFT
-branch conflicting with the depth commit is recorded rather than abandoned. It is not ready to
-start: questions 7 to 10 below block it.
-Removing what is left of the crate afterwards is separate work, in
+No stage is open.
+Removing what is left of the crate is separate work, in
 [`CRATE_REMOVAL.md`](./CRATE_REMOVAL.md); nothing depends on it, and it changes no behavior.
 
 A stage ends the same way every time: its node tests pass, it is committed, and the dilated
@@ -81,45 +79,13 @@ build of that commit before the next stage starts.
   `zebrad/tests/crosslink.rs`.
 - The dilated regtest has no recorded `PASS` against the stage 7 and stage 8 commits.
 
-## Stage 9: A second chain state for a conflicting BFT branch
-
-Implements FINALITY.md §4.3 "Implementation in Zebra Crosslink" (the second finalized state) and
-§7.1. It replaces the `CONFLICT_HOLD_DEPTH` interim in `zebra-state/src/service/write.rs`.
-Blocked by questions 7 to 10; the text below is the mechanism question 7 calls C.
-
-- The PoW state P keeps a snapshot of its finalized state at a height at or below `fin`, retaken
-  as `fin` advances and left alone while finality lags. The snapshot must be openable as an
-  independent, writable finalized state while P keeps writing.
-- How the snapshot is taken is the storage engine's business and is chosen behind one interface,
-  not spread through `zebra-state`: a hard-linked checkpoint under RocksDB, a persistent savepoint
-  plus a reflink or byte clone under redb, or a logical copy into a fresh database. The last is
-  the portable fallback and costs a full database of time and disk; a byte copy needs P's writer
-  paused for its duration, which is one pause of the `new_network` block writer, reads
-  unaffected. Zebra's move from RocksDB to redb must not change anything above this bullet.
-- On a bc-block that forks below P's finalized tip but above `fin`, the node opens C from the
-  snapshot, replays P's own stored blocks from the snapshot height to the fork point, and feeds C
-  the conflicting chain from peers. C's fork-choice floor is `bft_final_snapshot`; C never
-  depth-commits.
-- `zebra-state` routes blocks and reads to both states and chooses the served best chain across
-  both by the §4.3 switch rule. C is dropped when `fin` passes the fork; P's branch is recorded
-  for as long as blocks arrive on it.
-- The wallet's `REWIND_DISTANCE` and `CHECKPOINTS_N` cover a switch back to `fin`, which is
-  deeper than `MAX_BLOCK_REORG_HEIGHT`.
-
-Deletes: the `CONFLICT_HOLD_DEPTH` hold and its `@Todo`.
-
-Done when a two-node regtest in which one node is held on a PoW fork more than
-`MAX_BLOCK_REORG_HEIGHT` blocks long while the other finalizes a conflicting branch rejoins
-without a resync, both branches are still recorded on the held node afterwards, and bft-block
-validation on the held node never stopped.
-
 ## Needs design pass
 
 A design session reads the cited FINALITY.md sections, re-checks the code facts listed, asks the
 user, and records each answer in FINALITY.md as a Zebra Crosslink requirement. It then updates
 the stage the question blocks and deletes the question. Question numbers are stable: an answered
-question is removed and its number is not reused. Questions 3 to 5 block no stage; 7 to 10 block
-stage 9; 11 changes how stage 9 and CRATE_REMOVAL.md are written.
+question is removed and its number is not reused. No question blocks a stage; 11 changes how
+CRATE_REMOVAL.md is written.
 
 ### 3. Proposal cadence
 
@@ -159,78 +125,12 @@ fits under that assertion. The wallet's `REWIND_DISTANCE` and `CHECKPOINTS_N` de
 constant. zebra-chain has a separate constant of 1000, and comments at
 `zebra-state/src/request.rs` and `non_finalized_state.rs` say 1000. The non-finalized state holds
 up to that many blocks per chain in memory. The depth commit is the second floor under `fin`
-(FINALITY.md §8.1); a larger value makes the conflict hold and stage 9's second state rarer, and
-is not the difference between recovering and needing a resync.
+(FINALITY.md §8.1), and the depth past which a node drops BFT rather than follow a decision
+(FINALITY.md §4.3); a larger value makes that rarer.
 
 No implementation stage changes the constant. Increasing it is a separate policy change.
 
 To decide: those bootstrap heights, and which stage carries the change once they are chosen.
-
-### 7. Stage 9's mechanism
-
-[`STAGE9_OPTIONS.html`](./STAGE9_OPTIONS.html) draws the three mechanisms and six scenarios.
-
-| | A. no commit past `fin` | B. restore point and rewind | C. second database |
-|---|---|---|---|
-| How | the committed tip stops at `fin`, so both branches stay in the non-finalized state | one database; a checkpoint at or below `fin`; a decision that cannot be attached makes the node rewind to it, replay its own blocks to the fork, and take the BFT branch as an ordinary fork | each branch gets its own committed database (stage 9 as written above) |
-| Memory grows during | any finality stall | a decided conflict only | never |
-| Can a peer trigger it? | no | no: the trigger carries ≥⅔ of stake's signatures | no, if triggered by a decision |
-| New code | small: remove the cap | medium: checkpoint, rewind, fetch the fork | large: two states, routing, role swap |
-| FINALITY.md §4.3 | breaks "the depth commit is never held back indefinitely" | breaks none | breaks none |
-
-Under B, the conflict hold keeps both branches in memory while the conflict is live. If the PoW
-branch stays heavier past the hold's cap, the node commits it and drops the BFT branch but keeps
-the restore point, and rewinds again once the BFT branch's headers show more work. B removes the
-permanence of an unattachable decision, not the wait: finality still waits until the decided
-branch is the heavier one (FINALITY.md §3.4).
-
-To decide: A, B or C. B needs one thing settled that the drawing leaves out: the restore point
-predates the bft rows and the `fin` row written after it, so a rewind has to carry them forward.
-Choosing C needs answers to the following, none of which the stage text gives.
-
-- **`fin` passing the fork on C's side.** "C is dropped when `fin` passes the fork" covers `fin`
-  passing on P's branch. If the served chain is C's and `fin` advances past the fork there, P can
-  never hold `fin` again. Either C becomes the primary state (depth commit, `fin` row, snapshot
-  source) and P the side state that keeps recording its branch, or P is dropped.
-- **Where `fin` and the BFT rows live.** The decided bft-chain rows and `fin` are in P's
-  finalized database. C is opened from a copy of it and starts with its own copy of those rows,
-  which is the two-stores pitfall of FINALITY.md §8.1. The stage has to name the authoritative
-  database, where C's directory lives, whether C is reopened at startup, and whether C's
-  non-finalized state gets a backup.
-- **Which state writes.** `crosslink_update_fin` and `crosslink_conflict_hold` are methods on the
-  one writer that owns one `finalized_state` and one `non_finalized_state`, and `bft_chain()` and
-  `fin()` are process-wide statics in `new_network`.
-
-### 8. Wallet rewind below `MAX_BLOCK_REORG_HEIGHT`
-
-Stage 9 says the wallet's `REWIND_DISTANCE` and `CHECKPOINTS_N` cover a switch back to `fin`.
-Both are constants derived from `MAX_BLOCK_REORG_HEIGHT`, and `fin` can lag any distance
-(FINALITY.md §3.3), so no constant covers it.
-
-To decide: the wallet rescans from a height when a reorganization is deeper than its
-checkpoints, or FINALITY.md states a bound.
-
-### 9. How often the snapshot is retaken
-
-"Retaken as `fin` advances" is about once per block while BFT is live. A hard-linked checkpoint
-can afford that; the portable fallback, a logical copy of the whole database, cannot. A staler
-snapshot costs only replay time.
-
-To decide: the retake rule. STAGE9_OPTIONS.html assumes every 100 blocks of `fin`, deleting the
-previous one. Where the storage engine offers no cheap clone, the alternative is a permanent
-second copy that lags P at `fin`: every finalized batch is written twice, and a conflict costs
-nothing to open.
-
-### 10. The harness for stage 9's test
-
-The done condition needs one node held on a PoW fork more than `MAX_BLOCK_REORG_HEIGHT` blocks
-long while the other finalizes alone. `dilated_regtest/run.sh` can stop and restart nodes but
-cannot partition them. The node-test format would need a fork of 100 or more blocks plus
-decisions on the other branch. The done condition also has no restart in it, although the
-regtest restarts both nodes.
-
-To decide: which harness carries the test and what it gains to do so, and whether a restart
-during a live conflict is part of the done condition.
 
 ### 11. One writer thread, or one logical authority
 
@@ -243,6 +143,5 @@ The requirement is narrower than the implementation: related reads use one versi
 and mutations that cross domains pass through one serialized authority. A dedicated BFT actor,
 or atomic state-service operations, meets it without the shared thread.
 
-To decide: whether FINALITY.md §7.1 states the requirement in that form. If it does, stage 9's
-routing between two states and the remaining moves in CRATE_REMOVAL.md are written against it
-rather than against the sync loop.
+To decide: whether FINALITY.md §7.1 states the requirement in that form. If it does, the
+remaining moves in CRATE_REMOVAL.md are written against it rather than against the sync loop.

@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use zebra_chain::block;
 
 use crate::{
-    constants::{CONFLICT_HOLD_DEPTH, MAX_BLOCK_REORG_HEIGHT},
+    constants::MAX_BLOCK_REORG_HEIGHT,
     service::{
         check,
         finalized_state::{FinalizedState, ZebraDb},
@@ -132,10 +132,6 @@ pub struct WriteBlockWorkerTask {
     /// The best chain tip as of the last commit, so the `fin` update runs on a change of best
     /// chain rather than on every commit (FINALITY.md §3.2).
     last_best_tip: Option<block::Hash>,
-
-    /// The decided block this node has already given up following, so the conflict is reported
-    /// once rather than on every commit past it.
-    conflict_abandoned: Option<block::Hash>,
 }
 
 impl WriteBlockWorkerTask {
@@ -167,7 +163,6 @@ impl WriteBlockWorkerTask {
             prev_finalized_note_commitment_trees: None,
             parent_error_map: IndexMap::new(),
             last_best_tip: None,
-            conflict_abandoned: None,
         }
     }
 
@@ -218,59 +213,42 @@ impl WriteBlockWorkerTask {
         self.commit_checkpoint_verified(crate::CheckpointVerifiedBlock::from(genesis))
     }
 
-    /// Whether the next reorg-depth commit is held because it conflicts with the decided block.
+    /// Drop BFT if the next reorg-depth commit leaves the decided block on no chain this node holds.
     ///
-    /// Committing the best chain's root drops every chain that forks below it, so while Π_bft's
-    /// decision sits on a chain that is not the best chain, the commit waits at the fork point:
-    /// this node has to stay able to switch to that decision (FINALITY.md §4.3). The held blocks
-    /// stay in the non-finalized state, so the wait ends [`CONFLICT_HOLD_DEPTH`] blocks past the
-    /// fork; past that the node commits, and can no longer follow the decision.
-    ///
-    /// @Todo: Stage 9 replaces giving up with the persisted hazard record and the recovery it
-    /// drives. Until then the operator is told and the node keeps running; it never resyncs.
-    fn crosslink_conflict_hold(&mut self) -> bool {
+    /// Committing the best chain's root drops every chain that forks below it. When Π_bft's
+    /// decision sits on one of those, the best chain has run the full reorg depth past its fork
+    /// from that decision, and the node can no longer switch to it (FINALITY.md §4.3).
+    fn crosslink_drop_bft_if_commit_conflicts(&self) {
+        if crate::new_network::bft::bft_is_dropped() {
+            return;
+        }
         let Some((decided_height, decided_hash)) = crate::new_network::bft::bft_chain()
             .read()
             .unwrap()
             .bft_final_snapshot
         else {
-            return false;
+            return;
         };
-
-        if self.conflict_abandoned == Some(decided_hash) {
-            return false;
-        }
 
         // A decided block that is already committed cannot be dropped by a later commit.
         if self.finalized_state.db.height(decided_hash).is_some() {
-            return false;
+            return;
         }
 
         let Some(best_chain) = self.non_finalized_state.best_chain() else {
-            return false;
+            return;
         };
         let root_hash = best_chain.non_finalized_root_hash();
-        let held_len = best_chain.len() as u32;
 
-        if !self.non_finalized_state.commit_would_drop(decided_hash, root_hash) {
-            return false;
-        }
-
-        if held_len <= MAX_BLOCK_REORG_HEIGHT + CONFLICT_HOLD_DEPTH {
-            tracing::debug!(
-                "holding the commit at {root_hash}: it would drop the chain holding the decided block at height {}",
-                decided_height.0,
+        if self.non_finalized_state.commit_would_drop(decided_hash, root_hash) {
+            crate::new_network::bft::drop_bft(
+                format!(
+                    "This node's best chain forks below the block decided at height {} ({decided_hash}) and has reached the reorg depth, so committing {root_hash} leaves that block behind.",
+                    decided_height.0,
+                ),
+                self.finalized_state.db.path(),
             );
-            return true;
         }
-
-        self.conflict_abandoned = Some(decided_hash);
-        tracing::error!(
-            "crosslink: committing past the block decided at height {} after holding {} blocks; this node can no longer follow that decision",
-            decided_height.0, CONFLICT_HOLD_DEPTH,
-        );
-
-        false
     }
 
     /// Advance `fin` if the new best chain offers a candidate above it (FINALITY.md §3.2, §4.3).
@@ -435,9 +413,7 @@ impl WriteBlockWorkerTask {
             .expect("just successfully inserted a non-finalized block above")
             > MAX_BLOCK_REORG_HEIGHT
         {
-            if self.crosslink_conflict_hold() {
-                break;
-            }
+            self.crosslink_drop_bft_if_commit_conflicts();
 
             tracing::trace!("finalizing block past the reorg limit");
             let contextually_verified_with_trees = self.non_finalized_state.finalize();

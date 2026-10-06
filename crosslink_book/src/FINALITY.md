@@ -118,9 +118,8 @@ advances, so the two quantities coincide (§5.2).
 as its own block hash, and the database's finalized tip, which is the higher of `fin` and the
 block Zebra commits at reorg depth. The finalized tip equals `fin` while finality lags the
 best tip by less than about `MAX_BLOCK_REORG_HEIGHT` blocks. Past that lag the depth commit
-runs ahead of `fin`, and if it comes to lie on a branch that excludes `bft_final_snapshot`, the
-node opens a second chain state of the same shape for the BFT branch (§4.3, §7.1). `fin` is one
-quantity across both: every branch the node records contains it.
+runs ahead of `fin`. If it comes to lie on a branch that excludes `bft_final_snapshot`, the node
+can no longer follow `Π_bft` and drops BFT (§4.3).
 
 A fourth quantity is objective rather than node-local:
 
@@ -624,9 +623,9 @@ describe it. Statements under *Without Linearity* show what the rule prevents.
   - *With Linearity:* later final snapshots stay on A's branch, so B-side `fin` never passes the
     fork point and B-side nodes can always still switch to A. Under raw fork choice, if B is
     heavier, finality stays stalled until B's branch is abandoned. A partition lasting more than
-    `MAX_BLOCK_REORG_HEIGHT` blocks puts the fork point below the B-side depth commit, which is
-    the case the second finalized state of the implementation below exists to serve: the B-side
-    node records both branches and switches without an operator.
+    `MAX_BLOCK_REORG_HEIGHT` blocks puts the fork point below the B-side depth commit. The B-side
+    node then cannot switch: it drops BFT and stays on B's branch until its operator resyncs it
+    (implementation below).
   - *Without Linearity:* if `Π_bft` later finalizes a snapshot on B's branch, B-side nodes
     advance `fin` past the fork point on B. From then on neither side switches, whatever the
     work, and neither records a hazard, because each side's candidate from the other branch is
@@ -675,8 +674,8 @@ finalized database rather than as a separate chain filter:
 - A BFT decision does not change the finalized state. It advances `bft_final_snapshot` (§2),
   which can lie on a chain that is not `bc_best`. Only a later `bc_best` change moves `fin`, and
   only by the rule above.
-- The node syncs the chain leading to `bft_final_snapshot` whether or not it is `bc_best`, and
-  it never needs a resync to do so. While that chain forks above the depth-committed block it is
+- The node syncs the chain leading to `bft_final_snapshot` whether or not it is `bc_best`, as
+  long as that chain forks above the depth-committed block. It is then
   a chain of the non-finalized state, exempt from the pruning that drops the lowest-work chains
   past `MAX_NON_FINALIZED_CHAIN_FORKS`, and it survives a restart through the non-finalized
   backup. Every chain carries its aggregated stakes per block, beside the per-block
@@ -693,40 +692,32 @@ finalized database rather than as a separate chain filter:
   Chains forking below that point are no longer in view of that database.
   On a Zebra node the effective floor is the higher of `fin` and that depth-committed block.
 
-  The depth commit is never held back indefinitely. A node whose BFT has stalled, for any length
-  of time or forever, keeps committing its PoW best chain and remains a working PoW node with a
-  frozen `fin`. If `bc_best` then runs more than that depth past the point where the chain to
-  `bft_final_snapshot` forks from it, the depth commit writes a block that conflicts with
-  `bft_final_snapshot`, and one finalized database cannot be rewound to take the other branch.
-  The node must nevertheless keep syncing and recording both branches for as long as both grow,
-  validating bft-blocks and computing rosters along the BFT branch, and switch its served best
-  chain to that branch when the rule above says to. That is a second finalized state:
+  The depth commit is never held back. A node whose BFT has stalled, for any length of time or
+  forever, keeps committing its PoW best chain and remains a working PoW node with a frozen
+  `fin`.
 
-  - The PoW state **P** is today's Zebra: raw work fork choice and the depth commit. Its
-    finalized state keeps, at a height at or below `fin`, a snapshot of itself from which an
-    independent, writable copy can be opened while P keeps writing. The snapshot is retaken as
-    `fin` advances, and during a stall it stays valid, only staler. Every chain containing `fin`
-    forks at or above it.
-  - When a bc-block arrives that forks below P's finalized tip but above `fin`, the node opens
-    the Crosslink state **C** from that snapshot, replays P's own stored blocks from the
-    snapshot height to the fork point into it, and from there feeds C the conflicting chain from
-    peers. C's fork-choice floor is `bft_final_snapshot` and C never depth-commits. Both states
-    keep syncing and committing; the served best chain is chosen across both by the switch rule
-    above. C is dropped once `fin` passes the fork, and P's branch is recorded for as long as
-    blocks arrive on it.
-  - How the snapshot is taken belongs to the storage engine, and it sets the cost of a conflict
-    rather than whether the node survives one: a hard-linked checkpoint or a filesystem reflink
-    clone is milliseconds, a persistent savepoint plus a file clone needs P's writer paused for
-    the copy, and a logical copy into a fresh database costs a full database of time and disk.
-    The last is the portable floor and is acceptable, because what it pays for is a network
-    partition deeper than `MAX_BLOCK_REORG_HEIGHT`.
+  `MAX_BLOCK_REORG_HEIGHT` is therefore also the limit on what `Π_bft` can make a node follow.
+  One finalized database cannot be rewound to take another branch, so a decision whose chain
+  forks below the node's committed tip cannot be followed. The node then drops BFT: it stops
+  proposing, validating and fetching blocks for `Π_bft`, ends its BFT task and closes that
+  task's socket, keeps running on its own chain as proof of work with `fin` frozen, and reports
+  the condition as an error, repeatedly. Peers are sent nothing; they see the node go quiet. Its operator
+  deletes the database and resyncs to rejoin. There are two cases:
 
-  Until the second state exists, the node holds P's depth commit at the fork point while a
-  conflict is live, up to `CONFLICT_HOLD_DEPTH` blocks past the fork, then commits and reports on
-  stdout that it can no longer follow `bft_final_snapshot`; that path carries an `@Todo` naming
-  the second state. The hold is an interim and never the design, because under a permanent
-  conflict it is the same wall `CONFLICT_HOLD_DEPTH` blocks later. A node never requires a resync
-  to resume bft-block validation.
+  - `bc_best` forks below `bft_final_snapshot` and runs the reorg depth past the fork, so the
+    depth commit writes a block that conflicts with `bft_final_snapshot`. If every node follows
+    that branch, `Π_bft` stops for the whole network (§3.4, Linearity and bc reorganizations).
+  - A block on a decided chain conflicts with a block the node has already committed, as after
+    a partition longer than the reorg depth. A block counts as on a decided chain only when it
+    is the snapshot of a proposal holding a decision's worth of precommits from the node's own
+    roster, or an ancestor of one, so a single proposer cannot make a node drop BFT.
+
+  A stall alone never does this. When `Π_bft` resumes on the chain the node committed, the
+  snapshot is a committed block, however deep, and its roster is read from the database.
+
+  Whether a node should stop, rather than ignore a chain that forks below its committed tip, is
+  a policy choice, and it is the same choice whether that chain is only heavier or also decided.
+  Zebra Crosslink ignores it in both cases.
 
 Sticky fork choice and Linearity constrain different points. Sticky fork choice keeps `fin` on
 `bc_best`; Linearity keeps each final snapshot on or after the previous one. `fin` lies at or
@@ -763,7 +754,7 @@ where a commit changes the best chain.
 `BftChain::bft_final_snapshot`: the snapshot of the last decided bft-block, which is what
 `Π_bft` has finalized rather than what this node has (§3.2). `BftRunner::decide` assigns it, and
 `BftRunner::restore` replays it from the stored chain. Its readers are the BFT proposal path,
-the `+40` clamp, the reorg-depth conflict hold, and the non-finalized pruning exemption — all
+the `+40` clamp, the reorg-depth commit's conflict check, and the non-finalized pruning exemption — all
 inside `zebra-state`, because a block it names is not final for this node until `fin` reaches
 it (§2).
 
@@ -799,10 +790,10 @@ The state behavior depends on whether the hash is known:
 - a hash the state does not know never reaches the finalize call: `candidate` answers `None`
   while the snapshot is a block this node does not hold, and the bft-block naming it is refused
   by `validate` for the same reason.
-- the restore path makes a `KnownBlock` lookup for the last decided BFT block. The decided chain
-  and the blocks it finalizes are rows of one database, written together, so a database that
-  cannot resolve that block is damaged rather than merely behind: restore says so and ends the
-  process instead of panicking. The replay-watermark loop just above it tolerates the case.
+- the restore path makes a `KnownBlock` lookup for the last decided BFT block. A database that
+  cannot resolve that block either committed past a fork from it before the node stopped, or is
+  damaged. Restore loads the stored chain, because bc-blocks cite it, and drops BFT (§4.3). The
+  replay-watermark loop just above it tolerates the case.
 
 The stored `fin` row is therefore both a `fin` implementation and a lower bound on the finalized
 database's tip: it is written only after the commit it names has succeeded, so a crash leaves it
@@ -818,8 +809,9 @@ at or below that tip and never naming a block the database lacks.
 - the notification subscribers of `fin::fin_change_rx`, reached through
   `CrosslinkFinalizedTipChange`.
 
-`bft_final_snapshot` reaches irreversible state commitment only indirectly, through the conflict
-hold that delays it (§4.3). Its other readers are the BFT proposal path's `+40` clamp, the
+`bft_final_snapshot` never reaches irreversible state commitment: the reorg-depth commit only
+checks whether it is about to leave that block behind, and drops BFT if so (§4.3). Its other
+readers are the BFT proposal path's `+40` clamp, the
 pruning exemption, and the GUI's terminated-finalizer display, which passes it to
 `terminated_finalizers_at` as the finalized bc-height so that the display and the consensus
 roster share one derivation.
@@ -955,8 +947,9 @@ committed, so a crash in between leaves the chain one height short and that heig
 again on the next run. `BftRunner::restore` reads them back at startup to rebuild the chain and
 `tenderlink`'s `ingest_startup_data`, recomputing each height's roster from the bonds at its
 snapshot and the watermark `prev_finalized_bc_height` from the same lookup. A database past the
-activation height holding no decided chain, or a decided chain whose snapshot the database does
-not hold, ends the process with a message rather than being migrated or re-bootstrapped (§5.2).
+activation height holding no decided chain ends the process with a message rather than being
+migrated or re-bootstrapped. A decided chain whose snapshot the database does not hold starts
+the node with BFT dropped (§5.2).
 
 `force_feed_bft_block` injects a decided bft-block without `Π_bft`, as a message to the `sync`
 thread. Its only caller is `test_format.rs`, through `TFLServiceCalls::force_feed_pos`.
@@ -1067,8 +1060,7 @@ Zebra Crosslink names separately:
 
 - protocol `local_finalized_tip` (`fin`), which under sticky fork choice is also the Zebra
   policy floor `canonical_finalized_tip` (§2, §4.3); and
-- the finalized tip of the PoW state's database, the higher of `fin` and the reorg-depth commit;
-  a second state opened for a conflicting BFT branch (§4.3) has its own.
+- the finalized tip of the database, the higher of `fin` and the reorg-depth commit.
 
 ### 6.4 Unbounded finality gap
 
@@ -1167,12 +1159,9 @@ reply, and every chain read behind that reply is local and synchronous. There is
 out, so there is no lock ordering to respect (§6.7). **Current tree:** this is how the five
 closures are built, in `BftRunner`.
 
-Finality state is chain state, and there can be two chain states at once. When the depth commit
-and `bft_final_snapshot` come to lie on different branches, the BFT branch is a second finalized
-database plus non-finalized state of the same shape as the first, opened from a snapshot of the
-first at or below `fin` (§4.3). `zebra-state` routes blocks and reads between the two and chooses
-the served best chain across both. How that snapshot is taken belongs to the storage engine, not
-to the protocol.
+Finality state is chain state, and there is one chain state. When the depth commit and
+`bft_final_snapshot` come to lie on different branches, the node drops BFT rather than open a
+second (§4.3).
 
 **By fate.** What the Crosslink service crate held is four kinds of thing, and only the first is
 irreducible. The moves marked "moved" are done (§5.5); the rest are ahead:
@@ -1211,7 +1200,7 @@ default for "confirmed" presentation. Each consumer needs a contract:
 | finality-change notifications | `local_finalized_tip` transitions | sent after `fin` is persisted; the exposure condition of §3.5 is an `@Todo` |
 | visualization paging | operational paging cursor | do not overload a finality value merely to bound a window |
 | canonical state activation | `fin` | sticky fork choice floor (§4.3) |
-| physical database status | database finalized tip | higher of `fin` and the reorg-depth commit, in the PoW state; a second state for a conflicting BFT branch has its own; never reported as Crosslink finality |
+| physical database status | database finalized tip | higher of `fin` and the reorg-depth commit; never reported as Crosslink finality |
 | staking rewards | objective per-block source | never use node-local `fin`; see §9.1 |
 | validator roster and hardfork membership | bonds at `snapshot(B_{H−1})` | objective; see below |
 | block-template BFT context | newest qualifying decided bft-block | the σ-confirmation and Last Final Snapshot tests are the ones bc-block admission runs, so a template never carries a certificate its own chain would refuse (§6.2) |
@@ -1248,10 +1237,11 @@ The two quantities are separate:
 
 `snapshot(B_{H−1})` generally lies above `fin`, because `candidate(H) ⪯ snapshot(LF(H))` and
 `fin` advances only once a bc-block citing the bft-block is best. It need not lie on `bc_best`
-at all, and can stay off it for any length of time (§2, §4.3). Its bonds are therefore read from
-the chain leading to `bft_final_snapshot`, which the node syncs and stores independently of its
-best chain: as a non-finalized chain carrying its aggregated stakes per block, or, once it forks
-below the depth commit, as the second state of §4.3. The aggregate at a block is the same function
+at all, and can stay off it until `bc_best` reaches the reorg depth past the fork (§2, §4.3). Its
+bonds are therefore read from the chain leading to `bft_final_snapshot`, which the node syncs and
+stores independently of its best chain, as a non-finalized chain carrying its aggregated stakes
+per block. Once that chain forks below the depth commit the node drops BFT and reads no further
+roster (§4.3). The aggregate at a block is the same function
 whichever side of a finalized tip the block is on, so a block committed later yields the
 identical row. An honest validator has downloaded that chain while validating `B_{H−1}` (§3.4).
 
@@ -1302,7 +1292,7 @@ stored, or consumed.
   block, appended by `Chain::push` beside `bond_rewards` and `finalizer_commissions` and popped
   with them, from the same function `prepare_aggregated_stakes_batch` uses, so a block held only
   in the non-finalized state yields the row the database will hold once it commits. A block on
-  no chain the node holds is the case the second state of §4.3 removes.
+  no chain the node holds is the case in which the node drops BFT (§4.3).
 - **The BFT genesis snapshot is below the bootstrap roster height.** Bootstrap genesis
   carries headers starting at `BOOTSTRAP_ROSTER_HEIGHT`, so its snapshot, and the roster for
   BFT height 1, is the block below that height.
@@ -1342,20 +1332,19 @@ stored, or consumed.
 - **`NonFinalizedState` holds less than the finalized chain needs.** It lives in memory, it drops
   the lowest-work chain past `MAX_NON_FINALIZED_CHAIN_FORKS` (10), and it drops chains that do
   not contain the finalized tip, including those forking below a reorg-depth commit. The chain to
-  `bft_final_snapshot` must survive all three. Its BFT decisions are database rows beside the
-  bc-chain (§7.1); the chain holding `bft_final_snapshot` is exempt from the lowest-work pruning
-  and is restored by the non-finalized backup; and a fork below the depth commit is the second
-  state of §4.3, never a reason to stop following the chain.
-- **A conflict below the depth commit is a second database, not a resync.** The Wall of Death
-  (`410d99ed`) was this failure with no conflict in it: a decision's snapshot lay on the
-  committed chain, deep, and the roster could not be read there, so a node that had mined past it
-  could never resume BFT. Storing aggregated stakes per committed block fixed that, and the
-  resyncs it had forced on feature-testnet operators are what the fix existed to end. The
-  conflict case is the same failure one branch over, and the same answer applies: the node
-  recovers from what it already holds, without an operator.
-- **Switching to the BFT branch can be a reorganization deeper than `MAX_BLOCK_REORG_HEIGHT`.**
-  The wallet's `REWIND_DISTANCE` and `CHECKPOINTS_N` derive from that constant, so a client of a
-  node that can switch to a second state needs checkpoints back to `fin`.
+  `bft_final_snapshot` must survive the first two. Its BFT decisions are database rows beside the
+  bc-chain (§7.1), and the chain holding `bft_final_snapshot` is exempt from the lowest-work
+  pruning and is restored by the non-finalized backup. A fork below the depth commit is where the
+  node drops BFT (§4.3).
+- **A conflict below the depth commit is a resync; a deep snapshot with no conflict is not.** The
+  Wall of Death (`410d99ed`) was the second: a decision's snapshot lay on the committed chain,
+  deep, and the roster could not be read there, so a node that had mined past it could never
+  resume BFT. Storing aggregated stakes per committed block fixed that. A snapshot on a branch
+  that forks below the committed tip is different: the node does not hold that branch and cannot
+  take it, so it drops BFT and its operator resyncs (§4.3).
+- **No switch is deeper than `MAX_BLOCK_REORG_HEIGHT`.** The wallet's `REWIND_DISTANCE` and
+  `CHECKPOINTS_N` derive from that constant, and the node drops BFT rather than reorganize past
+  it (§4.3).
 - **A switch onto the finalized chain replaces bond state.** Bonds tracked along that chain while
   it was a side chain must agree with what the chain produces once it becomes `bc_best`; one
   implementation of the bond update serves both (§5.4).
@@ -1375,11 +1364,11 @@ stored, or consumed.
 - **`fin` is a time series, not a function of the tip (§3.2).** Recomputing it from
   `candidate(bc_best)` after a restart reproduces only the current candidate, which is why `fin`
   is persisted.
-- **Zebra's depth commit is a second floor, per state.** Blocks deeper than
-  `MAX_BLOCK_REORG_HEIGHT` on the best chain are written to the PoW state's finalized database
+- **Zebra's depth commit is a second floor.** Blocks deeper than
+  `MAX_BLOCK_REORG_HEIGHT` on the best chain are written to the finalized database
   regardless of `fin` (§4.3, Implementation in Zebra), and a fork-choice rule above `fin`
-  operates only within that window in one database. A second state is what lets the rule reach
-  past it; holding the commit back is not, because the hold has to end.
+  operates only within that window. Nothing reaches past it: a decision that would need to is
+  the one the node drops BFT over.
 - **The `+40` candidate clamp breaks honest proposal (§6.2).** It stays, as a design heuristic
   outside the specification (§3.4). With it, one bft-block's snapshot advances by at most 40 bc-blocks; the commit, the
   roster lookup, and `terminated_finalizers_at` handle steps of any size regardless.

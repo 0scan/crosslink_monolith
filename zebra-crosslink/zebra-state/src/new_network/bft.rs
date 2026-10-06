@@ -105,14 +105,117 @@ static MISSING_POW_BLOCKS: LazyLock<Mutex<HashSet<Hash>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn needs_pow_block(hash: Hash) -> (TMStatus, TMStatusReason) {
+    if bft_is_dropped() {
+        return (TMStatus::Indeterminate, TMStatusReason::None);
+    }
     MISSING_POW_BLOCKS.lock().unwrap().insert(hash);
     (TMStatus::Indeterminate, TMStatusReason::NeedsBlock { hash: hash.0 })
 }
 
 pub(super) fn missing_pow_blocks(read_state: &ReadState) -> Vec<Hash> {
+    if bft_is_dropped() {
+        report_dropped_bft();
+        return Vec::new();
+    }
     let mut missing = MISSING_POW_BLOCKS.lock().unwrap();
     missing.retain(|hash| read_state.known_block(*hash).is_none());
-    missing.iter().copied().collect()
+    let mut decided = DECIDED_MISSING_POW_BLOCKS.lock().unwrap();
+    decided.retain(|hash| read_state.known_block(*hash).is_none());
+    missing.iter().chain(decided.iter().filter(|hash| !missing.contains(*hash))).copied().collect()
+}
+
+/// PoW blocks this node lacks that are a decided snapshot or one of its ancestors.
+///
+/// A proposal alone puts a hash in `MISSING_POW_BLOCKS`, and one proposer can name any block. A
+/// hash enters this set only once the proposal naming it holds a decision's worth of precommits
+/// from this node's own roster, and from there only by following previous-block hashes. Every
+/// hash here is therefore on the chain that Π_bft decided, which is what makes it safe to drop
+/// BFT when one of them turns out to conflict with a committed block.
+static DECIDED_MISSING_POW_BLOCKS: LazyLock<Mutex<HashSet<Hash>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+pub(super) fn is_decided_missing_pow_block(hash: Hash) -> bool {
+    DECIDED_MISSING_POW_BLOCKS.lock().unwrap().contains(&hash)
+}
+
+/// Move the search for where the decided chain joins this node's chains from `hash` to its parent.
+pub(super) fn decided_missing_pow_block_needs_parent(hash: Hash, parent: Hash) {
+    let mut decided = DECIDED_MISSING_POW_BLOCKS.lock().unwrap();
+    decided.remove(&hash);
+    decided.insert(parent);
+}
+
+/// Why this node stopped taking part in BFT, and when it last said so.
+///
+/// Following Π_bft's decision would take a reorganization below the committed tip, which one
+/// finalized database cannot do. The node stays on its own chain as proof of work with `fin`
+/// frozen, and only a resync brings it back (FINALITY.md §4.3).
+static DROPPED_BFT: LazyLock<Mutex<Option<(String, std::time::Instant)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+const DROPPED_BFT_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The running tenderlink task. Aborting it ends its network thread, which closes its socket.
+static TENDERLINK_TASK: Mutex<Option<tokio::task::AbortHandle>> = Mutex::new(None);
+
+pub(crate) fn bft_is_dropped() -> bool {
+    DROPPED_BFT.lock().unwrap().is_some()
+}
+
+pub(crate) fn drop_bft(reason: String, db_path: &std::path::Path) {
+    let mut dropped = DROPPED_BFT.lock().unwrap();
+    if dropped.is_some() {
+        return;
+    }
+    let message = format!(
+        "crosslink: BFT is stopped on this node. {reason} Following that decision needs a \
+         reorganization deeper than {} blocks. The node keeps running as proof of work, without \
+         finality. Delete {} and resync to rejoin BFT.",
+        crate::constants::MAX_BLOCK_REORG_HEIGHT, db_path.display(),
+    );
+    tracing::error!("{message}");
+    *dropped = Some((message, std::time::Instant::now()));
+    MISSING_POW_BLOCKS.lock().unwrap().clear();
+    DECIDED_MISSING_POW_BLOCKS.lock().unwrap().clear();
+    if let Some(task) = TENDERLINK_TASK.lock().unwrap().take() {
+        task.abort();
+    }
+}
+
+fn report_dropped_bft() {
+    if let Some((message, last_report)) = DROPPED_BFT.lock().unwrap().as_mut() {
+        if last_report.elapsed() >= DROPPED_BFT_REPORT_INTERVAL {
+            tracing::error!("{message}");
+            *last_report = std::time::Instant::now();
+        }
+    }
+}
+
+fn note_decided_missing_pow_blocks(bft_state: &TMState) {
+    if bft_is_dropped() {
+        return;
+    }
+    for round in &bft_state.rounds_data {
+        if round.height != bft_state.height {
+            continue;
+        }
+        let (TMStatus::Indeterminate, TMStatusReason::NeedsBlock { hash }) = round.proposal_checked_validity else {
+            continue;
+        };
+        if round.proposal_sigs_n == 0 || round.proposal_sigs_n != round.proposal_sigs.len() {
+            continue;
+        }
+        // Tenderlink's own decision threshold over the active roster.
+        let total_stake: u64 = round.roster.iter().map(|member| member.stake).sum();
+        if total_stake == 0 {
+            continue;
+        }
+        let f = (total_stake - 1) / 3;
+        let threshold = if f == 0 { total_stake } else { 2 * f + 1 };
+        if round.counts.yes_precommits >= threshold && MISSING_POW_BLOCKS.lock().unwrap().contains(&Hash(hash)) {
+            DECIDED_MISSING_POW_BLOCKS.lock().unwrap().insert(Hash(hash));
+        }
+    }
 }
 
 static RECENCY_STATUS: LazyLock<tokio::sync::watch::Sender<TFLRecencyStatus>> =
@@ -609,6 +712,10 @@ pub(super) struct BftRunner {
     /// tenderlink cannot be started from it. Waiting on the reply here would freeze the sync
     /// thread, which is the only thread that can retry the commit.
     pending_bootstrap: Option<PendingBootstrap>,
+    /// Decisions that arrived after BFT was dropped. Tenderlink waits on each reply before it
+    /// moves to the next height, and treats a closed channel as fatal, so they are kept open and
+    /// never answered.
+    unanswered_decisions: Vec<tokio::sync::oneshot::Sender<(Vec<SortedRosterMember>, [u8; 32])>>,
     next_diagnostic: std::time::Instant,
 }
 
@@ -637,6 +744,7 @@ impl BftRunner {
             hardforks: config.hardfork_schedule.clone(),
             launch,
             pending_bootstrap: None,
+            unanswered_decisions: Vec::new(),
             next_diagnostic: std::time::Instant::now(),
         };
         crate::new_network::fin::load(&block_writer.finalized_state.db);
@@ -705,13 +813,21 @@ impl BftRunner {
     fn handle(&mut self, request: BftRequest, read_state: &ReadState, block_writer: &mut WriteBlockWorkerTask) {
         match request {
             BftRequest::Propose { reply } => {
-                let _ = reply.send(self.propose(read_state));
+                let _ = reply.send(if bft_is_dropped() { None } else { self.propose(read_state) });
             }
             BftRequest::Validate { block, reply } => {
+                if bft_is_dropped() {
+                    let _ = reply.send((TMStatus::Indeterminate, TMStatusReason::None));
+                    return;
+                }
                 let chain = BFT_CHAIN.read().unwrap();
                 let _ = reply.send(self.validate(&chain, read_state, &block));
             }
             BftRequest::Decided { block, fat_pointer, proposal_sigs, reply } => {
+                if bft_is_dropped() {
+                    self.unanswered_decisions.push(reply);
+                    return;
+                }
                 self.decide(block, fat_pointer, proposal_sigs, DecisionReply::Tenderlink(reply), read_state, block_writer);
             }
             BftRequest::ForceFeed { block, fat_pointer, reply } => {
@@ -1308,16 +1424,14 @@ impl BftRunner {
             match read_state.known_block(new_final_hash) {
                 Some(known) => new_final_height = known.height,
                 None => {
-                    // The bc-chain is behind the BFT chain, which the two-stores split used to
-                    // make possible. Both now live in the same database and commit together, so
-                    // this is a damaged database rather than a configuration mistake.
-                    tracing::error!(
-                        "the decided BFT chain finalizes block {}, which this database does not \
-                         hold. Delete {} and resync.",
-                        new_final_hash,
-                        block_writer.finalized_state.db.path().display(),
+                    // The node committed past a fork from this block before it stopped, or the
+                    // database is damaged. Either way the decided chain cannot be followed from
+                    // here. The stored chain is still loaded, because bc-blocks cite it.
+                    drop_bft(
+                        format!("The decided BFT chain finalizes block {new_final_hash}, which this database does not hold."),
+                        block_writer.finalized_state.db.path(),
                     );
-                    std::process::exit(1);
+                    new_final_hash = Hash([0; 32]);
                 }
             }
         }
@@ -1463,6 +1577,10 @@ impl BftRunner {
             self.launch = None;
             return;
         }
+        if bft_is_dropped() {
+            self.launch = None;
+            return;
+        }
         let Some(launch) = self.launch.take() else { return; };
         tracing::info!("starting tenderlink at BFT height {} with {} finalizer(s)", ingest.len(), roster.len());
         BFT_CHAIN.write().unwrap().is_activated = true;
@@ -1480,7 +1598,7 @@ impl BftRunner {
         // Vote namespacing: the startup height is the number of ingested (decided) rounds.
         let initial_vote_namespace = namespace_for_bft_height(self.hardforks.rules(), ingest.len() as u64);
 
-        self.rt.spawn(tenderlink::entry_point(
+        let task = self.rt.spawn(tenderlink::entry_point(
             launch.signing_key,
             Some(static_keypair),
             Some(endpoint),
@@ -1535,11 +1653,13 @@ impl BftRunner {
             })),
             tenderlink::ClosureToAccessBft(Arc::new(move |bft_state: &TMState, bft_key_address_map: &BftAddressMap| {
                 RECENCY_STATUS.send_replace(recency_status_from(bft_state, bft_key_address_map));
+                note_decided_missing_pow_blocks(bft_state);
                 Box::pin(async {})
             })),
             ingest,
             initial_vote_namespace,
         ));
+        *TENDERLINK_TASK.lock().unwrap() = Some(task.abort_handle());
     }
 }
 

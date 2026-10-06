@@ -2855,6 +2855,12 @@ pub fn sync(
 
                 // if TRACE { tracing::info!("Block @ {alleged_height}, offset {}...", hdr.offset); }
 
+                // A block on the decided chain is downloaded whatever height the peer alleges:
+                // where it sits against the committed tip is what decides whether BFT is
+                // dropped, and that is read from the block itself below.
+                let on_decided_chain = bft::is_decided_missing_pow_block(hdr.height_hash.hash_or_0);
+                let height_is_alleged = height_is_alleged && !on_decided_chain;
+
                 if height_is_alleged && alleged_height < min_height {
                     drop_block!(hdr.height_hash.hash_or_0, "Block at height {alleged_height} is below our near-tip-chain height {min_height}");
                     peer.block_downloads.remove(dl_i);
@@ -3008,7 +3014,29 @@ pub fn sync(
                     continue 'process_packets;
                 }
 
-                if !height_is_alleged {
+                if on_decided_chain {
+                    if height.0 <= finalized_height {
+                        // The hash commits to the header alone, so the height is only this
+                        // block's once the body is checked against the header's merkle root.
+                        if let Err(err) = (verify_fns.check_body)(&block, read_state.network(), height) {
+                            drop_block!(hash, "Block {hash} on the decided chain has an invalid body: {}", err.msg);
+                            continue 'process_packets;
+                        }
+                        if read_state.known_block(hash).is_none() {
+                            bft::drop_bft(
+                                format!(
+                                    "Finalizers holding at least two thirds of the stake decided a chain containing block {hash} at height {}, which conflicts with the block this node committed at that height.",
+                                    height.0,
+                                ),
+                                block_writer.finalized_state.db.path(),
+                            );
+                        }
+                        drop_block!(hash, "Block at height {} is already finalized", height.0);
+                        continue 'process_packets;
+                    } else if read_state.known_block(parent_hash).is_none() {
+                        bft::decided_missing_pow_block_needs_parent(hash, parent_hash);
+                    }
+                } else if !height_is_alleged {
                     // Deferred height checks for a by-hash request (see `height_is_alleged`).
                     if height.0 < min_height {
                         drop_block!(hash, "Block at height {} is below our near-tip-chain height {min_height}", height.0);
