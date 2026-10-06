@@ -175,6 +175,8 @@ pub enum ExplorerReadRequest {
         /// Cursor traversal direction.
         direction: ExplorerPageDirection,
     },
+    /// Returns compact miner-source summaries for finalizers in request order.
+    FinalizerMinerSummaries(Arc<[[u8; 32]]>),
 }
 
 impl ExplorerReadRequest {
@@ -194,6 +196,7 @@ impl ExplorerReadRequest {
             Self::MinerPage { .. } => "explorer_miner_page",
             Self::Miner { .. } => "explorer_miner",
             Self::MinerStakePage { .. } => "explorer_miner_stake_page",
+            Self::FinalizerMinerSummaries(_) => "explorer_finalizer_miner_summaries",
         }
     }
 }
@@ -227,6 +230,8 @@ pub enum ExplorerReadResponse {
     Miner(ExplorerMiner),
     /// Current miner-attributed stake ranking and summary.
     MinerStakePage(ExplorerMinerStakePage),
+    /// Compact miner-source summaries parallel to the requested finalizer keys.
+    FinalizerMinerSummaries(Vec<ExplorerFinalizerMinerSummary>),
 }
 
 impl ExplorerTransactionQuery {
@@ -590,6 +595,14 @@ pub struct ExplorerMinerStakeTotals {
     pub unknown_bond_count: u64,
     pub reward_bond_stake_zat: u64,
     pub reward_bond_count: u64,
+}
+
+/// Compact current miner attribution for one finalizer.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExplorerFinalizerMinerSummary {
+    pub primary_miner_address: Option<transparent::Address>,
+    pub miner_address_count: u64,
 }
 
 /// One current miner-finalizer stake pair in ranking order.

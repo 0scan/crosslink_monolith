@@ -57,8 +57,9 @@ pub use error::{
 pub use explorer::{
     ExplorerAddressPage, ExplorerAddressRecord, ExplorerAmountFilter, ExplorerBalanceRankCursor,
     ExplorerBalanceRankEntry, ExplorerBalanceRankPage, ExplorerBlockStats, ExplorerBlockSummary,
-    ExplorerBondAttributionRecord, ExplorerChainStats, ExplorerDailyStats, ExplorerIntervalStats,
-    ExplorerMiner, ExplorerMinerFinalizerRecord, ExplorerMinerPage, ExplorerMinerRankCursor,
+    ExplorerBondAttributionRecord, ExplorerChainStats, ExplorerDailyStats,
+    ExplorerFinalizerMinerSummary, ExplorerIntervalStats, ExplorerMiner,
+    ExplorerMinerFinalizerRecord, ExplorerMinerPage, ExplorerMinerRankCursor,
     ExplorerMinerRankEntry, ExplorerMinerRecord, ExplorerMinerStakePage,
     ExplorerMinerStakeRankCursor, ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals,
     ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse, ExplorerRollingStats,

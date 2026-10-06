@@ -119,6 +119,14 @@ pub fn handle(
         } => ExplorerReadResponse::MinerStakePage(explorer_miner_stake_page(
             db, finalizer, limit, cursor, direction,
         )),
+        ExplorerReadRequest::FinalizerMinerSummaries(finalizers) => {
+            ExplorerReadResponse::FinalizerMinerSummaries(
+                finalizers
+                    .iter()
+                    .map(|finalizer| db.explorer_finalizer_miner_summary(*finalizer))
+                    .collect(),
+            )
+        }
     })
 }
 

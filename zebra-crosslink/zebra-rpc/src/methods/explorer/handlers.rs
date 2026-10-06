@@ -9,9 +9,7 @@ use jsonrpsee::core::RpcResult as Result;
 use tower::Service;
 #[cfg(feature = "indexer")]
 use zcash_primitives::{
-    bft::{
-        FinalizerAddress, FinalizerRecencyStatus, TFLRecencyStatus, ACTIVE_ROSTER_MAX_N,
-    },
+    bft::{FinalizerAddress, FinalizerRecencyStatus, TFLRecencyStatus, ACTIVE_ROSTER_MAX_N},
     transaction::RosterMember,
 };
 #[cfg(feature = "indexer")]
@@ -34,7 +32,10 @@ use zebra_network::address_book_peers::AddressBookPeers;
 use zebra_node_services::mempool::{self as node_mempool, MempoolService};
 use zebra_state::crosslink::{TFLServiceRequest, TFLServiceResponse};
 #[cfg(feature = "indexer")]
-use zebra_state::{HashOrHeight, ReadRequest, ReadResponse};
+use zebra_state::{
+    ExplorerFinalizerMinerSummary, ExplorerReadRequest, ExplorerReadResponse, HashOrHeight,
+    ReadRequest, ReadResponse,
+};
 use zebra_state::{ReadState as ReadStateService, State as StateService};
 
 use crate::server::{self, error::MapError};
@@ -676,10 +677,28 @@ where
                 _ => unreachable!("unmatched response to CrosslinkIsActivated"),
             };
             let params = self.network.crosslink_parameters();
+            let finalizer_keys = candidates
+                .iter()
+                .map(|(member, _)| member.pub_key)
+                .collect::<Vec<_>>();
+            let summaries_response = call_service(
+                self.read_state.clone(),
+                ReadRequest::Explorer(ExplorerReadRequest::FinalizerMinerSummaries(
+                    finalizer_keys.clone().into(),
+                )),
+            )
+            .await?;
+            let summaries = match summaries_response {
+                ReadResponse::Explorer(ExplorerReadResponse::FinalizerMinerSummaries(
+                    summaries,
+                )) => finalizer_keys.into_iter().zip(summaries).collect(),
+                _ => unreachable!("unmatched response to FinalizerMinerSummaries"),
+            };
 
             Ok(crosslink_finalizers_response(
                 tip,
                 candidates,
+                summaries,
                 params.bootstrap.roster_height(),
                 params.bootstrap.activation_height(),
                 activated,
@@ -960,6 +979,7 @@ fn crosslink_finalizer_set_status(
 fn crosslink_finalizers_response(
     tip: Option<(Height, block::Hash)>,
     mut candidates: Vec<(RosterMember, Option<FinalizerAddress>)>,
+    miner_summaries: HashMap<[u8; 32], ExplorerFinalizerMinerSummary>,
     selection_height: Option<u32>,
     activation_height: Option<u32>,
     activated: bool,
@@ -981,12 +1001,20 @@ fn crosslink_finalizers_response(
         .enumerate()
         .map(|(index, (member, finalizer_address))| {
             let active = index < active_count;
+            let miner_summary = miner_summaries
+                .get(&member.pub_key)
+                .copied()
+                .unwrap_or_default();
             CrosslinkFinalizerEntry {
                 rank: index.saturating_add(1).to_string(),
                 public_key: hex::encode(member.pub_key),
                 finalizer_address: finalizer_address
                     .filter(|address| address.pub_key.0 == member.pub_key && address.verify())
                     .map(|address| address.encode()),
+                primary_miner_address: miner_summary
+                    .primary_miner_address
+                    .map(|address| address.to_string()),
+                miner_address_count: miner_summary.miner_address_count.to_string(),
                 voting_power_zat: member.voting_power.to_string(),
                 total_stake_share_percent: percentage_one_decimal(
                     member.voting_power,
@@ -1390,17 +1418,23 @@ fn indexer_status(
 
 #[cfg(all(test, feature = "indexer"))]
 mod tests {
+    use std::collections::HashMap;
+
     use zcash_primitives::{
         bft::{FinalizerAddress, FinalizerRecencyStatus, PubKeyID, TFLRecencyStatus},
         transaction::RosterMember,
     };
-    use zebra_chain::block::{Hash, Height};
+    use zebra_chain::{
+        block::{Hash, Height},
+        parameters::NetworkKind,
+        transparent::Address,
+    };
 
     use super::{
         crosslink_activation_overview, crosslink_finalizer_liveness_response,
         crosslink_finalizers_response, crosslink_staking_overview, indexer_status,
         parse_finalizer_public_key, CrosslinkBftStep, CrosslinkFinalizerSetStatus, CrosslinkPhase,
-        CrosslinkStakingChange, CrosslinkStakingStatus,
+        CrosslinkStakingChange, CrosslinkStakingStatus, ExplorerFinalizerMinerSummary,
     };
 
     fn finalizer(byte: u8, voting_power: u64) -> (RosterMember, Option<FinalizerAddress>) {
@@ -1497,9 +1531,18 @@ mod tests {
         let candidates = (1_u8..=13)
             .map(|value| finalizer(value, u64::from(value)))
             .collect();
+        let primary_miner_address = Address::from_pub_key_hash(NetworkKind::Testnet, [0x71; 20]);
+        let miner_summaries = HashMap::from([(
+            [13; 32],
+            ExplorerFinalizerMinerSummary {
+                primary_miner_address: Some(primary_miner_address),
+                miner_address_count: 3,
+            },
+        )]);
         let response = crosslink_finalizers_response(
             Some((Height(10), Hash([0x51; 32]))),
             candidates,
+            miner_summaries,
             Some(20),
             Some(30),
             false,
@@ -1512,6 +1555,14 @@ mod tests {
         assert_eq!(response.active_stake_zat, "90");
         assert_eq!(response.items.len(), 13);
         assert_eq!(response.items[0].voting_power_zat, "13");
+        let primary_miner_address = primary_miner_address.to_string();
+        assert_eq!(
+            response.items[0].primary_miner_address.as_deref(),
+            Some(primary_miner_address.as_str())
+        );
+        assert_eq!(response.items[0].miner_address_count, "3");
+        assert_eq!(response.items[1].primary_miner_address, None);
+        assert_eq!(response.items[1].miner_address_count, "0");
         assert_eq!(
             response.items[0].active_stake_share_percent.as_deref(),
             Some("14.4")

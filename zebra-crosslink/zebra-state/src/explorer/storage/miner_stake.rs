@@ -15,8 +15,9 @@ use zebra_chain::{
 use crate::{
     request::FinalizedBlock,
     service::finalized_state::{DiskWriteBatch, ZebraDb},
-    ExplorerBondAttributionRecord, ExplorerMinerFinalizerRecord, ExplorerMinerStakeRankEntry,
-    ExplorerMinerStakeTotals, ExplorerPageDirection, ExplorerStakeSource,
+    ExplorerBondAttributionRecord, ExplorerFinalizerMinerSummary, ExplorerMinerFinalizerRecord,
+    ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals, ExplorerPageDirection,
+    ExplorerStakeSource,
 };
 
 use super::disk_format::{
@@ -24,6 +25,28 @@ use super::disk_format::{
 };
 
 impl ZebraDb {
+    /// Returns the highest-stake recognized miner address and distinct miner count for a finalizer.
+    pub fn explorer_finalizer_miner_summary(
+        &self,
+        finalizer: [u8; 32],
+    ) -> ExplorerFinalizerMinerSummary {
+        let minimum = ExplorerFinalizerMinerRankKey::min_for_finalizer(finalizer);
+        let maximum = ExplorerFinalizerMinerRankKey::max_for_finalizer(finalizer);
+        let primary_miner_address = self
+            .explorer_finalizer_miner_order_cf()
+            .zs_forward_range_iter(minimum..=maximum)
+            .next()
+            .map(|(key, ())| key.address());
+        let miner_address_count = self
+            .explorer_miner_stake_totals(Some(finalizer))
+            .miner_address_count;
+
+        ExplorerFinalizerMinerSummary {
+            primary_miner_address,
+            miner_address_count,
+        }
+    }
+
     /// Returns current global or per-finalizer miner-attributed stake totals.
     pub fn explorer_miner_stake_totals(
         &self,
@@ -814,13 +837,77 @@ mod tests {
     use super::{
         add_non_transparent, add_transparent_totals, classify_primary_stake_source,
         move_transparent_totals, remove_non_transparent, remove_transparent_totals,
+        ExplorerFinalizerMinerRankKey,
     };
-    use crate::{ExplorerMinerStakeTotals, ExplorerStakeSource};
+    use crate::{
+        constants::{state_database_format_version_in_code, STATE_DATABASE_KIND},
+        service::finalized_state::{DiskWriteBatch, ZebraDb, STATE_COLUMN_FAMILIES_IN_CODE},
+        Config, ExplorerMinerStakeTotals, ExplorerStakeSource,
+    };
     use zebra_chain::{
-        parameters::NetworkKind,
+        parameters::{Network, NetworkKind},
         transaction::TransactionValueEndpoint,
         transparent::Address,
     };
+
+    #[test]
+    fn finalizer_miner_summary_uses_highest_stake_address_and_total_count() {
+        let db = ZebraDb::new(
+            &Config::ephemeral(),
+            STATE_DATABASE_KIND,
+            &state_database_format_version_in_code(),
+            &Network::Mainnet,
+            true,
+            STATE_COLUMN_FAMILIES_IN_CODE
+                .iter()
+                .map(ToString::to_string),
+            false,
+        )
+        .expect("opening an ephemeral database should succeed");
+        let finalizer = [3; 32];
+        let primary = Address::from_pub_key_hash(NetworkKind::Mainnet, [2; 20]);
+        let secondary = Address::from_pub_key_hash(NetworkKind::Mainnet, [1; 20]);
+        let unrelated = Address::from_pub_key_hash(NetworkKind::Mainnet, [9; 20]);
+
+        let mut batch = DiskWriteBatch::new();
+        let _ = db
+            .explorer_finalizer_miner_order_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerFinalizerMinerRankKey::new(finalizer, secondary, 100),
+                &(),
+            );
+        let _ = db
+            .explorer_finalizer_miner_order_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerFinalizerMinerRankKey::new(finalizer, primary, 200),
+                &(),
+            );
+        let _ = db
+            .explorer_finalizer_miner_order_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerFinalizerMinerRankKey::new([4; 32], unrelated, 300),
+                &(),
+            );
+        let _ = db
+            .explorer_finalizer_miner_totals_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &finalizer,
+                &ExplorerMinerStakeTotals {
+                    miner_address_count: 2,
+                    ..Default::default()
+                },
+            );
+        db.write_batch(batch)
+            .expect("writing finalizer miner summary fixtures should succeed");
+
+        let summary = db.explorer_finalizer_miner_summary(finalizer);
+        assert_eq!(summary.primary_miner_address, Some(primary));
+        assert_eq!(summary.miner_address_count, 2);
+    }
 
     #[test]
     fn primary_source_classification_keeps_transparent_funding() {

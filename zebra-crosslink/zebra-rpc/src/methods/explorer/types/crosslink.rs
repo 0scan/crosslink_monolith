@@ -164,6 +164,10 @@ pub struct CrosslinkFinalizerEntry {
     pub public_key: String,
     /// Self-authenticating finalizer address, when one has been revealed on chain.
     pub finalizer_address: Option<String>,
+    /// Recognized miner address contributing the most current stake to this finalizer.
+    pub primary_miner_address: Option<String>,
+    /// Number of distinct recognized miner addresses currently contributing stake.
+    pub miner_address_count: String,
     /// Current aggregated voting power in zatoshis.
     pub voting_power_zat: String,
     /// Percentage of all candidate stake, formatted with one decimal place.
