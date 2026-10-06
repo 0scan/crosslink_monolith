@@ -1147,6 +1147,15 @@ impl Service<ReadRequest> for ReadStateService {
                 ))
             }
 
+            // Stake at the PoW tip, not the BFT roster. Snapshot first: the helper then reads
+            // the database, and a block committed between the two would otherwise be in neither.
+            ReadRequest::CrosslinkBcTipRoster => {
+                let non_finalized_state = state.latest_non_finalized_state();
+                let (roster, signers) =
+                    read::delegation::bc_tip_roster(&non_finalized_state, &state.db);
+                Ok(ReadResponse::CrosslinkBcTipRoster { roster, signers })
+            }
+
             ReadRequest::CrosslinkRecencyStatus => Ok(ReadResponse::CrosslinkRecencyStatus(
                 crate::new_network::bft::bft_recency_status(),
             )),

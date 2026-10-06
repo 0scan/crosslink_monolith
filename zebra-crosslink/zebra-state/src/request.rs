@@ -1543,6 +1543,17 @@ pub enum ReadRequest {
     /// request: the roster is cloned once and then each member's key is resolved.
     CrosslinkRosterWithAddresses,
 
+    /// The validator set at the current best PoW tip, each member carrying the verified
+    /// finalizer address the chain has revealed for its key, plus the public keys that signed
+    /// the fat pointer that tip block carries.
+    ///
+    /// Unlike [`ReadRequest::CrosslinkRoster`], this is the stake at the PoW tip itself, not
+    /// the set the BFT machine is using. Zero-stake keys are omitted. Members are sorted by
+    /// public key.
+    ///
+    /// Returns [`ReadResponse::CrosslinkBcTipRoster`].
+    CrosslinkBcTipRoster,
+
     /// Tenderlink.s latest round-state snapshot: what this node has heard from each finalizer
     /// at its current height.
     CrosslinkRecencyStatus,
@@ -1684,6 +1695,7 @@ impl ReadRequest {
             ReadRequest::CrosslinkFatPointerToBftChainTip(_) => "crosslink_fat_pointer_to_bft_chain_tip",
             ReadRequest::CrosslinkRoster => "crosslink_roster",
             ReadRequest::CrosslinkRosterWithAddresses => "crosslink_roster_with_addresses",
+            ReadRequest::CrosslinkBcTipRoster => "crosslink_bc_tip_roster",
             ReadRequest::CrosslinkRecencyStatus => "crosslink_recency_status",
             ReadRequest::CrosslinkFinalizedTip => "crosslink_finalized_tip",
             ReadRequest::CrosslinkFinalizedTipChange => "crosslink_finalized_tip_change",

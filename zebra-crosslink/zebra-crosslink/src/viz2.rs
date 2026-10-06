@@ -446,6 +446,11 @@ pub async fn service_viz_requests(
     let mut view_scene: Option<VizScene> = None;
     let mut view_reset = false;
     let mut live_reset = false;
+    // Stake and fat-pointer signers at the PoW tip. Refreshed when that tip's hash changes;
+    // an unchanged tip cannot have grown a new validator set.
+    let mut bc_tip_roster: Vec<wallet::WalletRosterMember> = Vec::new();
+    let mut bc_tip_signers: Vec<Hash32> = Vec::new();
+    let mut bc_tip_roster_hash = None;
 
     while !zebra_chain::shutdown::is_shutting_down() {
         let request_queue = zebra_gui::REQUESTS_TO_ZEBRA.lock().unwrap();
@@ -488,7 +493,12 @@ pub async fn service_viz_requests(
                         }
                     }
                     if let Some(scene) = view_scene.as_ref() {
-                        if response_queue.try_send(scene.response(&request, view_reset)).is_ok() {
+                        // The file has no PoW tip of its own. Keep the live tip's roster so the
+                        // tab does not go blank for the duration of the view.
+                        let mut response = scene.response(&request, view_reset);
+                        response.bc_tip_roster = bc_tip_roster.clone();
+                        response.bc_tip_signers = bc_tip_signers.clone();
+                        if response_queue.try_send(response).is_ok() {
                             view_reset = false;
                         }
                     }
@@ -800,6 +810,24 @@ pub async fn service_viz_requests(
                         }
                     }
 
+                    if bc_tip_roster_hash != Some(tip_height_hash.1) {
+                        if let Ok(StateReadResponse::CrosslinkBcTipRoster { roster, signers }) =
+                            (call.read_state)(StateReadRequest::CrosslinkBcTipRoster).await
+                        {
+                            bc_tip_roster = roster
+                                .into_iter()
+                                .map(|member| wallet::WalletRosterMember {
+                                    pub_key: member.pub_key,
+                                    voting_power: member.voting_power,
+                                    txids: Vec::new(),
+                                    finalizer_address: member.finalizer_address,
+                                })
+                                .collect();
+                            bc_tip_signers = signers.into_iter().map(Hash32::from_bytes).collect();
+                            bc_tip_roster_hash = Some(tip_height_hash.1);
+                        }
+                    }
+
                     let internal = zebra_state::new_network::bft::bft_chain().read().unwrap();
                     let mut response = zebra_gui::ResponseFromZebra::_0();
                     response.reset_blocks = live_reset;
@@ -834,6 +862,8 @@ pub async fn service_viz_requests(
                     response.pos_tip_signers = internal.fat_pointer_to_tip.signatures.iter()
                         .map(|sig| Hash32::from_bytes(sig.pub_key.0))
                         .collect();
+                    response.bc_tip_roster = bc_tip_roster.clone();
+                    response.bc_tip_signers = bc_tip_signers.clone();
                     response.instr_strings = instr_strings.clone();
                     response.instr_done_n = *TEST_INSTR_C.lock().unwrap();
                     response.instr_failed = TEST_FAILED_INSTR_IDXS.lock().unwrap().clone();

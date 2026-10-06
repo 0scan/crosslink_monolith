@@ -187,6 +187,10 @@ pub struct ResponseFromZebra {
     pub instr_failed: Vec<(usize, String)>,
     /// Public keys of the finalizers whose signatures are on the fat pointer to the BFT tip.
     pub pos_tip_signers: Vec<Hash32>,
+    /// Validator set at the current PoW tip. Not the BFT roster: stake at the tip block itself.
+    pub bc_tip_roster: Vec<wallet::WalletRosterMember>,
+    /// Public keys that signed the fat pointer the PoW tip block carries, in block order.
+    pub bc_tip_signers: Vec<Hash32>,
 
     pub bft_recency: wallet::TFLRecencyStatus,
 
@@ -225,6 +229,8 @@ impl ResponseFromZebra {
             instr_done_n: 0,
             instr_failed: Vec::new(),
             pos_tip_signers: Vec::new(),
+            bc_tip_roster: Vec::new(),
+            bc_tip_signers: Vec::new(),
             bft_recency: wallet::TFLRecencyStatus::default(),
             blacklisted_finalizers: Vec::new(),
             reset_blocks: false,
@@ -489,6 +495,10 @@ pub struct VizState {
     pub pow_peer_count: usize,
     pub mempool_tx_strings: Vec<String>,
     pub pos_tip_signers: Vec<Hash32>,
+    /// Validator set at the current PoW tip. Not the BFT roster.
+    pub bc_tip_roster: Vec<wallet::WalletRosterMember>,
+    /// Public keys that signed the fat pointer the PoW tip block carries.
+    pub bc_tip_signers: Vec<Hash32>,
 }
 
 impl VizState {
@@ -764,6 +774,8 @@ pub fn viz_gui_init(fake_data: bool) -> VizState {
         pow_peer_count: 0,
         mempool_tx_strings: Vec::new(),
         pos_tip_signers: Vec::new(),
+        bc_tip_roster: Vec::new(),
+        bc_tip_signers: Vec::new(),
     };
 
     if fake_data {
@@ -911,6 +923,11 @@ pub fn viz_gui_anything_happened_at_all(viz_state: &mut VizState) -> bool {
 
         anything_happened |= viz_state.pos_tip_signers != message.pos_tip_signers;
         viz_state.pos_tip_signers = message.pos_tip_signers;
+
+        anything_happened |= viz_state.bc_tip_roster != message.bc_tip_roster;
+        viz_state.bc_tip_roster = message.bc_tip_roster;
+        anything_happened |= viz_state.bc_tip_signers != message.bc_tip_signers;
+        viz_state.bc_tip_signers = message.bc_tip_signers;
 
         anything_happened |= viz_state.instr_strings != message.instr_strings;
         viz_state.instr_strings = message.instr_strings;

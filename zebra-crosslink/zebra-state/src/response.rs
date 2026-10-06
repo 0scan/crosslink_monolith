@@ -454,6 +454,15 @@ pub enum ReadResponse {
         )>,
     ),
 
+    /// Response to [`ReadRequest::CrosslinkBcTipRoster`]. `roster` is the stake at the PoW
+    /// tip, sorted by public key; `signers` are the fat-pointer keys that tip block carries.
+    CrosslinkBcTipRoster {
+        /// Finalizers with non-zero stake at the PoW tip, address filled in when known.
+        roster: Vec<zcash_primitives::transaction::RosterMember>,
+        /// Public keys of the signatures on the PoW tip's fat pointer, in block order.
+        signers: Vec<[u8; 32]>,
+    },
+
     /// Response to [`ReadRequest::CrosslinkRecencyStatus`].
     CrosslinkRecencyStatus(zcash_primitives::bft::TFLRecencyStatus),
 
@@ -773,6 +782,7 @@ impl TryFrom<ReadResponse> for Response {
             | ReadResponse::CrosslinkFatPointerToBftChainTip(_)
             | ReadResponse::CrosslinkRoster(_)
             | ReadResponse::CrosslinkRosterWithAddresses(_)
+            | ReadResponse::CrosslinkBcTipRoster { .. }
             | ReadResponse::CrosslinkRecencyStatus(_)
             | ReadResponse::CrosslinkFinalizedTip(_)
             | ReadResponse::CrosslinkFinalizedTipChange(_)

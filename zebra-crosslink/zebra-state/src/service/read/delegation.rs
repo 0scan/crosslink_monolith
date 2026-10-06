@@ -227,6 +227,77 @@ pub(crate) fn first_verified_addresses<'a>(
     found
 }
 
+/// The validator set at the current best PoW tip, and the finalizers who signed the fat
+/// pointer that tip block carries.
+///
+/// This is not the BFT roster. That roster is the set at the BFT snapshot, or the last
+/// non-empty roster when the snapshot's stakes are empty. Here each entry is a finalizer
+/// with stake at the PoW tip itself: active bonds plus that finalizer's reward bank, the
+/// same sum the per-block snapshot stores. Zero-stake keys are dropped. Members are sorted
+/// by public key so a repeated read of an unchanged tip compares equal.
+///
+/// `non_finalized_state` must be a snapshot taken before this function reads `db`. The write
+/// task commits a block to the database before it publishes a non-finalized state without
+/// that block, so the tip is then visible through at least one of the two views (see
+/// [`finalizer_addresses`]).
+pub fn bc_tip_roster(
+    non_finalized_state: &NonFinalizedState,
+    db: &ZebraDb,
+) -> (
+    Vec<zcash_primitives::transaction::RosterMember>,
+    Vec<[u8; 32]>,
+) {
+    // Same tip `read::find::tip` returns: the non-finalized best chain's tip when a chain
+    // exists, otherwise the finalized tip. An overlap where the finalized tip is ahead is
+    // acceptable either way, matching the other tip readers.
+    let chain = non_finalized_state.best_chain();
+    let Some((_, hash)) = super::find::tip(chain, db) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let stakes = chain
+        .and_then(|chain| chain.aggregated_stakes_at(hash))
+        .or_else(|| db.aggregated_stakes(&hash))
+        .unwrap_or_default();
+
+    let signers = super::find::tip_block(chain, db)
+        .filter(|block| block.hash() == hash)
+        .map(|block| fat_pointer_signers(block.as_ref()))
+        .unwrap_or_default();
+
+    let mut stakes: Vec<_> = stakes
+        .into_iter()
+        .filter(|(_, power)| *power > 0)
+        .collect();
+    stakes.sort_by_key(|(key, _)| *key);
+
+    let keys: Vec<[u8; 32]> = stakes.iter().map(|(key, _)| *key).collect();
+    let addresses = finalizer_addresses(non_finalized_state, db, &keys);
+    let roster = stakes
+        .into_iter()
+        .zip(addresses)
+        .map(|((pub_key, voting_power), finalizer_address)| {
+            zcash_primitives::transaction::RosterMember {
+                pub_key,
+                voting_power,
+                txids: Vec::new(),
+                finalizer_address,
+            }
+        })
+        .collect();
+    (roster, signers)
+}
+
+fn fat_pointer_signers(block: &zebra_chain::block::Block) -> Vec<[u8; 32]> {
+    block
+        .header
+        .fat_pointer_to_bft_block
+        .signatures
+        .iter()
+        .map(|sig| sig.pub_key.0)
+        .collect()
+}
+
 #[cfg(test)]
 mod finalizer_address_tests {
     use std::collections::HashSet;

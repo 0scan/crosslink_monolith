@@ -1373,6 +1373,45 @@ fn roster_member_identity(member: &WalletRosterMember) -> (&'static str, String,
     }
 }
 
+fn finalizer_identity(pub_key: [u8; 32], address: Option<wallet::bft::FinalizerAddress>) -> (&'static str, String, String, String) {
+    roster_member_identity(&WalletRosterMember {
+        pub_key,
+        voting_power: 0,
+        txids: Vec::new(),
+        finalizer_address: address,
+    })
+}
+
+/// The roster row as one string: `zfinv1` plus the truncated unique part, or the unknown label.
+fn finalizer_identity_inline(pub_key: &[u8; 32], address: Option<wallet::bft::FinalizerAddress>) -> String {
+    let (prefix, label, _, _) = finalizer_identity(*pub_key, address);
+    if prefix.is_empty() { label } else { format!("{prefix}{label}") }
+}
+
+fn shown_finalizer(
+    addresses: &HashMap<[u8; 32], wallet::bft::FinalizerAddress>,
+    pk: &[u8; 32],
+    address: Option<wallet::bft::FinalizerAddress>,
+) -> String {
+    finalizer_identity_inline(pk, address.or_else(|| addresses.get(pk).copied()))
+}
+
+fn remember_finalizer_address(map: &mut HashMap<[u8; 32], wallet::bft::FinalizerAddress>, address: Option<wallet::bft::FinalizerAddress>) {
+    let Some(address) = address else { return };
+    if map.contains_key(&address.pub_key.0) { return; }
+    if address.verify() {
+        map.insert(address.pub_key.0, address);
+    }
+}
+
+/// Small `zfinv1` prefix plus the truncated unique part, matching the roster row.
+fn ui_roster_identity_text(ui: &Context, data: &mut UiData, prefix: &str, label: &str, colour: (u8, u8, u8, u8), label_h: f32) {
+    if !prefix.is_empty() {
+        ui.text(frame_strf!(data, "{}", prefix), TextDecl { font: Mono, colour, h: ui.scale(11.0), wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
+    }
+    ui.text(frame_strf!(data, "{}", label), TextDecl { font: Mono, colour, h: label_h, wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
+}
+
 fn get_finalizer_status(bft_status: &wallet::TFLRecencyStatus, pub_key: [u8;32]) -> Option<&FinalizerRecencyStatus> {
     bft_status.finalizer_statuses.iter().find(|(pk,_)| pk.0 == pub_key).map(|st| &st.1)
 }
@@ -1511,7 +1550,9 @@ pub fn finalizer_ratio_bar(ui: &mut Context, data: &mut UiData, bft_status: &wal
                     let online_str = ["OFFLINE", "ONLINE"][is_online as usize];
                     if is_real_finalizers{
                         let bank = bank_balance(&data.finalizer_banks, &finalizer.pub_key);
-                        set_tooltip_text!(data, "{}  {}  {} cTAZ    {:.2}%    commission bank: {} cTAZ", display_str(&chunkify(&finalizer.pub_key)), online_str, str_from_ctaz(finalizer.voting_power), 100.0*pct, str_from_ctaz(bank));
+                        let name = finalizer_identity_inline(&finalizer.pub_key, finalizer.finalizer_address);
+                        set_tooltip_text!(data, "{}  {}  {} cTAZ    {:.2}%    commission bank: {} cTAZ", name, online_str, str_from_ctaz(finalizer.voting_power), 100.0*pct, str_from_ctaz(bank));
+                        data.tooltip_font = Mono;
                     } else {
                         set_tooltip_text!(data, "Total: {}  {} cTAZ    {:.2}%", str_from_ctaz(finalizer.voting_power), online_str, 100.0*pct);
                     }
@@ -1629,16 +1670,42 @@ pub fn ui_left_pane(ui: &mut Context,
 
     // USER STAKING POSITIONS
     // TODO: phillip audaciously deleted the accumulated bond amount field, bring that back
+    // Verified zfinv1 capabilities for names in this pane. A key's address is
+    // deterministic, so the first source that verifies wins: this wallet's stake
+    // txs, then the BFT roster, then the PoW-tip roster.
+    let mut finalizer_addresses: HashMap<[u8; 32], wallet::bft::FinalizerAddress> = HashMap::new();
     let mut staked_roster_unbonded: Vec<([u8; 32] /* bond key */, [u8; 32] /* target finalizer */, u64 /* current estimated */)>;
     let mut staked_roster_bonded: Vec<([u8; 32] /* bond key */, [u8; 32] /* target finalizer */, u64 /* current estimated */)>;
     let mut bonded_finalizers = Vec::<WalletRosterMember>::new();
     let (mut total_bonded, mut total_unbonded) = (0, 0);
     {
+        let mut address_candidates: Vec<wallet::bft::FinalizerAddress> = Vec::new();
         {
             let lock = wallet_state.lock().unwrap();
+            for tx in lock.user_txs.iter().chain(lock.miner_txs.iter()) {
+                if let Some(action) = tx.staking_action {
+                    if let Some(address) = action.target_finalizer_address() { address_candidates.push(address); }
+                    if let Some(address) = action.from_finalizer_address() { address_candidates.push(address); }
+                }
+            }
+            for tx in lock.user_local_txs.iter().chain(lock.miner_local_txs.iter()) {
+                if let Some(action) = tx.staking_action {
+                    if let Some(address) = action.target_finalizer_address() { address_candidates.push(address); }
+                    if let Some(address) = action.from_finalizer_address() { address_candidates.push(address); }
+                }
+            }
+            for member in &lock.roster {
+                if let Some(address) = member.finalizer_address { address_candidates.push(address); }
+            }
             // withdrawable bonds are no longer targeted at a finalizer; keep the tuple shape with a nil key
             staked_roster_unbonded = lock.stake_positions_unbonded.iter().map(|(bond, latest_zats)| (bond.pk.0, [0u8; 32], *latest_zats)).collect();
             staked_roster_bonded = lock.stake_positions_bonded.iter().map(|(bond, finalizer, latest_zats)| (bond.pk.0, *finalizer, *latest_zats)).collect();
+        }
+        for member in &viz.bc_tip_roster {
+            if let Some(address) = member.finalizer_address { address_candidates.push(address); }
+        }
+        for address in address_candidates {
+            remember_finalizer_address(&mut finalizer_addresses, Some(address));
         }
 
         staked_roster_unbonded.sort_by_key(|x| std::cmp::Reverse((x.1, x.2)));
@@ -1664,7 +1731,7 @@ pub fn ui_left_pane(ui: &mut Context,
                     pub_key: finalizer,
                     voting_power: position,
                     txids: Vec::new(),
-                    finalizer_address: None,
+                    finalizer_address: finalizer_addresses.get(&finalizer).copied(),
                 });
             }
 
@@ -2613,9 +2680,12 @@ pub fn ui_left_pane(ui: &mut Context,
                                             }
 
                                             let mut is_hovered = data.hovered_finalizer_pk == finalizer;
-                                            let label = frame_strf!(data, "{}", display_str(&chunkify(&finalizer)));
-                                            let id = id_index(label, index);
-                                            is_hovered |= ui.hovered(id);
+                                            // Id stays on the raw key so the open state doesn't reset when an address arrives.
+                                            let id_label = frame_strf!(data, "{}", display_str(&chunkify(&finalizer)));
+                                            let id = id_index(id_label, index);
+                                            let header_hovered = ui.hovered(id);
+                                            is_hovered |= header_hovered;
+                                            let (address_prefix, address_label, _, address_tooltip) = finalizer_identity(finalizer, finalizer_addresses.get(&finalizer).copied());
 
                                             let colour = BUTTON_GREY.mul(0.6);
 
@@ -2660,13 +2730,27 @@ pub fn ui_left_pane(ui: &mut Context,
 
                                                 ui_colour_chip(ui, chip_h, colour_from_hash(&finalizer, is_online), is_hovered, chip_icon, chip_icon_colour);
 
-                                                ui.text(label, TextDecl { colour: text_colour, h, align: AlignX::Left, ..TextDecl });
-                                                let _ = elem().decl(Decl { width: grow!(), ..Decl });
+                                                if let _ = elem().decl(Decl {
+                                                    id: id_index("Edit Stake Finalizer Name", index),
+                                                    height: fixed!(h),
+                                                    width: grow!(),
+                                                    direction: LeftToRight,
+                                                    align: TopLeft,
+                                                    clip: ClipX,
+                                                    ..Decl
+                                                }) {
+                                                    ui_roster_identity_text(ui, data, address_prefix, &address_label, text_colour, h);
+                                                }
                                                 let pct = 100.0 * (total_bonded_to_finalizer as f64 / total_bonded as f64);
                                                 let colour = (0xff, 0xaf, 0x0e, 0xff);
                                                 ui.text(frame_strf!(data, "{} cTAZ ({:.2}%)", str_from_ctaz(total_bonded_to_finalizer), pct), TextDecl { font: Mono, colour, h: ui.scale(12.0), align: AlignX::Right, ..TextDecl });
                                             }
 
+                                            if header_hovered {
+                                                set_tooltip_text!(data, "{}", address_tooltip);
+                                                data.tooltip_wrap = Wrap::None;
+                                                data.tooltip_font = Mono;
+                                            }
                                             if is_hovered {
                                                 data.hovered_finalizer_pk = finalizer;
                                             }
@@ -3178,22 +3262,22 @@ pub fn ui_left_pane(ui: &mut Context,
                                         // NOTE: this assumes that objects maintain bond keys after retargeting
                                         if let Some(staking_action) = tx.staking_action {
                                             let sent_stake = (tx_kind == WalletTxKind::Stake || tx_kind == WalletTxKind::Retarget);
+                                            let target_name = shown_finalizer(&finalizer_addresses, &staking_action.target_finalizer_pk(), staking_action.target_finalizer_address());
 
                                             if sent_stake {
                                                 for bond in &staked_roster_bonded {
                                                     if bond.0 == staking_action.bond_key() {
-                                                        // TODO: split mono
                                                         break 'get_label if bond.1 != staking_action.target_finalizer_pk() {
-                                                            frame_strf!(data, "{} @ {} to {} (moved to {}), now {} cTAZ", label, tx_h.0, display_str(&chunkify(&staking_action.target_finalizer_pk())), display_str(&chunkify(&bond.1)), str_from_ctaz(bond.2))
+                                                            frame_strf!(data, "{} @ {} to {} (moved to {}), now {} cTAZ", label, tx_h.0, target_name, shown_finalizer(&finalizer_addresses, &bond.1, None), str_from_ctaz(bond.2))
                                                         } else {
-                                                            frame_strf!(data, "{} @ {} to {}, now {} cTAZ", label, tx_h.0, display_str(&chunkify(&staking_action.target_finalizer_pk())), str_from_ctaz(bond.2))
+                                                            frame_strf!(data, "{} @ {} to {}, now {} cTAZ", label, tx_h.0, target_name, str_from_ctaz(bond.2))
                                                         };
                                                     }
                                                 }
 
                                                 for bond in &staked_roster_unbonded {
                                                     if bond.0 == staking_action.bond_key() {
-                                                        break 'get_label frame_strf!(data, "{} @ {} to {} (unstaked), now {} cTAZ", label, tx_h.0, display_str(&chunkify(&staking_action.target_finalizer_pk())), str_from_ctaz(bond.2))
+                                                        break 'get_label frame_strf!(data, "{} @ {} to {} (unstaked), now {} cTAZ", label, tx_h.0, target_name, str_from_ctaz(bond.2))
                                                     }
                                                 }
                                             }
@@ -3223,7 +3307,7 @@ pub fn ui_left_pane(ui: &mut Context,
                                             if let Some(withdrawal) = withdrawal {
                                                 let (b, h) = withdrawal;
                                                 break 'get_label if sent_stake {
-                                                    frame_strf!(data, "{} @ {} to {}, claimed @ {} for {} cTAZ", label, tx_h.0, display_str(&chunkify(&staking_action.target_finalizer_pk())), h, str_from_ctaz(b.spent_zats.into_u64()))
+                                                    frame_strf!(data, "{} @ {} to {}, claimed @ {} for {} cTAZ", label, tx_h.0, target_name, h, str_from_ctaz(b.spent_zats.into_u64()))
                                                 } else {
                                                     frame_strf!(data, "{} @ {}, claimed @ {} for {} cTAZ", label, tx_h.0, h, str_from_ctaz(b.spent_zats.into_u64()))
                                                 };
@@ -3231,7 +3315,7 @@ pub fn ui_left_pane(ui: &mut Context,
 
                                             // fallback if not found anywhere, not ideal
                                             if sent_stake {
-                                                frame_strf!(data, "{} @ {} to {}", label, tx_h.0, display_str(&chunkify(&staking_action.target_finalizer_pk())))
+                                                frame_strf!(data, "{} @ {} to {}", label, tx_h.0, target_name)
                                             } else {
                                                 frame_strf!(data, "{} @ {}", label, tx_h.0)
                                             }
@@ -3399,7 +3483,7 @@ pub fn ui_right_pane(ui: &mut Context,
     let mut tab_id_faucet = Id::default();
     let mut tab_id_roster = Id::default();
 
-    let (mut filters, wallet_is_init, mut roster) = {
+    let (mut filters, wallet_is_init, mut bft_roster) = {
         let state = wallet_state.lock().unwrap();
 
         (state.filters, state.wallet_is_init, state.roster.clone())
@@ -3409,14 +3493,19 @@ pub fn ui_right_pane(ui: &mut Context,
 
     // Terminated (blacklisted) finalizers sink to the bottom; within each group,
     // sort by voting power descending as before.
-    roster.sort_by_key(|member| {
+    let by_power = |member: &WalletRosterMember| {
         (
             terminated_finalizers.contains(&member.pub_key),
             std::cmp::Reverse(member.voting_power),
         )
-    });
-    let roster = roster;
+    };
+    bft_roster.sort_by_key(&by_power);
+    let mut bc_roster = viz.bc_tip_roster.clone();
+    bc_roster.sort_by_key(&by_power);
 
+    // id() folds in the parent element, so the tab id has to be taken inside the bar
+    // and compared against that same value. Hashing "BC Tip" out here would not match.
+    let mut bc_tip_tab = Id::default();
     if let _ = elem().decl(Decl {
         id: id("Finalizers Tab Bar"),
         child_gap,
@@ -3425,8 +3514,17 @@ pub fn ui_right_pane(ui: &mut Context,
         align: Center,
         ..Decl
     }) {
-        tab_id_roster = ui.tab_ex((0.0, radius.1, radius.2, radius.3), padding, dummy_1, id("Finalizers"), frame_strf!(data, "Finalizers ({})", roster.len()));
+        let tab_radius = (0.0, radius.1, radius.2, radius.3);
+        tab_id_roster = ui.tab_ex(tab_radius, padding, dummy_1, id("Finalizers"), frame_strf!(data, "Finalizers ({})", bft_roster.len()));
+        bc_tip_tab = id("BC Tip");
+        let _ = ui.tab_ex(tab_radius, padding, dummy_1, bc_tip_tab, frame_strf!(data, "BC Tip ({})", bc_roster.len()));
     }
+    // Finalizers is the BFT roster (the set the BFT machine is using). BC Tip is the
+    // stake at the current PoW tip, and the fat-pointer signatures that tip block carries.
+    let showing_bc_tip = bc_tip_tab != Id::default() && *dummy_1 == bc_tip_tab;
+    let roster = if showing_bc_tip { bc_roster } else { bft_roster };
+    let tip_signers: &[Hash32] = if showing_bc_tip { &viz.bc_tip_signers } else { &viz.pos_tip_signers };
+    let signer_noun = if showing_bc_tip { "PoW tip" } else { "PoS tip" };
     if let _ = elem().decl(Decl {
         id: id("Finalizers Contents"),
         padding: (padding.0, padding.1, 0.0, padding.3), child_gap,
@@ -3681,10 +3779,10 @@ pub fn ui_right_pane(ui: &mut Context,
 
         finalizer_ratio_bar(ui, data, bft_status, &bar_roster, total_stake, height, seconds_since_connected, &filters, ui::id("Right Pane Ratio Bar 2"), true);
 
-        // Who actually signed the fat pointer to the BFT tip. Chips share colours with
-        // the roster below and light up when the matching roster member is hovered.
-        if viz.pos_tip_signers.len() > 0 {
-            let sig_row_id = id("PoS Tip Signatures");
+        // Who signed the fat pointer for the tab's tip. Chips share colours with the
+        // roster below and light up when the matching roster member is hovered.
+        if tip_signers.len() > 0 {
+            let sig_row_id = id("Tip Signatures");
             if let _ = elem().decl(Decl {
                 id: sig_row_id,
                 child_gap: ui.scale(4.0),
@@ -3693,15 +3791,19 @@ pub fn ui_right_pane(ui: &mut Context,
                 height: fit!(),
                 ..Decl
             }) {
-                let n = viz.pos_tip_signers.len();
-                ui.text(frame_strf!(data, "{} sig{} for PoS tip", n, if n == 1 { "" } else { "s" }), TextDecl { h: ui.scale(14.0), colour: WHITE.mul(0.7), wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
-                for signer in viz.pos_tip_signers.iter().take(32) {
+                let n = tip_signers.len();
+                ui.text(frame_strf!(data, "{} sig{} for {}", n, if n == 1 { "" } else { "s" }, signer_noun), TextDecl { h: ui.scale(14.0), colour: WHITE.mul(0.7), wrap: Wrap::None, align: AlignX::Left, ..TextDecl });
+                for signer in tip_signers.iter().take(32) {
                     let pk = signer.as_bytes();
                     ui_colour_chip(ui, ui.scale(16.0), colour_from_hash(&pk, true), data.hovered_finalizer_pk == pk, "", WHITE);
                 }
             }
             if ui.hovered(sig_row_id) {
-                set_tooltip_text!(data, "Finalizers whose signatures are on the fat pointer to the current BFT tip.");
+                if showing_bc_tip {
+                    set_tooltip_text!(data, "Finalizers whose signatures are on the fat pointer the current PoW tip block carries.");
+                } else {
+                    set_tooltip_text!(data, "Finalizers whose signatures are on the fat pointer to the current BFT tip.");
+                }
             }
         }
 
@@ -3714,7 +3816,7 @@ pub fn ui_right_pane(ui: &mut Context,
         ui.scroll_container_bgn(data, padding, child_gap * 0.5, id, clip, scroll, content_h, viewport_h, max);
         {
 
-            if wallet_is_init == false || roster.len() == 0 {
+            if roster.is_empty() || (!showing_bc_tip && !wallet_is_init) {
                 let h = ui.scale(24.0);
                 if let _ = elem().decl(Decl {
                     direction: TopToBottom,
@@ -3725,7 +3827,7 @@ pub fn ui_right_pane(ui: &mut Context,
                     ..Decl
                 }) {
                     ui.text(ICON_EYE_OFF, TextDecl { font: Icons, colour: WHITE.mul(0.6), h: ui.scale(64.0), align: AlignX::Center, ..TextDecl });
-                    let (text, font) = if ! wallet_is_init {
+                    let (text, font) = if !showing_bc_tip && !wallet_is_init {
                         (animated_loading_icon(ui), FontKind::Icons)
                     } else {
                         ("There are no finalizers yet.", FontKind::Normal)

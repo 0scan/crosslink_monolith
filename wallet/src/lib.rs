@@ -988,7 +988,7 @@ impl WalletTx {
 }
 
 // @note(judah): needed so the visualizer doesn't take a dependency on zcash_primitives
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct WalletRosterMember {
     pub pub_key: [u8; 32],
     pub voting_power: u64,
