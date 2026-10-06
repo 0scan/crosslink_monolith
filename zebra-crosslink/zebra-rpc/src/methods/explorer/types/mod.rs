@@ -13,11 +13,15 @@ pub(in crate::methods) use zebra_indexer::{
 
 #[cfg(feature = "indexer")]
 pub(super) use crosslink::{
-    CrosslinkActivationMilestone, CrosslinkActivationOverview, CrosslinkFinalityOverview,
-    CrosslinkFinalityStatus, CrosslinkFinalizersOverview, CrosslinkMinersOverview,
+    CrosslinkActivationMilestone, CrosslinkActivationOverview, CrosslinkBftStep,
+    CrosslinkFinalityOverview, CrosslinkFinalityStatus, CrosslinkFinalizerEntry,
+    CrosslinkFinalizerSetStatus, CrosslinkFinalizersOverview, CrosslinkMinersOverview,
     CrosslinkPhase, CrosslinkStakingChange, CrosslinkStakingOverview, CrosslinkStakingStatus,
+    CrosslinkVoteSummary,
 };
-pub use crosslink::CrosslinkNetworkStats;
+pub use crosslink::{
+    CrosslinkFinalizerLivenessResponse, CrosslinkFinalizersResponse, CrosslinkNetworkStats,
+};
 pub use mempool::{
     MempoolTransactionListItem, MempoolTransactionMetadata, MempoolTransactionSummary,
     MempoolTransactionsResponse, PendingTransactionDetails, TransactionDetailsResponse,

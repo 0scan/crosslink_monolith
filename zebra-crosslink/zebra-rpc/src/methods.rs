@@ -120,11 +120,12 @@ pub mod types;
 
 use explorer::types::{
     AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
-    BlocksResponse, ChartDataRequest, ChartDataResponse, ExplorerNetworkStatsResponse,
-    GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
-    GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
-    MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
-    TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
+    BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkFinalizerLivenessResponse,
+    CrosslinkFinalizersResponse, ExplorerNetworkStatsResponse, GetAddressTransactionsRequest,
+    GetAddressUtxosPageRequest, GetBlocksRequest, GetMempoolTransactionsRequest,
+    GetTransactionsRequest, IndexerStatusResponse, MempoolTransactionsResponse,
+    MinerInfoResponse, TopBalancesRequest, TopBalancesResponse, TopMinersRequest,
+    TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
 };
 use hex_data::HexData;
 use trees::{GetSubtreesByIndexResponse, GetTreestateResponse, SubtreeRpcData};
@@ -928,6 +929,16 @@ pub trait Rpc {
     /// Returns persisted canonical aggregates and live node network statistics.
     #[method(name = "getnetworkstats")]
     async fn get_network_stats(&self) -> Result<ExplorerNetworkStatsResponse>;
+
+    /// Returns every finalizer candidate ranked by current best-chain aggregated stake.
+    #[method(name = "getcrosslinkfinalizers")]
+    async fn get_crosslink_finalizers(&self) -> Result<CrosslinkFinalizersResponse>;
+
+    /// Returns node-local connection and voting observations for the active finalizer set.
+    #[method(name = "getcrosslinkfinalizerliveness")]
+    async fn get_crosslink_finalizer_liveness(
+        &self,
+    ) -> Result<CrosslinkFinalizerLivenessResponse>;
 
     /// Returns date-paginated daily explorer chart snapshots.
     #[method(name = "getexplorerchartdata")]
@@ -3487,6 +3498,16 @@ where
 
     async fn get_network_stats(&self) -> Result<ExplorerNetworkStatsResponse> {
         self.explorer_get_network_stats().await
+    }
+
+    async fn get_crosslink_finalizers(&self) -> Result<CrosslinkFinalizersResponse> {
+        self.explorer_get_crosslink_finalizers().await
+    }
+
+    async fn get_crosslink_finalizer_liveness(
+        &self,
+    ) -> Result<CrosslinkFinalizerLivenessResponse> {
+        self.explorer_get_crosslink_finalizer_liveness().await
     }
 
     async fn get_explorer_chart_data(

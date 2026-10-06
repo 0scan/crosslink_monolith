@@ -51,6 +51,30 @@ pub enum CrosslinkStakingChange {
     Closes,
 }
 
+/// Selection state of the finalizer set shown by the explorer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CrosslinkFinalizerSetStatus {
+    /// Rankings can still change before the configured selection height.
+    Projected,
+    /// The first finalizer set has been selected, but BFT has not activated yet.
+    Selected,
+    /// Crosslink BFT is active.
+    Active,
+}
+
+/// Current Tenderlink consensus step observed by this node.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CrosslinkBftStep {
+    /// A proposal is being selected or propagated.
+    Propose,
+    /// Finalizers are sending prevotes.
+    Prevote,
+    /// Finalizers are sending precommits.
+    Precommit,
+}
+
 /// Compact miner totals for the overview card.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkMinersOverview {
@@ -112,17 +136,125 @@ pub struct CrosslinkStakingOverview {
     pub finalizer_rewards_zat: String,
 }
 
-/// Current BFT roster totals.
+/// Compact finalizer totals for the network overview.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkFinalizersOverview {
-    /// Finalizers present in the current roster.
-    pub roster_count: String,
-    /// Members of the roster that have active voting slots.
+    /// Whether the ranked set is projected, selected, or active.
+    pub status: CrosslinkFinalizerSetStatus,
+    /// Finalizer public keys that currently have aggregated stake.
+    pub candidate_count: String,
+    /// Candidates that currently fall within the voting cap.
     pub active_count: String,
     /// Consensus maximum number of active finalizers.
     pub active_limit: String,
-    /// Voting power held by active roster members, in zatoshis.
-    pub active_voting_power_zat: String,
+    /// Aggregated stake held by the active top-ranked candidates, in zatoshis.
+    pub active_stake_zat: String,
+    /// Height that fixes the first Crosslink finalizer set.
+    pub selection_height: Option<String>,
+}
+
+/// One finalizer candidate ranked by current aggregated stake.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkFinalizerEntry {
+    /// One-based rank by voting power, with public key as the deterministic tie-breaker.
+    pub rank: String,
+    /// Finalizer public key encoded for display and stable identity.
+    pub public_key: String,
+    /// Self-authenticating finalizer address, when one has been revealed on chain.
+    pub finalizer_address: Option<String>,
+    /// Current aggregated voting power in zatoshis.
+    pub voting_power_zat: String,
+    /// Percentage of all candidate stake, formatted with one decimal place.
+    pub total_stake_share_percent: String,
+    /// Percentage of active top-ranked stake, or `None` outside the active cap.
+    pub active_stake_share_percent: Option<String>,
+    /// Whether this candidate currently falls within the active voting cap.
+    pub active: bool,
+}
+
+/// All finalizer candidates at one best-chain stake snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkFinalizersResponse {
+    /// Whether this ranking is projected, selected, or active.
+    pub status: CrosslinkFinalizerSetStatus,
+    /// Height of the best-chain stake snapshot.
+    pub snapshot_height: Option<String>,
+    /// Hash of the best-chain stake snapshot.
+    pub snapshot_hash: Option<String>,
+    /// Height that fixes the first Crosslink finalizer set.
+    pub selection_height: Option<String>,
+    /// Height at which Crosslink BFT activates.
+    pub activation_height: Option<String>,
+    /// Finalizer public keys that currently have aggregated stake.
+    pub candidate_count: String,
+    /// Candidates that currently fall within the voting cap.
+    pub active_count: String,
+    /// Consensus maximum number of active finalizers.
+    pub active_limit: String,
+    /// Aggregated stake across all candidates, in zatoshis.
+    pub total_stake_zat: String,
+    /// Aggregated stake across the active top-ranked candidates, in zatoshis.
+    pub active_stake_zat: String,
+    /// Complete candidate ranking. The server does not truncate this list.
+    pub items: Vec<CrosslinkFinalizerEntry>,
+}
+
+/// Vote messages observed by this node at its current BFT height.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkVoteSummary {
+    /// Yes prevotes observed across all retained rounds at the current height.
+    pub prevote_yes_count: String,
+    /// Nil prevotes observed across all retained rounds at the current height.
+    pub prevote_nil_count: String,
+    /// Yes precommits observed across all retained rounds at the current height.
+    pub precommit_yes_count: String,
+    /// Nil precommits observed across all retained rounds at the current height.
+    pub precommit_nil_count: String,
+}
+
+/// Node-local finalizer connection and voting observations.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkFinalizerLivenessResponse {
+    /// Observation scope, currently always `local_node`.
+    pub scope: String,
+    /// Whether Tenderlink has published a live round-state snapshot.
+    pub available: bool,
+    /// Unix time at which Tenderlink produced the observation.
+    pub observed_at: Option<String>,
+    /// Maximum packet age used to classify a finalizer as connected.
+    pub connection_window_seconds: String,
+    /// Current BFT height observed by this node.
+    pub bft_height: Option<String>,
+    /// Current BFT round observed by this node.
+    pub round: Option<String>,
+    /// Current BFT step observed by this node.
+    pub step: Option<CrosslinkBftStep>,
+    /// Active finalizers considered by the observation.
+    pub total_count: String,
+    /// Voting power across the active finalizers, in zatoshis.
+    pub total_stake_zat: String,
+    /// Active finalizers seen through a direct connection within the configured window.
+    pub connected_count: String,
+    /// Voting power belonging to recently connected finalizers, in zatoshis.
+    pub connected_stake_zat: String,
+    /// Share of active stake that was recently connected.
+    pub connected_stake_percent: String,
+    /// Active finalizers not recently seen through a direct connection.
+    pub offline_count: String,
+    /// Voting power belonging to finalizers not recently connected, in zatoshis.
+    pub offline_stake_zat: String,
+    /// Distinct active finalizers from which any current-height vote was observed.
+    pub voted_count: String,
+    /// Voting power belonging to finalizers that voted at the current height.
+    pub voted_stake_zat: String,
+    /// Share of active stake that voted at the current height.
+    pub voted_stake_percent: String,
+    /// Active finalizers from which no current-height vote was observed.
+    pub silent_count: String,
+    /// Voting power belonging to silent finalizers, in zatoshis.
+    pub silent_stake_zat: String,
+    /// Raw current-height vote-message totals.
+    pub votes: CrosslinkVoteSummary,
 }
 
 /// One configured Crosslink activation milestone.

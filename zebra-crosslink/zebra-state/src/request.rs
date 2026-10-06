@@ -1530,6 +1530,14 @@ pub enum ReadRequest {
     /// bond state, so this covers committed blocks only.
     CrosslinkAggregatedStakes(block::Hash),
 
+    /// All finalizer candidates at the current best-chain tip, with their verified finalizer
+    /// addresses when the chain has revealed one.
+    ///
+    /// The candidates are active delegation bonds grouped by target finalizer, plus each
+    /// finalizer's reward bank. The response preserves the underlying snapshot order; callers
+    /// that expose a ranking must sort by voting power and public key.
+    CrosslinkFinalizerCandidates,
+
     /// The fat pointer a block template at this PoW height should carry, extending this node.s
     /// best tip: the newest decided bft-block the height may cite under the sigma-confirmation
     /// rule and `do_not_include_until_bc_height`, whose snapshot lies on the best chain; else
@@ -1684,6 +1692,7 @@ impl ReadRequest {
             ReadRequest::TipPoolValues => "tip_pool_values",
             ReadRequest::BlockInfo(_) => "block_info",
             ReadRequest::CrosslinkAggregatedStakes(_) => "crosslink_aggregated_stakes",
+            ReadRequest::CrosslinkFinalizerCandidates => "crosslink_finalizer_candidates",
             ReadRequest::CrosslinkIsAncestor { .. } => "crosslink_is_ancestor",
             ReadRequest::CrosslinkFatPointerToBftChainTip(_) => "crosslink_fat_pointer_to_bft_chain_tip",
             ReadRequest::CrosslinkRoster => "crosslink_roster",

@@ -1,11 +1,19 @@
 //! Explorer JSON-RPC adapters for [`RpcImpl`].
 
 #[cfg(feature = "indexer")]
+use std::{cmp::Reverse, collections::HashMap};
+
+#[cfg(feature = "indexer")]
 use chrono::Utc;
 use jsonrpsee::core::RpcResult as Result;
 use tower::Service;
 #[cfg(feature = "indexer")]
-use zcash_primitives::bft::ACTIVE_ROSTER_MAX_N;
+use zcash_primitives::{
+    bft::{
+        FinalizerAddress, FinalizerRecencyStatus, PubKeyID, TFLRecencyStatus, ACTIVE_ROSTER_MAX_N,
+    },
+    transaction::RosterMember,
+};
 #[cfg(feature = "indexer")]
 use zebra_chain::{
     block::{self, Height},
@@ -33,25 +41,30 @@ use crate::server::{self, error::MapError};
 #[cfg(feature = "indexer")]
 use super::types::{
     BlockchainRuntimeStats, CrosslinkActivationMilestone, CrosslinkActivationOverview,
-    CrosslinkFinalityOverview, CrosslinkFinalityStatus, CrosslinkFinalizersOverview,
-    CrosslinkMinersOverview, CrosslinkNetworkStats, CrosslinkPhase, CrosslinkStakingChange,
-    CrosslinkStakingOverview, CrosslinkStakingStatus, MempoolStats, MiningStats, NetworkStats,
+    CrosslinkBftStep, CrosslinkFinalityOverview, CrosslinkFinalityStatus, CrosslinkFinalizerEntry,
+    CrosslinkFinalizerSetStatus, CrosslinkFinalizersOverview, CrosslinkMinersOverview,
+    CrosslinkNetworkStats, CrosslinkPhase, CrosslinkStakingChange, CrosslinkStakingOverview,
+    CrosslinkStakingStatus, CrosslinkVoteSummary, MempoolStats, MiningStats, NetworkStats,
     NodeSyncStats, SupplyPoolStats, SupplyStats,
 };
 use super::{
     mempool,
     types::{
         AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
-        BlocksResponse, ChartDataRequest, ChartDataResponse, ExplorerNetworkStatsResponse,
-        GetAddressTransactionsRequest, GetAddressUtxosPageRequest, GetBlocksRequest,
-        GetMempoolTransactionsRequest, GetTransactionsRequest, IndexerStatusResponse,
-        MempoolTransactionsResponse, MinerInfoResponse, TopBalancesRequest, TopBalancesResponse,
-        TopMinersRequest, TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
+        BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkFinalizerLivenessResponse,
+        CrosslinkFinalizersResponse, ExplorerNetworkStatsResponse, GetAddressTransactionsRequest,
+        GetAddressUtxosPageRequest, GetBlocksRequest, GetMempoolTransactionsRequest,
+        GetTransactionsRequest, IndexerStatusResponse, MempoolTransactionsResponse,
+        MinerInfoResponse, TopBalancesRequest, TopBalancesResponse, TopMinersRequest,
+        TopMinersResponse, TransactionDetailsResponse, TransactionsResponse,
     },
 };
 #[cfg(feature = "indexer")]
 use crate::methods::RpcServer;
 use crate::methods::{call_service, RpcImpl};
+
+#[cfg(feature = "indexer")]
+const FINALIZER_CONNECTION_WINDOW_SECONDS: i64 = 300;
 
 impl<Mempool, TFLService, State, ReadState, Tip, AddressBook, BlockVerifierRouter, SyncStatus>
     RpcImpl<
@@ -390,7 +403,7 @@ where
                 subsidy,
                 activated_response,
                 finalized_response,
-                roster_response,
+                candidates_response,
             ) = tokio::join!(
                 self.get_blockchain_info(),
                 self.get_network_sol_ps(None, None),
@@ -398,7 +411,10 @@ where
                 self.get_block_subsidy(None),
                 call_service(self.read_state.clone(), ReadRequest::CrosslinkIsActivated),
                 call_service(self.read_state.clone(), ReadRequest::CrosslinkFinalizedTip),
-                call_service(self.read_state.clone(), ReadRequest::CrosslinkRoster),
+                call_service(
+                    self.read_state.clone(),
+                    ReadRequest::CrosslinkFinalizerCandidates,
+                ),
             );
             let blockchain = blockchain?;
             let network_solps = network_solps?;
@@ -412,10 +428,25 @@ where
                 ReadResponse::CrosslinkFinalizedTip(tip) => tip,
                 _ => unreachable!("unmatched response to CrosslinkFinalizedTip"),
             };
-            let roster = match roster_response? {
-                ReadResponse::CrosslinkRoster(roster) => roster,
-                _ => unreachable!("unmatched response to CrosslinkRoster"),
+            let (candidate_tip, mut candidates) = match candidates_response? {
+                ReadResponse::CrosslinkFinalizerCandidates {
+                    tip,
+                    candidates: Some(candidates),
+                } => (tip, candidates),
+                ReadResponse::CrosslinkFinalizerCandidates {
+                    tip: None,
+                    candidates: None,
+                } => (None, Vec::new()),
+                ReadResponse::CrosslinkFinalizerCandidates {
+                    tip: Some(_),
+                    candidates: None,
+                } => {
+                    return Err("finalizer stake snapshot is unavailable at the best-chain tip")
+                        .map_misc_error()
+                }
+                _ => unreachable!("unmatched response to CrosslinkFinalizerCandidates"),
             };
+            sort_finalizer_candidates(&mut candidates);
 
             let generated_at = Utc::now().timestamp();
             let chain_tip = self.latest_chain_tip.best_tip_height_and_hash();
@@ -495,13 +526,20 @@ where
                 CrosslinkFinalityStatus::NotActivated
             };
             let finalized_height = finalized_tip.map(|(height, _)| height.0);
-            let active_count = roster.len().min(ACTIVE_ROSTER_MAX_N);
-            let active_voting_power_zat = roster
+            let candidate_count = candidates.len();
+            let active_count = candidate_count.min(ACTIVE_ROSTER_MAX_N);
+            let active_stake_zat = candidates
                 .iter()
                 .take(active_count)
-                .fold(0_u64, |total, member| {
+                .fold(0_u64, |total, (member, _)| {
                     total.saturating_add(member.voting_power)
                 });
+            let finalizer_status = crosslink_finalizer_set_status(
+                candidate_tip.map(|(height, _)| height.0),
+                roster_height,
+                activation_height,
+                activated,
+            );
             let crosslink = CrosslinkNetworkStats {
                 finality: CrosslinkFinalityOverview {
                     status: finality_status,
@@ -521,10 +559,12 @@ where
                     blocks_24h_complete: indexer_stats.trailing_24h.complete,
                 },
                 finalizers: CrosslinkFinalizersOverview {
-                    roster_count: roster.len().to_string(),
+                    status: finalizer_status,
+                    candidate_count: candidate_count.to_string(),
                     active_count: active_count.to_string(),
                     active_limit: ACTIVE_ROSTER_MAX_N.to_string(),
-                    active_voting_power_zat: active_voting_power_zat.to_string(),
+                    active_stake_zat: active_stake_zat.to_string(),
+                    selection_height: roster_height.map(|height| height.to_string()),
                 },
                 activation,
             };
@@ -592,6 +632,83 @@ where
             };
 
             Ok(response)
+        }
+    }
+
+    pub(in crate::methods) async fn explorer_get_crosslink_finalizers(
+        &self,
+    ) -> Result<CrosslinkFinalizersResponse> {
+        #[cfg(not(feature = "indexer"))]
+        return explorer_index_disabled();
+
+        #[cfg(feature = "indexer")]
+        {
+            let (candidates_response, activated_response) = tokio::join!(
+                call_service(
+                    self.read_state.clone(),
+                    ReadRequest::CrosslinkFinalizerCandidates,
+                ),
+                call_service(self.read_state.clone(), ReadRequest::CrosslinkIsActivated),
+            );
+            let (tip, candidates) = match candidates_response? {
+                ReadResponse::CrosslinkFinalizerCandidates {
+                    tip,
+                    candidates: Some(candidates),
+                } => (tip, candidates),
+                ReadResponse::CrosslinkFinalizerCandidates {
+                    tip: None,
+                    candidates: None,
+                } => (None, Vec::new()),
+                ReadResponse::CrosslinkFinalizerCandidates {
+                    tip: Some(_),
+                    candidates: None,
+                } => {
+                    return Err("finalizer stake snapshot is unavailable at the best-chain tip")
+                        .map_misc_error()
+                }
+                _ => unreachable!("unmatched response to CrosslinkFinalizerCandidates"),
+            };
+            let activated = match activated_response? {
+                ReadResponse::CrosslinkIsActivated(activated) => activated,
+                _ => unreachable!("unmatched response to CrosslinkIsActivated"),
+            };
+            let params = self.network.crosslink_parameters();
+
+            Ok(crosslink_finalizers_response(
+                tip,
+                candidates,
+                params.bootstrap.roster_height(),
+                params.bootstrap.activation_height(),
+                activated,
+            ))
+        }
+    }
+
+    pub(in crate::methods) async fn explorer_get_crosslink_finalizer_liveness(
+        &self,
+    ) -> Result<CrosslinkFinalizerLivenessResponse> {
+        #[cfg(not(feature = "indexer"))]
+        return explorer_index_disabled();
+
+        #[cfg(feature = "indexer")]
+        {
+            let (roster_response, recency_response) = tokio::join!(
+                call_service(
+                    self.read_state.clone(),
+                    ReadRequest::CrosslinkRosterWithAddresses,
+                ),
+                call_service(self.read_state.clone(), ReadRequest::CrosslinkRecencyStatus),
+            );
+            let roster = match roster_response? {
+                ReadResponse::CrosslinkRosterWithAddresses(roster) => roster,
+                _ => unreachable!("unmatched response to CrosslinkRosterWithAddresses"),
+            };
+            let recency = match recency_response? {
+                ReadResponse::CrosslinkRecencyStatus(recency) => recency,
+                _ => unreachable!("unmatched response to CrosslinkRecencyStatus"),
+            };
+
+            Ok(crosslink_finalizer_liveness_response(roster, recency))
         }
     }
 
@@ -684,6 +801,216 @@ where
                 .map_misc_error()
         }
     }
+}
+
+#[cfg(feature = "indexer")]
+fn sort_finalizer_candidates(candidates: &mut [(RosterMember, Option<FinalizerAddress>)]) {
+    candidates.sort_by_key(|(member, _)| Reverse((member.voting_power, member.pub_key)));
+}
+
+#[cfg(feature = "indexer")]
+fn crosslink_finalizer_set_status(
+    tip_height: Option<u32>,
+    selection_height: Option<u32>,
+    activation_height: Option<u32>,
+    activated: bool,
+) -> CrosslinkFinalizerSetStatus {
+    if activated
+        || tip_height
+            .zip(activation_height)
+            .is_some_and(|(tip, activation)| tip >= activation)
+    {
+        CrosslinkFinalizerSetStatus::Active
+    } else if tip_height
+        .zip(selection_height)
+        .is_some_and(|(tip, selection)| tip >= selection)
+    {
+        CrosslinkFinalizerSetStatus::Selected
+    } else {
+        CrosslinkFinalizerSetStatus::Projected
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn crosslink_finalizers_response(
+    tip: Option<(Height, block::Hash)>,
+    mut candidates: Vec<(RosterMember, Option<FinalizerAddress>)>,
+    selection_height: Option<u32>,
+    activation_height: Option<u32>,
+    activated: bool,
+) -> CrosslinkFinalizersResponse {
+    sort_finalizer_candidates(&mut candidates);
+    let candidate_count = candidates.len();
+    let active_count = candidate_count.min(ACTIVE_ROSTER_MAX_N);
+    let total_stake_zat = candidates.iter().fold(0_u64, |total, (member, _)| {
+        total.saturating_add(member.voting_power)
+    });
+    let active_stake_zat = candidates
+        .iter()
+        .take(active_count)
+        .fold(0_u64, |total, (member, _)| {
+            total.saturating_add(member.voting_power)
+        });
+    let items = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, (member, finalizer_address))| {
+            let active = index < active_count;
+            CrosslinkFinalizerEntry {
+                rank: index.saturating_add(1).to_string(),
+                public_key: PubKeyID(member.pub_key).to_string(),
+                finalizer_address: finalizer_address
+                    .filter(|address| address.pub_key.0 == member.pub_key && address.verify())
+                    .map(|address| address.encode()),
+                voting_power_zat: member.voting_power.to_string(),
+                total_stake_share_percent: percentage_one_decimal(
+                    member.voting_power,
+                    total_stake_zat,
+                ),
+                active_stake_share_percent: active
+                    .then(|| percentage_one_decimal(member.voting_power, active_stake_zat)),
+                active,
+            }
+        })
+        .collect();
+
+    CrosslinkFinalizersResponse {
+        status: crosslink_finalizer_set_status(
+            tip.map(|(height, _)| height.0),
+            selection_height,
+            activation_height,
+            activated,
+        ),
+        snapshot_height: tip.map(|(height, _)| height.0.to_string()),
+        snapshot_hash: tip.map(|(_, hash)| hash.to_string()),
+        selection_height: selection_height.map(|height| height.to_string()),
+        activation_height: activation_height.map(|height| height.to_string()),
+        candidate_count: candidate_count.to_string(),
+        active_count: active_count.to_string(),
+        active_limit: ACTIVE_ROSTER_MAX_N.to_string(),
+        total_stake_zat: total_stake_zat.to_string(),
+        active_stake_zat: active_stake_zat.to_string(),
+        items,
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn crosslink_finalizer_liveness_response(
+    mut roster: Vec<(RosterMember, Option<FinalizerAddress>)>,
+    recency: TFLRecencyStatus,
+) -> CrosslinkFinalizerLivenessResponse {
+    sort_finalizer_candidates(&mut roster);
+    let available = recency.now_utc > 0;
+    let statuses: HashMap<[u8; 32], &FinalizerRecencyStatus> = recency
+        .finalizer_statuses
+        .iter()
+        .map(|(key, status)| (key.0, status))
+        .collect();
+    let active: Vec<(&RosterMember, &FinalizerRecencyStatus)> = if available {
+        roster
+            .iter()
+            .filter_map(|(member, _)| {
+                statuses
+                    .get(&member.pub_key)
+                    .map(|status| (member, *status))
+            })
+            .take(ACTIVE_ROSTER_MAX_N)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut total_stake_zat = 0_u64;
+    let mut connected_count = 0_usize;
+    let mut connected_stake_zat = 0_u64;
+    let mut voted_count = 0_usize;
+    let mut voted_stake_zat = 0_u64;
+    let mut prevote_yes_count = 0_u64;
+    let mut prevote_nil_count = 0_u64;
+    let mut precommit_yes_count = 0_u64;
+    let mut precommit_nil_count = 0_u64;
+
+    for (member, status) in &active {
+        total_stake_zat = total_stake_zat.saturating_add(member.voting_power);
+        let connected = status.last_direct_connection_utc.is_some_and(|last_seen| {
+            last_seen <= recency.now_utc
+                && recency.now_utc.saturating_sub(last_seen) <= FINALIZER_CONNECTION_WINDOW_SECONDS
+        });
+        if connected {
+            connected_count = connected_count.saturating_add(1);
+            connected_stake_zat = connected_stake_zat.saturating_add(member.voting_power);
+        }
+
+        let votes = status.no_yes_votes_in_my_height;
+        prevote_nil_count = prevote_nil_count.saturating_add(votes[0][0]);
+        prevote_yes_count = prevote_yes_count.saturating_add(votes[0][1]);
+        precommit_nil_count = precommit_nil_count.saturating_add(votes[1][0]);
+        precommit_yes_count = precommit_yes_count.saturating_add(votes[1][1]);
+        let voted = votes.into_iter().flatten().fold(0_u64, u64::saturating_add) > 0;
+        if voted {
+            voted_count = voted_count.saturating_add(1);
+            voted_stake_zat = voted_stake_zat.saturating_add(member.voting_power);
+        }
+    }
+
+    let total_count = active.len();
+    let offline_count = total_count.saturating_sub(connected_count);
+    let offline_stake_zat = total_stake_zat.saturating_sub(connected_stake_zat);
+    let silent_count = total_count.saturating_sub(voted_count);
+    let silent_stake_zat = total_stake_zat.saturating_sub(voted_stake_zat);
+    let step = if available {
+        match recency.my_step {
+            0 => Some(CrosslinkBftStep::Propose),
+            1 => Some(CrosslinkBftStep::Prevote),
+            2 => Some(CrosslinkBftStep::Precommit),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    CrosslinkFinalizerLivenessResponse {
+        scope: "local_node".to_string(),
+        available,
+        observed_at: available.then(|| recency.now_utc.to_string()),
+        connection_window_seconds: FINALIZER_CONNECTION_WINDOW_SECONDS.to_string(),
+        bft_height: available.then(|| recency.my_height.to_string()),
+        round: available.then(|| recency.my_round.to_string()),
+        step,
+        total_count: total_count.to_string(),
+        total_stake_zat: total_stake_zat.to_string(),
+        connected_count: connected_count.to_string(),
+        connected_stake_zat: connected_stake_zat.to_string(),
+        connected_stake_percent: percentage_one_decimal(connected_stake_zat, total_stake_zat),
+        offline_count: offline_count.to_string(),
+        offline_stake_zat: offline_stake_zat.to_string(),
+        voted_count: voted_count.to_string(),
+        voted_stake_zat: voted_stake_zat.to_string(),
+        voted_stake_percent: percentage_one_decimal(voted_stake_zat, total_stake_zat),
+        silent_count: silent_count.to_string(),
+        silent_stake_zat: silent_stake_zat.to_string(),
+        votes: CrosslinkVoteSummary {
+            prevote_yes_count: prevote_yes_count.to_string(),
+            prevote_nil_count: prevote_nil_count.to_string(),
+            precommit_yes_count: precommit_yes_count.to_string(),
+            precommit_nil_count: precommit_nil_count.to_string(),
+        },
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn percentage_one_decimal(numerator: u64, denominator: u64) -> String {
+    if denominator == 0 {
+        return "0.0".to_string();
+    }
+
+    let numerator = u128::from(numerator);
+    let denominator = u128::from(denominator);
+    let tenths = numerator
+        .saturating_mul(1_000)
+        .saturating_add(denominator / 2)
+        / denominator;
+    format!("{}.{:01}", tenths / 10, tenths % 10)
 }
 
 #[cfg(feature = "indexer")]
@@ -923,12 +1250,30 @@ fn indexer_status(
 
 #[cfg(all(test, feature = "indexer"))]
 mod tests {
+    use zcash_primitives::{
+        bft::{FinalizerAddress, FinalizerRecencyStatus, PubKeyID, TFLRecencyStatus},
+        transaction::RosterMember,
+    };
     use zebra_chain::block::{Hash, Height};
 
     use super::{
-        crosslink_activation_overview, crosslink_staking_overview, indexer_status, CrosslinkPhase,
-        CrosslinkStakingChange, CrosslinkStakingStatus,
+        crosslink_activation_overview, crosslink_finalizer_liveness_response,
+        crosslink_finalizers_response, crosslink_staking_overview, indexer_status,
+        CrosslinkBftStep, CrosslinkFinalizerSetStatus, CrosslinkPhase, CrosslinkStakingChange,
+        CrosslinkStakingStatus,
     };
+
+    fn finalizer(byte: u8, voting_power: u64) -> (RosterMember, Option<FinalizerAddress>) {
+        (
+            RosterMember {
+                pub_key: [byte; 32],
+                voting_power,
+                txids: Vec::new(),
+                finalizer_address: None,
+            },
+            None,
+        )
+    }
 
     #[test]
     fn indexer_status_compares_height_and_hash() {
@@ -1002,5 +1347,79 @@ mod tests {
         assert_eq!(closed.next_change, Some(CrosslinkStakingChange::Opens));
         assert_eq!(closed.next_change_height.as_deref(), Some("31104"));
         assert_eq!(closed.blocks_remaining.as_deref(), Some("6912"));
+    }
+
+    #[test]
+    fn crosslink_finalizers_returns_every_candidate_in_consensus_rank_order() {
+        let candidates = (1_u8..=13)
+            .map(|value| finalizer(value, u64::from(value)))
+            .collect();
+        let response = crosslink_finalizers_response(
+            Some((Height(10), Hash([0x51; 32]))),
+            candidates,
+            Some(20),
+            Some(30),
+            false,
+        );
+
+        assert_eq!(response.status, CrosslinkFinalizerSetStatus::Projected);
+        assert_eq!(response.candidate_count, "13");
+        assert_eq!(response.active_count, "12");
+        assert_eq!(response.total_stake_zat, "91");
+        assert_eq!(response.active_stake_zat, "90");
+        assert_eq!(response.items.len(), 13);
+        assert_eq!(response.items[0].voting_power_zat, "13");
+        assert_eq!(
+            response.items[0].active_stake_share_percent.as_deref(),
+            Some("14.4")
+        );
+        assert!(response.items[11].active);
+        assert!(!response.items[12].active);
+        assert_eq!(response.items[12].active_stake_share_percent, None);
+    }
+
+    #[test]
+    fn crosslink_liveness_separates_connected_and_voted_stake() {
+        let roster = vec![finalizer(1, 10), finalizer(2, 20)];
+        let recency = TFLRecencyStatus {
+            now_utc: 1_000,
+            my_height: 7,
+            my_round: 3,
+            my_step: 2,
+            my_locked_round: -1,
+            my_valid_round: -1,
+            finalizer_statuses: vec![
+                (
+                    PubKeyID([1; 32]),
+                    FinalizerRecencyStatus {
+                        no_yes_votes_in_my_height: [[0, 1], [0, 0]],
+                        highest_round_vote: 3,
+                        last_seen_new_info_utc: 0,
+                        last_direct_connection_utc: Some(950),
+                    },
+                ),
+                (
+                    PubKeyID([2; 32]),
+                    FinalizerRecencyStatus {
+                        last_direct_connection_utc: Some(600),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        };
+        let response = crosslink_finalizer_liveness_response(roster, recency);
+
+        assert!(response.available);
+        assert_eq!(response.step, Some(CrosslinkBftStep::Precommit));
+        assert_eq!(response.total_count, "2");
+        assert_eq!(response.total_stake_zat, "30");
+        assert_eq!(response.connected_count, "1");
+        assert_eq!(response.connected_stake_zat, "10");
+        assert_eq!(response.connected_stake_percent, "33.3");
+        assert_eq!(response.offline_stake_zat, "20");
+        assert_eq!(response.voted_count, "1");
+        assert_eq!(response.voted_stake_zat, "10");
+        assert_eq!(response.silent_stake_zat, "20");
+        assert_eq!(response.votes.prevote_yes_count, "1");
     }
 }
