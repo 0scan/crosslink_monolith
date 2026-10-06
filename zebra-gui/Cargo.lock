@@ -2946,7 +2946,7 @@ dependencies = [
 [[package]]
 name = "softer_gui"
 version = "5.0.0"
-source = "git+https://github.com/ShieldedLabs/softer_gui?rev=c2ddbe7bf898fbec614b744d5e9e12302a900530#c2ddbe7bf898fbec614b744d5e9e12302a900530"
+source = "git+https://github.com/ShieldedLabs/softer_gui?rev=28086165d3c4c0755483a2ab78e98b7775bf03b4#28086165d3c4c0755483a2ab78e98b7775bf03b4"
 
 [[package]]
 name = "spin"

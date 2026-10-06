@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Pinned to the commit that makes the Windows pump honour request_frame, until a crates.io release carries it.
-softer_gui = { git = "https://github.com/ShieldedLabs/softer_gui", rev = "c2ddbe7bf898fbec614b744d5e9e12302a900530" }
+# Pinned to a commit: the clipboard and the Windows request_frame fix are in no crates.io release yet.
+softer_gui = { git = "https://github.com/ShieldedLabs/softer_gui", rev = "28086165d3c4c0755483a2ab78e98b7775bf03b4" }
 num_cpus = "1.17.0"
 ahash = "0.8.12"
 rand = "0.9.2"

@@ -806,6 +806,8 @@ struct InputCtx {
     keys_pressed2:   u128,
     keys_released2:  u128,
     text_input:     Option<Vec<char>>,
+
+    clipboard: softer_gui::Clipboard,
 }
 
 const MOUSE_LEFT:   usize = 1 << 0;
@@ -1055,18 +1057,11 @@ impl InputCtx {
         #[cfg(any(target_os = "windows", cosmo))]
         if win_clipboard::active() { return win_clipboard::get().unwrap_or_default(); }
 
-        // An APE is built for cosmo even when it runs on macOS; try both clipboard
-        // families there. Native Linux keeps X11 first.
-        for (program, args) in [
-            ("pbpaste", &[][..]),
-            ("xclip", &["-selection", "clipboard", "-o"][..]),
-            ("xsel", &["--clipboard", "--output"][..]),
-        ] {
-            if program == "pbpaste" && !cfg!(any(target_os = "macos", cosmo)) { continue; }
-            if let Ok(output) = std::process::Command::new(program).args(args).output() {
-                if output.status.success() {
-                    return String::from_utf8_lossy(&output.stdout).into_owned();
-                }
+        if self.clipboard.available() { return self.clipboard.get().unwrap_or_default(); }
+
+        if let Ok(output) = std::process::Command::new("pbpaste").output() {
+            if output.status.success() {
+                return String::from_utf8_lossy(&output.stdout).into_owned();
             }
         }
         return String::new();
@@ -1078,20 +1073,15 @@ impl InputCtx {
         #[cfg(any(target_os = "windows", cosmo))]
         if win_clipboard::active() { return win_clipboard::set(text); }
 
-        for (program, args) in [
-            ("pbcopy", &[][..]),
-            ("xclip", &["-selection", "clipboard"][..]),
-            ("xsel", &["--clipboard", "--input"][..]),
-        ] {
-            if program == "pbcopy" && !cfg!(any(target_os = "macos", cosmo)) { continue; }
-            if let Ok(mut child) = std::process::Command::new(program).args(args).stdin(std::process::Stdio::piped()).spawn() {
-                let wrote = match child.stdin.take() {
-                    Some(mut stdin) => stdin.write_all(text.as_bytes()).is_ok(),
-                    None => false,
-                };
-                if let Ok(status) = child.wait() {
-                    if wrote && status.success() { return true; }
-                }
+        if self.clipboard.available() { return self.clipboard.set(text); }
+
+        if let Ok(mut child) = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn() {
+            let wrote = match child.stdin.take() {
+                Some(mut stdin) => stdin.write_all(text.as_bytes()).is_ok(),
+                None => false,
+            };
+            if let Ok(status) = child.wait() {
+                if wrote && status.success() { return true; }
             }
         }
         return false;
@@ -1411,6 +1401,8 @@ pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::
         keys_released2: 0,
 
         text_input: None,
+
+        clipboard: gui.clipboard(),
     };
 
     let mut _draw_command_count = 0usize;
