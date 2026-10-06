@@ -6,16 +6,16 @@ Scope: how staking actions (bond creation, retarget, unbond, withdraw, finalizer
 
 ## Summary
 
-| ID | Severity | Finding |
-|----|----------|---------|
-| S1 | High | The mempool admits staking actions that block validation rejects, so one bond holder can make every miner's blocks invalid |
-| S2 | High | Unbonding and withdrawing inside the slash window escapes the slash |
-| S3 | Medium | Consensus accepts retargeting a bond that unbonded earlier in the same block |
-| S4 | Medium | Staking actions that spend no inputs can be replayed |
-| S5 | Low | The mempool is first-seen per bond: no replacement and no sequencing |
-| S6 | Low | Every pending staking transaction is fully re-verified on every new block |
-| S7 | Low | The staking day window has hardcoded exception heights |
-| S8 | Medium | ZIP-317 fees for VCrosslink transactions ignore everything but the staking action |
+| ID | Severity | Finding | Status |
+|----|----------|---------|--------|
+| S1 | High | The mempool admits staking actions that block validation rejects, so one bond holder can make every miner's blocks invalid | Mempool check fixed; template check open |
+| S2 | High | Unbonding and withdrawing inside the slash window escapes the slash | Fixed |
+| S3 | Medium | Consensus accepts retargeting a bond that unbonded earlier in the same block | Fixed |
+| S4 | Medium | Staking actions that spend no inputs can be replayed | Open |
+| S5 | Low | The mempool is first-seen per bond: no replacement and no sequencing | Open |
+| S6 | Low | Every pending staking transaction is fully re-verified on every new block | Open |
+| S7 | Low | The staking day window has hardcoded exception heights | Narrowed |
+| S8 | Medium | ZIP-317 fees for VCrosslink transactions ignore everything but the staking action | Open |
 
 The authorization model is sound: the bond key is an ed25519 key, and every staking action must carry that key's signature over the transaction's sighash (`staking_action_signature`). No one without the private key can author, alter or replace an action on someone else's bond. The signature is committed to by the transaction's auth digest, so it can't be swapped in a relayed block either. Every finding below is about what the *holder* of a bond key, or anyone holding a copy of a transaction that key already signed, can do.
 
@@ -38,6 +38,8 @@ The mempool check (`check_staking_action_bond_state`) enforces neither. Bond inf
 1. Return the bond's target and the finalizer's bank balance from bond info queries. Check `from_finalizer` and the bank in `check_staking_action_bond_state`.
 2. As defence in depth, have the block template builder validate its candidate block against the state and evict any transaction that fails. The mempool check and the block check are separate code paths, so they will drift apart again.
 
+**Status.** Fix 1 is in: `check_staking_action_bond_state` rejects a retarget whose `from_finalizer` is not the bond's target, and a conversion the finalizer's bank cannot cover. Fix 2 is open.
+
 ## S2. Unbonding and withdrawing inside the slash window escapes the slash
 
 **Severity: High**
@@ -57,6 +59,8 @@ Slashing burns bonds that pointed at the slashed finalizer at any point in the w
 **Impact.** It breaks the rule that unbonding bonds keep their target. Slashing still sees the retarget's `from`, so this is not known to escape a slash. But any other logic that assumes an unbonding bond's target is fixed can now be wrong.
 
 **Fix.** Replace the per-kind maps with one in-block overlay per bond: status, target, amount, last action height (and sequence number, see below). Validate every action against that one record and update it after each action. This removes the whole class of "one map was forgotten" bugs, not just this instance.
+
+**Status.** Fixed in `65c7e1b4`, by a narrower change than the one above: `validate_delegation_bonds` rejects any later action in the block on a bond that an earlier transaction unbonded or withdrew. The per-kind maps remain.
 
 ## S4. Staking actions that spend no inputs can be replayed
 
@@ -99,6 +103,8 @@ Whether a staking action is valid depends on its bond's state at the tip, so on 
 `check_staking_day_window` exempts a fixed list of block heights from the window rule. These are leftovers from an earlier deployment. Any other network with blocks at those heights inherits the exemption.
 
 **Fix.** Remove the list. If existing chain history needs it, key it on the specific network.
+
+**Status.** Narrowed: the exemption applies only on the prototype staking calendar (`PROTOTYPE_STAKING`). The list is still there.
 
 ## S8. ZIP-317 fees for VCrosslink transactions ignore everything but the staking action
 
