@@ -1921,7 +1921,9 @@ pub fn ui_left_pane(ui: &mut Context,
 
                             ui.text(frame_strf!(data, "[{}..{}]", &send_address[..8], &send_address[send_address.len() - 8..]), TextDecl { font: Mono, h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
                             if button(ui, "Paste Address", true) {
-                                data.send_address = ui.input().get_from_clipboard().trim().to_string();
+                                if let Some(text) = ui.input().get_from_clipboard() {
+                                    data.send_address = text.trim().to_string();
+                                }
                             }
 
                         } else {
@@ -1950,13 +1952,15 @@ pub fn ui_left_pane(ui: &mut Context,
                                 ).trim().to_string();
                             }
                             if button(ui, "Paste Address", true) {
-                                data.send_address = ui.input().get_from_clipboard().trim().to_string();
-                                let send_address_buf: Vec<char> = data.send_address.chars().collect();
-                                let textbox_state = data.textboxes.entry(send_address_id.id).or_default();
-                                textbox_state.text_buf = send_address_buf;
-                                let len = textbox_state.text_buf.len();
-                                textbox_state.selection.0 = len;
-                                textbox_state.selection.1 = len;
+                                if let Some(text) = ui.input().get_from_clipboard() {
+                                    data.send_address = text.trim().to_string();
+                                    let send_address_buf: Vec<char> = data.send_address.chars().collect();
+                                    let textbox_state = data.textboxes.entry(send_address_id.id).or_default();
+                                    textbox_state.text_buf = send_address_buf;
+                                    let len = textbox_state.text_buf.len();
+                                    textbox_state.selection.0 = len;
+                                    textbox_state.selection.1 = len;
+                                }
                             }
                         }
 
@@ -2186,7 +2190,9 @@ pub fn ui_left_pane(ui: &mut Context,
 
                         ui.text(frame_strf!(data, "[{}..{}]", &stake_address[0..8], &stake_address[stake_address.len()-8..]), TextDecl { font: Mono, h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
                         if button(ui, "Paste Identity", true) {
-                            data.stake_address = ui.input().get_from_clipboard().trim().to_string();
+                            if let Some(text) = ui.input().get_from_clipboard() {
+                                data.stake_address = text.trim().to_string();
+                            }
                         }
 
                     } else {
@@ -2215,13 +2221,15 @@ pub fn ui_left_pane(ui: &mut Context,
                             ).trim().to_string();
                         }
                         if button(ui, "Paste Identity", true) {
-                            data.stake_address = ui.input().get_from_clipboard().trim().to_string();
-                            let stake_address_buf: Vec<char> = data.stake_address.chars().collect();
-                            let textbox_state = data.textboxes.entry(stake_address_id.id).or_default();
-                            textbox_state.text_buf = stake_address_buf;
-                            let len = textbox_state.text_buf.len();
-                            textbox_state.selection.0 = len;
-                            textbox_state.selection.1 = len;
+                            if let Some(text) = ui.input().get_from_clipboard() {
+                                data.stake_address = text.trim().to_string();
+                                let stake_address_buf: Vec<char> = data.stake_address.chars().collect();
+                                let textbox_state = data.textboxes.entry(stake_address_id.id).or_default();
+                                textbox_state.text_buf = stake_address_buf;
+                                let len = textbox_state.text_buf.len();
+                                textbox_state.selection.0 = len;
+                                textbox_state.selection.1 = len;
+                            }
                         }
                     }
 
@@ -2338,7 +2346,9 @@ pub fn ui_left_pane(ui: &mut Context,
 
                     ui.text(frame_strf!(data, "[{}..{}]", &stake_address[0..8], &stake_address[stake_address.len()-8..]), TextDecl { font: Mono, h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
                     if button(ui, "Paste Identity", true) {
-                        data.stake_address = ui.input().get_from_clipboard().trim().to_string();
+                        if let Some(text) = ui.input().get_from_clipboard() {
+                            data.stake_address = text.trim().to_string();
+                        }
                     }
 
                     // spacer

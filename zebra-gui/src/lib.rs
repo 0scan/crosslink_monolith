@@ -917,8 +917,8 @@ impl InputCtx {
         return (self.mouse_released & mouse_mask(button)) != 0;
     }
 
-    fn get_from_clipboard(&self) -> String {
-        return self.clipboard.get().unwrap_or_default();
+    fn get_from_clipboard(&self) -> Option<String> {
+        return Some(self.clipboard.get()?);
     }
 
     fn send_to_clipboard(&self, text: &str) -> bool {
@@ -1356,8 +1356,9 @@ pub fn main_thread_run_program(mut gui: Window, wallet_state: Arc<Mutex<wallet::
                     // softer_gui recognises the chord and reports the intent; the
                     // selection itself is still ours to fetch.
                     CP_PASTE => {
-                        let text = input_ctx.get_from_clipboard();
-                        input_ctx.inflight_text_input.extend(text.chars().filter(|c| *c >= ' ' && *c != '\u{7f}'));
+                        if let Some(text) = input_ctx.get_from_clipboard() {
+                            input_ctx.inflight_text_input.extend(text.chars().filter(|c| *c >= ' ' && *c != '\u{7f}'));
+                        }
                     }
                     CP_COPY | CP_CUT => {}   // the widgets act on their own selection
                     _ => {}
