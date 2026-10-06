@@ -40,7 +40,7 @@ pub(super) fn identify_miner(
     (miner_address, miner_pool.to_string())
 }
 
-fn pool_from_address(address: &str) -> Option<&'static str> {
+pub(super) fn pool_from_address(address: &str) -> Option<&'static str> {
     match address {
         "t1XQZdZMnzXBcL8yx2PR27dSNrqctgwLgux" => Some("Luxor"),
         "t1MKn34KBa8Xh4g8qU8psibBXvURafphVn7" => Some("ViaBTC"),

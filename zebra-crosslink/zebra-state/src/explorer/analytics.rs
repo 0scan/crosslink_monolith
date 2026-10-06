@@ -12,7 +12,7 @@ use zebra_chain::{
         Network, NetworkUpgrade,
     },
     transaction::{zip317, Transaction},
-    transparent::{OutPoint, Utxo},
+    transparent::{Address, OutPoint, Utxo},
     value_balance::ValueBalance,
 };
 
@@ -173,6 +173,25 @@ pub(super) fn derive_block_stats(
         ),
         interval,
     }
+}
+
+/// Selects the largest recognizable transparent coinbase output as the miner payout.
+///
+/// Funding-stream outputs are smaller than the miner subsidy, and shielded-only
+/// coinbases intentionally remain unattributed.
+pub(super) fn miner_address(block: &Block, network: &Network) -> Option<Address> {
+    block
+        .transactions
+        .first()?
+        .outputs()
+        .iter()
+        .filter_map(|output| {
+            output
+                .address(network)
+                .map(|address| (output.value().zatoshis(), address))
+        })
+        .max_by_key(|(value, _)| *value)
+        .map(|(_, address)| address)
 }
 
 impl BlockTransactionStats {

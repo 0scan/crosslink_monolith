@@ -57,12 +57,18 @@ pub use error::{
 pub use explorer::{
     ExplorerAddressPage, ExplorerAddressRecord, ExplorerAmountFilter, ExplorerBalanceRankCursor,
     ExplorerBalanceRankEntry, ExplorerBalanceRankPage, ExplorerBlockStats, ExplorerBlockSummary,
-    ExplorerChainStats, ExplorerDailyStats, ExplorerIntervalStats, ExplorerPageDirection,
-    ExplorerReadRequest, ExplorerReadResponse, ExplorerRollingStats, ExplorerShieldedFlow,
-    ExplorerShieldedFlowFilter, ExplorerShieldedPool, ExplorerShieldedPoolFilter,
-    ExplorerStatsSnapshot, ExplorerTransactionKind, ExplorerTransactionKindFilter,
-    ExplorerTransactionPage, ExplorerTransactionQuery, ExplorerTransactionRecord,
-    ExplorerTransactionSummary,
+    ExplorerBondAttributionRecord, ExplorerChainStats, ExplorerDailyStats,
+    ExplorerFinalizerMinerSummary, ExplorerIntervalStats, ExplorerMiner,
+    ExplorerMinerFinalizerRecord, ExplorerMinerPage, ExplorerMinerRankCursor,
+    ExplorerMinerRankEntry, ExplorerMinerRecord, ExplorerMinerStakePage,
+    ExplorerMinerStakeRankCursor, ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals,
+    ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse, ExplorerRollingStats,
+    ExplorerShieldedFlow, ExplorerShieldedFlowFilter, ExplorerShieldedPool,
+    ExplorerShieldedPoolFilter, ExplorerStakeAction, ExplorerStakeHistoryCursor,
+    ExplorerStakeHistoryEntry, ExplorerStakeHistoryFilter, ExplorerStakeHistoryPage,
+    ExplorerStakeHistoryRecord, ExplorerStakeSource, ExplorerStatsSnapshot,
+    ExplorerTransactionKind, ExplorerTransactionKindFilter, ExplorerTransactionPage,
+    ExplorerTransactionQuery, ExplorerTransactionRecord, ExplorerTransactionSummary,
 };
 pub use request::{
     CheckpointVerifiedBlock, CommitSemanticallyVerifiedBlockRequest, HashOrHeight, MappedRequest,
@@ -85,10 +91,7 @@ pub use service::{
     non_finalized_state::{BondStatusInChain, NonFinalizedState},
     spawn_init, spawn_init_read_only,
     watch_receiver::WatchReceiver,
-    CrosslinkVerdict,
-    OutputLocation, ReadState,
-    State, TransactionIndex,
-    TransactionLocation,
+    CrosslinkVerdict, OutputLocation, ReadState, State, TransactionIndex, TransactionLocation,
 };
 
 // Allow use in the scanner and external tests
@@ -96,12 +99,12 @@ pub use service::{
 pub use service::finalized_state::{ReadDisk, TypedColumnFamily, WriteTypedBatch};
 
 pub use service::{
-    finalized_state::{disk_format::BondKey, DiskWriteBatch, FromDisk, IntoDisk, WriteDisk, ZebraDb},
+    finalized_state::{
+        disk_format::BondKey, DiskWriteBatch, FromDisk, IntoDisk, WriteDisk, ZebraDb,
+    },
     stake_fixup::fixup_aggregated_stakes,
     staking_replay::{slash_window, SlashBurns, StakingReplay},
-    update_bonds_with_pos_issuance,
-    update_chain_tip_with_delegation_bond,
-    ReadStateService,
+    update_bonds_with_pos_issuance, update_chain_tip_with_delegation_bond, ReadStateService,
 };
 
 // Allow use in external tests

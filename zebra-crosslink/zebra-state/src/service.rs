@@ -1105,6 +1105,43 @@ impl Service<ReadRequest> for ReadStateService {
                 ReadResponse::CrosslinkAggregatedStakes(state.db.aggregated_stakes(&hash)),
             ),
 
+            ReadRequest::CrosslinkFinalizerCandidates => {
+                // Take the non-finalized snapshot before database reads so a block being
+                // committed remains visible through at least one of the two views.
+                let non_finalized_state = state.latest_non_finalized_state();
+                let tip = read::best_tip(&non_finalized_state, &state.db);
+                let candidates = tip.and_then(|(_, hash)| {
+                    let stakes = non_finalized_state
+                        .aggregated_stakes_at(hash)
+                        .or_else(|| state.db.aggregated_stakes(&hash))?;
+                    let keys: Vec<[u8; 32]> = stakes.iter().map(|(key, _)| *key).collect();
+                    let addresses = read::delegation::finalizer_addresses(
+                        &non_finalized_state,
+                        &state.db,
+                        &keys,
+                    );
+                    Some(
+                        stakes
+                            .into_iter()
+                            .zip(addresses)
+                            .map(|((pub_key, voting_power), finalizer_address)| {
+                                (
+                                    zcash_primitives::transaction::RosterMember {
+                                        pub_key,
+                                        voting_power,
+                                        txids: Vec::new(),
+                                        finalizer_address: None,
+                                    },
+                                    finalizer_address,
+                                )
+                            })
+                            .collect(),
+                    )
+                });
+
+                Ok(ReadResponse::CrosslinkFinalizerCandidates { tip, candidates })
+            }
+
             // Used by crosslink's BFT validation (Linearity) and its block-template context
             // selection, which both ask whether a snapshot lies on a particular chain.
             ReadRequest::CrosslinkIsAncestor {

@@ -37,6 +37,7 @@ where
         indexed_height: snapshot.best_tip.map(|(height, _)| height.0.to_string()),
         indexed_block_hash: snapshot.best_tip.map(|(_, hash)| hash.to_string()),
         totals: chain_totals(snapshot.totals),
+        miner_count: snapshot.totals.miner_count.to_string(),
         trailing_24h: RollingDayStats {
             complete: rolling.complete,
             window_start: rolling.window_start.map(|value| value.to_string()),

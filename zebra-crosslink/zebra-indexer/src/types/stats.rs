@@ -75,6 +75,8 @@ pub struct IndexerStats {
     pub indexed_block_hash: Option<String>,
     /// All-time canonical aggregates covered by the indexer.
     pub totals: ChainTotals,
+    /// Distinct attributed miners over the indexed chain.
+    pub miner_count: String,
     /// Trailing activity ending at the indexed tip timestamp.
     pub trailing_24h: RollingDayStats,
 }

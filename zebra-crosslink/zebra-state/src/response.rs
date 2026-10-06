@@ -344,7 +344,7 @@ impl NonFinalizedBlocksListener {
                 }
 
                 prev_non_finalized_state = non_finalized_state;
-                
+
                 /*  Note(Sam): THIS IS A HUGE BUG WAITING TO HAPPEN. Since tokio scheduling is cooperative
                     multitasking, it offers no fairness guarantees. It is under the assumption that we are
                     always I/O bound and that the CPU is idle. There is always enough time to run all tasks.
@@ -437,6 +437,23 @@ pub enum ReadResponse {
     /// Response to [`ReadRequest::CrosslinkAggregatedStakes`]: the aggregated stake per
     /// finalizer at a block, or `None` for a block the finalized state does not hold.
     CrosslinkAggregatedStakes(Option<Vec<([u8; 32], u64)>>),
+
+    /// Response to [`ReadRequest::CrosslinkFinalizerCandidates`].
+    ///
+    /// `tip` identifies the best-chain stake snapshot. `candidates` is `None` only when the
+    /// snapshot is unavailable for that tip; an empty vector means the snapshot exists but has
+    /// no active stake.
+    CrosslinkFinalizerCandidates {
+        /// Best-chain tip used for the candidate snapshot.
+        tip: Option<(block::Height, block::Hash)>,
+        /// Aggregated candidates and their verified finalizer addresses.
+        candidates: Option<
+            Vec<(
+                zcash_primitives::transaction::RosterMember,
+                Option<zcash_primitives::bft::FinalizerAddress>,
+            )>,
+        >,
+    },
 
     /// Response to [`ReadRequest::CrosslinkFatPointerToBftChainTip`].
     CrosslinkFatPointerToBftChainTip(zcash_primitives::bft::FatPointerToBftBlock),
@@ -774,6 +791,7 @@ impl TryFrom<ReadResponse> for Response {
             | ReadResponse::IsTransparentOutputSpent(_)
             | ReadResponse::CrosslinkIsAncestor(_)
             | ReadResponse::CrosslinkAggregatedStakes(_)
+            | ReadResponse::CrosslinkFinalizerCandidates { .. }
             | ReadResponse::CrosslinkFatPointerToBftChainTip(_)
             | ReadResponse::CrosslinkRoster(_)
             | ReadResponse::CrosslinkRosterWithAddresses(_)

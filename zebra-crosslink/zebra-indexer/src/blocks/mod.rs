@@ -3,7 +3,13 @@
 mod cursor;
 mod details;
 mod miner_attribution;
+mod miner_cursor;
+mod miner_stake;
+mod miner_stake_cursor;
+mod miners;
 mod query;
 
 pub use details::block_details_from_state;
+pub use miner_stake::miner_stake_from_state;
+pub use miners::{miner_info_from_state, top_miners_from_state};
 pub use query::blocks_page_from_state;

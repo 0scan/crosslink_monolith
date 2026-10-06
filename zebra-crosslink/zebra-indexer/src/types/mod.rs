@@ -9,7 +9,10 @@ mod block_details;
 mod block_page;
 mod block_transaction;
 mod chart;
+mod miner;
+mod miner_stake;
 mod pagination;
+mod stake_history;
 mod stats;
 mod top_balances;
 mod transaction;
@@ -27,7 +30,20 @@ pub use block_transaction::{
     BlockTransaction, BlockTransactionInput, BlockTransactionOutput, TransactionData,
 };
 pub use chart::{ChartDataEntry, ChartDataRequest, ChartDataResponse};
+pub use miner::{
+    MinerInfoResponse, TopMinerEntry, TopMinersPagination, TopMinersRequest, TopMinersResponse,
+    TopMinersSummary,
+};
+pub use miner_stake::{
+    CrosslinkMinerStakeEntry, CrosslinkMinerStakePagination, CrosslinkMinerStakeRequest,
+    CrosslinkMinerStakeResponse, CrosslinkMinerStakeSummary, CrosslinkStakeSourceAmount,
+    CrosslinkStakeSourceBreakdown, CrosslinkStakeSourceGroup,
+};
 pub use pagination::PageDirection;
+pub use stake_history::{
+    CrosslinkStakeAction, CrosslinkStakeHistoryEntry, CrosslinkStakeHistoryPagination,
+    CrosslinkStakeHistoryRequest, CrosslinkStakeHistoryResponse, CrosslinkStakeHistorySource,
+};
 pub use stats::{ChainTotals, IndexerStats, RollingDayStats};
 pub use top_balances::{
     TopBalanceEntry, TopBalancesPagination, TopBalancesRequest, TopBalancesResponse,

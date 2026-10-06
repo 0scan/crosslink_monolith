@@ -9,9 +9,11 @@ use zebra_chain::{transaction::Transaction, transparent};
 
 use crate::{
     explorer::{
-        ExplorerAddressPage, ExplorerAddressRecord, ExplorerBlockSummary, ExplorerPageDirection,
-        ExplorerReadRequest, ExplorerReadResponse, ExplorerTransactionPage,
-        ExplorerTransactionQuery, ExplorerTransactionSummary,
+        ExplorerAddressPage, ExplorerAddressRecord, ExplorerBlockSummary, ExplorerMinerPage,
+        ExplorerMinerStakePage, ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse,
+        ExplorerStakeHistoryCursor, ExplorerStakeHistoryEntry, ExplorerStakeHistoryFilter,
+        ExplorerStakeHistoryPage, ExplorerTransactionPage, ExplorerTransactionQuery,
+        ExplorerTransactionSummary,
     },
     request::Spend,
     service::{
@@ -26,7 +28,6 @@ use super::storage::explorer_transaction_record_with_ordered_utxos;
 
 const EXPLORER_ROLLING_SCAN_LIMIT: u32 = 10_000;
 const ROLLING_WINDOW_SECONDS: i64 = 86_400;
-
 const MAX_EXPLORER_PAGE_SIZE: u32 = 100;
 
 /// Handles every explorer read behind the state service's single extension point.
@@ -104,7 +105,239 @@ pub fn handle(
         ExplorerReadRequest::BalanceRankPage { limit, cursor } => {
             ExplorerReadResponse::BalanceRankPage(explorer_balance_rank_page(db, limit, cursor))
         }
+        ExplorerReadRequest::MinerPage {
+            limit,
+            cursor,
+            direction,
+        } => ExplorerReadResponse::MinerPage(explorer_miner_page(db, limit, cursor, direction)),
+        ExplorerReadRequest::Miner { address } => {
+            ExplorerReadResponse::Miner(explorer_miner(db, address))
+        }
+        ExplorerReadRequest::MinerStakePage {
+            finalizer,
+            limit,
+            cursor,
+            direction,
+        } => ExplorerReadResponse::MinerStakePage(explorer_miner_stake_page(
+            db, finalizer, limit, cursor, direction,
+        )),
+        ExplorerReadRequest::StakeHistoryPage {
+            filter,
+            limit,
+            cursor,
+            direction,
+            height_range,
+        } => ExplorerReadResponse::StakeHistoryPage(explorer_stake_history_page(
+            db,
+            filter,
+            limit,
+            cursor,
+            direction,
+            height_range,
+        )),
+        ExplorerReadRequest::FinalizerMinerSummaries(finalizers) => {
+            ExplorerReadResponse::FinalizerMinerSummaries(
+                finalizers
+                    .iter()
+                    .map(|finalizer| db.explorer_finalizer_miner_summary(*finalizer))
+                    .collect(),
+            )
+        }
     })
+}
+
+/// Returns one finalized staking-action history page.
+pub fn explorer_stake_history_page(
+    db: &ZebraDb,
+    filter: ExplorerStakeHistoryFilter,
+    limit: u32,
+    cursor: Option<ExplorerStakeHistoryCursor>,
+    direction: ExplorerPageDirection,
+    height_range: std::ops::RangeInclusive<zebra_chain::block::Height>,
+) -> ExplorerStakeHistoryPage {
+    let best_tip = db.tip();
+    let from_height = *height_range.start();
+    let to_height = *height_range.end();
+    let cursor_valid = cursor.is_none_or(|cursor| {
+        db.hash(cursor.location.height) == Some(cursor.block_hash)
+            && (from_height..=to_height).contains(&cursor.location.height)
+            && db
+                .explorer_stake_history_record(cursor.location)
+                .is_some_and(|record| filter.matches(record))
+    });
+    if !cursor_valid || from_height > to_height {
+        return ExplorerStakeHistoryPage {
+            best_tip,
+            cursor_valid,
+            ..Default::default()
+        };
+    }
+
+    let limit = limit.clamp(1, MAX_EXPLORER_PAGE_SIZE) as usize;
+    let mut records = db.explorer_stake_history_records(
+        filter,
+        cursor.map(|cursor| cursor.location),
+        direction,
+        from_height,
+        to_height,
+        limit.saturating_add(1),
+    );
+    let has_more = records.len() > limit;
+    records.truncate(limit);
+    let entries = records
+        .into_iter()
+        .map(|(location, record)| ExplorerStakeHistoryEntry {
+            location,
+            txid: db
+                .transaction_hash(location)
+                .expect("stake history location has a transaction hash"),
+            block_hash: db
+                .hash(location.height)
+                .expect("stake history location has a block hash"),
+            block_time: db
+                .block_header(location.height.into())
+                .expect("stake history location has a block header")
+                .time
+                .timestamp(),
+            record,
+        })
+        .collect();
+
+    ExplorerStakeHistoryPage {
+        best_tip,
+        cursor_valid,
+        entries,
+        has_more,
+    }
+}
+
+/// Returns the persisted all-time miner ranking without scanning blocks or all miners.
+pub fn explorer_miner_page(
+    db: &ZebraDb,
+    limit: u32,
+    cursor: Option<crate::ExplorerMinerRankCursor>,
+    direction: ExplorerPageDirection,
+) -> ExplorerMinerPage {
+    let best_tip = db.tip();
+    let cursor_valid = cursor.is_none_or(|cursor| {
+        best_tip.is_some_and(|(_, hash)| hash == cursor.block_hash)
+            && db.explorer_contains_miner_entry(cursor.address, cursor.block_count)
+    });
+    if !cursor_valid {
+        return ExplorerMinerPage {
+            best_tip,
+            cursor_valid,
+            ..Default::default()
+        };
+    }
+
+    let requested = usize::try_from(limit.clamp(1, MAX_EXPLORER_PAGE_SIZE))
+        .expect("explorer miner page limit fits in usize");
+    let mut entries = db.explorer_miner_entries(
+        cursor.map(|cursor| (cursor.address, cursor.block_count)),
+        direction,
+        requested.saturating_add(1),
+    );
+    let has_more = entries.len() > requested;
+    if direction == ExplorerPageDirection::Newer && has_more {
+        entries.remove(0);
+    } else {
+        entries.truncate(requested);
+    }
+    let totals = db.explorer_chain_stats();
+
+    ExplorerMinerPage {
+        best_tip,
+        cursor_valid,
+        block_count: totals.block_count,
+        attributed_block_count: totals.attributed_mined_block_count,
+        miner_count: totals.miner_count,
+        entries,
+        has_more,
+    }
+}
+
+/// Returns persisted all-time totals for one payout address in constant time.
+pub fn explorer_miner(
+    db: &ZebraDb,
+    address: zebra_chain::transparent::Address,
+) -> crate::ExplorerMiner {
+    crate::ExplorerMiner {
+        best_tip: db.tip(),
+        chain_block_count: db.explorer_chain_stats().block_count,
+        record: db.explorer_miner_record(address),
+    }
+}
+
+/// Returns current miner-attributed stake without scanning blocks or all bonds.
+pub fn explorer_miner_stake_page(
+    db: &ZebraDb,
+    finalizer: Option<[u8; 32]>,
+    limit: u32,
+    cursor: Option<crate::ExplorerMinerStakeRankCursor>,
+    direction: ExplorerPageDirection,
+) -> ExplorerMinerStakePage {
+    let best_tip = db.tip();
+    let cursor_valid = cursor.is_none_or(|cursor| {
+        best_tip.is_some_and(|(_, hash)| hash == cursor.block_hash)
+            && db.explorer_contains_miner_stake_entry(
+                finalizer,
+                cursor.miner_address,
+                cursor.finalizer,
+                cursor.current_stake_zat,
+            )
+    });
+    if !cursor_valid {
+        return ExplorerMinerStakePage {
+            best_tip,
+            cursor_valid,
+            ..Default::default()
+        };
+    }
+
+    let requested = usize::try_from(limit.clamp(1, MAX_EXPLORER_PAGE_SIZE))
+        .expect("explorer miner stake page limit fits in usize");
+    let mut entries = db.explorer_miner_stake_entries(
+        finalizer,
+        cursor.map(|cursor| {
+            (
+                cursor.miner_address,
+                cursor.finalizer,
+                cursor.current_stake_zat,
+            )
+        }),
+        direction,
+        requested.saturating_add(1),
+    );
+    let has_more = entries.len() > requested;
+    if direction == ExplorerPageDirection::Newer && has_more {
+        entries.remove(0);
+    } else {
+        entries.truncate(requested);
+    }
+
+    let totals = db.explorer_miner_stake_totals(finalizer);
+    let total_current_stake_zat = best_tip
+        .and_then(|(_, hash)| db.aggregated_stakes(&hash))
+        .map(|stakes| {
+            stakes.into_iter().fold(0_u64, |total, (key, stake)| {
+                if finalizer.is_none_or(|finalizer| finalizer == key) {
+                    total.saturating_add(stake)
+                } else {
+                    total
+                }
+            })
+        })
+        .unwrap_or(0);
+
+    ExplorerMinerStakePage {
+        best_tip,
+        cursor_valid,
+        total_current_stake_zat,
+        totals,
+        entries,
+        has_more,
+    }
 }
 
 /// Returns canonical block summaries for `heights`, preserving request order.
