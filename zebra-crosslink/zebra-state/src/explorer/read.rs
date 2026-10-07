@@ -262,10 +262,14 @@ pub fn explorer_miner(
     db: &ZebraDb,
     address: zebra_chain::transparent::Address,
 ) -> crate::ExplorerMiner {
+    let (staked_zat, finalizer_count) = db.explorer_miner_stake_summary(address);
+
     crate::ExplorerMiner {
         best_tip: db.tip(),
         chain_block_count: db.explorer_chain_stats().block_count,
         record: db.explorer_miner_record(address),
+        staked_zat,
+        finalizer_count,
     }
 }
 

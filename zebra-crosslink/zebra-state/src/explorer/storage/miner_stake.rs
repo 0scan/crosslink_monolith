@@ -25,6 +25,31 @@ use super::disk_format::{
 };
 
 impl ZebraDb {
+    /// Returns the current miner-attributed stake and distinct active finalizer count for one
+    /// transparent address.
+    ///
+    /// The metadata column is address-prefixed, so this only scans the address's current and
+    /// historical finalizer pairs rather than the global miner-stake ranking. Pair records are
+    /// retained when their last bond leaves, so inactive records must be ignored.
+    pub fn explorer_miner_stake_summary(&self, address: Address) -> (u64, u64) {
+        let minimum = ExplorerMinerFinalizerKey::min_for_address(address);
+        let maximum = ExplorerMinerFinalizerKey::max_for_address(address);
+
+        self.explorer_miner_finalizer_meta_cf()
+            .zs_forward_range_iter(minimum..=maximum)
+            .filter(|(_, record)| record.active_bond_count > 0)
+            .fold((0_u64, 0_u64), |(stake, finalizers), (_, record)| {
+                (
+                    stake
+                        .checked_add(record.current_stake_zat)
+                        .expect("verified miner stake fits in u64"),
+                    finalizers
+                        .checked_add(1)
+                        .expect("miner finalizer count fits in u64"),
+                )
+            })
+    }
+
     /// Returns the highest-stake recognized miner address and distinct miner count for a finalizer.
     pub fn explorer_finalizer_miner_summary(
         &self,
@@ -839,12 +864,12 @@ mod tests {
     use super::{
         add_non_transparent, add_transparent_totals, classify_primary_stake_source,
         move_transparent_totals, remove_non_transparent, remove_transparent_totals,
-        ExplorerFinalizerMinerRankKey,
+        ExplorerFinalizerMinerRankKey, ExplorerMinerFinalizerKey,
     };
     use crate::{
         constants::{state_database_format_version_in_code, STATE_DATABASE_KIND},
         service::finalized_state::{DiskWriteBatch, ZebraDb, STATE_COLUMN_FAMILIES_IN_CODE},
-        Config, ExplorerMinerStakeTotals, ExplorerStakeSource,
+        Config, ExplorerMinerFinalizerRecord, ExplorerMinerStakeTotals, ExplorerStakeSource,
     };
     use zebra_chain::{
         parameters::{Network, NetworkKind},
@@ -909,6 +934,67 @@ mod tests {
         let summary = db.explorer_finalizer_miner_summary(finalizer);
         assert_eq!(summary.primary_miner_address, Some(primary));
         assert_eq!(summary.miner_address_count, 2);
+    }
+
+    #[test]
+    fn miner_stake_summary_aggregates_active_finalizer_pairs_for_one_address() {
+        let db = ZebraDb::new(
+            &Config::ephemeral(),
+            STATE_DATABASE_KIND,
+            &state_database_format_version_in_code(),
+            &Network::Mainnet,
+            true,
+            STATE_COLUMN_FAMILIES_IN_CODE
+                .iter()
+                .map(ToString::to_string),
+            false,
+        )
+        .expect("opening an ephemeral database should succeed");
+        let address = Address::from_pub_key_hash(NetworkKind::Mainnet, [2; 20]);
+        let other_address = Address::from_pub_key_hash(NetworkKind::Mainnet, [9; 20]);
+        let record = |current_stake_zat, active_bond_count| ExplorerMinerFinalizerRecord {
+            current_stake_zat,
+            active_bond_count,
+            stake_action_count: 1,
+            latest_height: 1,
+            latest_block_hash: zebra_chain::block::Hash([1; 32]),
+            latest_timestamp: 1,
+        };
+
+        let mut batch = DiskWriteBatch::new();
+        let _ = db
+            .explorer_miner_finalizer_meta_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerMinerFinalizerKey::new(address, [1; 32]),
+                &record(100, 1),
+            );
+        let _ = db
+            .explorer_miner_finalizer_meta_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerMinerFinalizerKey::new(address, [2; 32]),
+                &record(250, 2),
+            );
+        let _ = db
+            .explorer_miner_finalizer_meta_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerMinerFinalizerKey::new(address, [3; 32]),
+                &record(0, 0),
+            );
+        let _ = db
+            .explorer_miner_finalizer_meta_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerMinerFinalizerKey::new(other_address, [4; 32]),
+                &record(999, 1),
+            );
+        db.write_batch(batch)
+            .expect("writing miner stake summary fixtures should succeed");
+
+        assert_eq!(db.explorer_miner_stake_summary(address), (350, 2));
+        assert_eq!(db.explorer_miner_stake_summary(other_address), (999, 1));
     }
 
     #[test]

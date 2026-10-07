@@ -592,6 +592,8 @@ pub struct ExplorerMiner {
     pub best_tip: Option<(block::Height, block::Hash)>,
     pub chain_block_count: u64,
     pub record: Option<ExplorerMinerRecord>,
+    pub staked_zat: u64,
+    pub finalizer_count: u64,
 }
 
 /// Durable current stake attributed to one miner-finalizer pair.
