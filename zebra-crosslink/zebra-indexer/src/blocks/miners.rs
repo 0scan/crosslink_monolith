@@ -94,8 +94,8 @@ where
         last_mined_at: miner
             .record
             .map(|record| record.latest_timestamp.to_string()),
-        staked_zat: None,
-        finalizer_count: None,
+        staked_zat: Some(miner.staked_zat.to_string()),
+        finalizer_count: Some(miner.finalizer_count.to_string()),
         indexed_height: miner.best_tip.map(|(height, _)| height.0.to_string()),
         indexed_block_hash: miner.best_tip.map(|(_, hash)| hash.to_string()),
     })
