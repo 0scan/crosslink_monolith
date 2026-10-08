@@ -29,8 +29,6 @@ pub enum TFLBlockFinality {
 /// These map one to one to the variants of the same name in [`TFLServiceResponse`].
 #[derive(Clone, Debug)]
 pub enum TFLServiceRequest {
-    /// Send a staking command transaction
-    StakingCmd(String),
     /// faucet
     Faucet(String),
     /// For crosslink testnet 1
@@ -52,8 +50,6 @@ pub enum TFLServiceRequest {
 /// These map one to one to the variants of the same name in [`TFLServiceRequest`].
 #[derive(Debug)]
 pub enum TFLServiceResponse {
-    /// Send a staking command transaction
-    StakingCmd,
     /// Faucet
     Faucet(Result<u64, String>),
     /// Response to [`ReadRequest::TotalIssuanceFromKey`]

@@ -59,7 +59,7 @@ use tracing::Instrument;
 
 use zcash_address::{unified::Encoding, TryFromAddress};
 use zcash_protocol::consensus::{self, Parameters};
-use zcash_primitives::transaction::RosterMember;
+use zcash_primitives::transaction::{RosterMember, StakingActionRequest};
 use zcash_primitives::bft::{FatPointerToBftBlock, ScanInfo};
 
 use zebra_chain::{
@@ -157,8 +157,6 @@ pub(super) const PARAM_START_INDEX_DESC: &str =
     "The index of the first 2^16-leaf subtree to return.";
 pub(super) const PARAM_LIMIT_DESC: &str = "The maximum number of subtrees to return.";
 pub(super) const PARAM_REQUEST_DESC: &str = "The request object containing the parameters.";
-pub(super) const PARAM_STRING_DESC: &str = "A Crosslink staking command string.";
-#[allow(dead_code)]
 pub(super) const PARAM_STAKING_ACTION_DESC: &str =
     "The staking action to submit from the attached wallet.";
 pub(super) const PARAM_VALUE_ZATS_DESC: &str =
@@ -415,10 +413,6 @@ pub trait Rpc {
     #[method(name = "get_tfl_fat_pointer_to_bft_chain_tip")]
     async fn get_tfl_fat_pointer_to_bft_chain_tip(&self) -> Option<FatPointerToBftBlock>;
 
-    /// Get BFT command buffer
-    #[method(name = "staking_command")]
-    async fn staking_command(&self, string: String) -> Result<String>;
-
     /// Placeholder function for getting actual final block.
     /// For the sake of testing, this currently treats pre-reorg block as final.
     ///
@@ -612,6 +606,10 @@ pub trait Rpc {
     /// Get the UFVK for the attached wallet
     #[method(name = "get_wallet_ufvk")]
     async fn get_wallet_ufvk(&self) -> Option<String>;
+
+    /// Send a staking action from the given wallet
+    #[method(name = "wallet_staking_action")]
+    async fn wallet_staking_action(&self, staking_action: StakingActionParam) -> Result<String>;
 
     /// Get all staking positions for the wallet: active bonds grouped by target
     /// finalizer, withdrawable bonds as a flat list
@@ -2200,26 +2198,6 @@ where
         }
     }
 
-    async fn staking_command(&self, cmd: String) -> Result<String> {
-        match self
-            .tfl_service
-            .clone()
-            .ready()
-            .await
-            .unwrap()
-            .call(TFLServiceRequest::StakingCmd(cmd.clone()))
-            .await
-        {
-            Ok(TFLServiceResponse::StakingCmd) => Ok(cmd),
-            Ok(_) => unreachable!("unmatched response to a `StakingCmd` request"),
-            Err(err) => Err(ErrorObject::owned(
-                server::error::LegacyCode::Verify.into(),
-                format!("staking command \"{cmd}\" failed: {err}"),
-                None::<()>,
-            )),
-        }
-    }
-
     async fn get_tfl_final_block_hash(&self) -> Option<GetBlockHash> {
         self.crosslink_finalized_tip().await.map(|(_, hash)| GetBlockHash(hash))
     }
@@ -2418,6 +2396,33 @@ where
         match res {
             Ok(TFLServiceResponse::WalletUfvk(ufvk_str)) => ufvk_str,
             _ => None
+        }
+    }
+
+    async fn wallet_staking_action(&self, staking_action: StakingActionParam) -> Result<String> {
+        let res = self
+            .tfl_service
+            .clone()
+            .ready()
+            .await
+            .unwrap()
+            .call(TFLServiceRequest::WalletStakingAction(staking_action.0))
+            .await;
+
+        // The request is not echoed back: one variant carries a finalizer key seed.
+        match res {
+            Ok(TFLServiceResponse::WalletStakingAction(Ok(res))) => Ok(res),
+            Ok(TFLServiceResponse::WalletStakingAction(Err(err))) => Err(ErrorObject::owned(
+                    server::error::LegacyCode::Verify.into(),
+                    format!("Staking action failed: {err}"),
+                    None::<()>,
+            )),
+            Err(err) => Err(ErrorObject::owned(
+                    server::error::LegacyCode::Verify.into(),
+                    format!("Staking action failed: {err}"),
+                    None::<()>,
+            )),
+            _ => unreachable!(""),
         }
     }
 
@@ -5481,6 +5486,15 @@ impl GetBlockHashResponse {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct UfvkList(pub Vec<String>);
+
+/// A staking action for the attached wallet, in [`StakingActionRequest`]'s own JSON form.
+///
+/// A newtype because the OpenRPC schema generator needs `JsonSchema` on every parameter type, and
+/// `StakingActionRequest` lives in librustzcash, which does not depend on `schemars`. The schema
+/// is left open (any JSON value).
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct StakingActionParam(#[schemars(with = "serde_json::Value")] pub StakingActionRequest);
 
 /// Hex-encoded hash of a specific transaction.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]

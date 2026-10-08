@@ -78,7 +78,7 @@ settle $((2 * BOND + 1000000))
 while [ "$(tip 0)" -lt "$STAKING_HEIGHT" ]; do rpc 0 generate "[$(( STAKING_HEIGHT - $(tip 0) ))]" >/dev/null; sleep 1; done
 for n in 0 1; do
   cmd=$(jq -cn --arg f "${FIN[$n]}" --argjson a "$BOND" '{CreateNewDelegationBond:{amount_zats:$a,target_finalizer:$f}}')
-  log "bond -> node$n: $(rpc 0 staking_command "$(jq -cn --arg c "$cmd" '[$c]')" | jq -c 'if .error then .error else "submitted" end')"
+  log "bond -> node$n: $(rpc 0 wallet_staking_action "[$cmd]" | jq -c 'if .error then .error else "submitted" end')"
   if [ $n = 0 ]; then settle $((BOND + 1000000)); else settle 0; fi
 done
 rpc 0 generate '[1]' >/dev/null

@@ -24,7 +24,7 @@ state directories and both nodes' logs, with the pre-restart logs kept beside th
 2. Waits for node 0's wallet to finish its first sync pass, mines four blocks with the regtest
    `generate` RPC (coinbase to the wallet's miner account; coinbase maturity is two blocks on
    this tree) and moves 0.5 ZEC to the user account through `requestfaucetdonation`.
-3. Bonds 0.2 ZEC to each node's finalizer address through `staking_command`, taking the
+3. Bonds 0.2 ZEC to each node's finalizer address through `wallet_staking_action`, taking the
    addresses from each node's own `finalizer address:` startup line, and mines each
    transaction in. The bonds go in on the first staking day, at or above the staking height
    (150); staking actions are illegal below it. Both bonds must be in the chain before the

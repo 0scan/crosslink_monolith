@@ -747,41 +747,6 @@ async fn tfl_service_incoming_request(
             }))
         }
 
-        // `staking_command` takes the request as a JSON string so the RPC surface stays a single
-        // stringly-typed method, and dispatches it down the same staging path as
-        // `WalletStakingAction`. The wallet is the only thing that can build and fund a staking
-        // transaction, so both entry points must funnel into `wallet::STAKING_STAGE`.
-        TFLServiceRequest::StakingCmd(cmd) => {
-            let request: zcash_primitives::transaction::StakingActionRequest = serde_json::from_str(&cmd).map_err(|err| {
-                TFLServiceError::Misc(format!(
-                    "staking command must be a JSON StakingActionRequest, e.g. \
-                     {{\"CreateNewDelegationBond\":{{\"amount_zats\":100000,\"target_finalizer\":\"<zfin address>\"}}}}: {err}"
-                ))
-            })?;
-
-            let rx = {
-                let mut lock = wallet::STAKING_STAGE.lock().unwrap();
-                match *lock {
-                    None => {
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        *lock = Some((request, tx));
-                        rx
-                    }
-                    Some(_) => {
-                        return Err(TFLServiceError::Misc(
-                            "Another stake in progress, please try again soon".to_string(),
-                        ))
-                    }
-                }
-            };
-
-            match rx.await {
-                Ok(Ok(_)) => Ok(TFLServiceResponse::StakingCmd),
-                Ok(Err(err)) => Err(TFLServiceError::Misc(err)),
-                Err(err) => Err(TFLServiceError::Misc(format!("{err}"))),
-            }
-        }
-
         TFLServiceRequest::WalletUfvk => Ok(TFLServiceResponse::WalletUfvk(wallet::USER_UFVK_STRING.lock().unwrap().clone())),
     }
 }
