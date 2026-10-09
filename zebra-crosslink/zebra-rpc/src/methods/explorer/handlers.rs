@@ -32,10 +32,7 @@ use zebra_network::address_book_peers::AddressBookPeers;
 use zebra_node_services::mempool::{self as node_mempool, MempoolService};
 use zebra_state::crosslink::{TFLServiceRequest, TFLServiceResponse};
 #[cfg(feature = "indexer")]
-use zebra_state::{
-    ExplorerFinalizerStakeSummary, ExplorerReadRequest, ExplorerReadResponse, HashOrHeight,
-    ReadRequest, ReadResponse,
-};
+use zebra_state::{ExplorerFinalizerStakeSummary, HashOrHeight, ReadRequest, ReadResponse};
 use zebra_state::{ReadState as ReadStateService, State as StateService};
 
 use crate::server::{self, error::MapError};
@@ -437,14 +434,17 @@ where
                 ReadResponse::CrosslinkFinalizerCandidates {
                     tip,
                     candidates: Some(candidates),
+                    ..
                 } => (tip, candidates),
                 ReadResponse::CrosslinkFinalizerCandidates {
                     tip: None,
                     candidates: None,
+                    ..
                 } => (None, Vec::new()),
                 ReadResponse::CrosslinkFinalizerCandidates {
                     tip: Some(_),
                     candidates: None,
+                    ..
                 } => {
                     return Err("finalizer stake snapshot is unavailable at the best-chain tip")
                         .map_misc_error()
@@ -655,18 +655,21 @@ where
                 ),
                 call_service(self.read_state.clone(), ReadRequest::CrosslinkIsActivated),
             );
-            let (tip, candidates) = match candidates_response? {
+            let (tip, candidates, stake_summaries) = match candidates_response? {
                 ReadResponse::CrosslinkFinalizerCandidates {
                     tip,
                     candidates: Some(candidates),
-                } => (tip, candidates),
+                    stake_summaries,
+                } => (tip, candidates, stake_summaries),
                 ReadResponse::CrosslinkFinalizerCandidates {
                     tip: None,
                     candidates: None,
-                } => (None, Vec::new()),
+                    ..
+                } => (None, Vec::new(), Vec::new()),
                 ReadResponse::CrosslinkFinalizerCandidates {
                     tip: Some(_),
                     candidates: None,
+                    ..
                 } => {
                     return Err("finalizer stake snapshot is unavailable at the best-chain tip")
                         .map_misc_error()
@@ -682,19 +685,7 @@ where
                 .iter()
                 .map(|(member, _)| member.pub_key)
                 .collect::<Vec<_>>();
-            let summaries_response = call_service(
-                self.read_state.clone(),
-                ReadRequest::Explorer(ExplorerReadRequest::FinalizerStakeSummaries(
-                    finalizer_keys.clone().into(),
-                )),
-            )
-            .await?;
-            let summaries = match summaries_response {
-                ReadResponse::Explorer(ExplorerReadResponse::FinalizerStakeSummaries(
-                    summaries,
-                )) => finalizer_keys.into_iter().zip(summaries).collect(),
-                _ => unreachable!("unmatched response to FinalizerStakeSummaries"),
-            };
+            let summaries = finalizer_keys.into_iter().zip(stake_summaries).collect();
 
             Ok(crosslink_finalizers_response(
                 tip,

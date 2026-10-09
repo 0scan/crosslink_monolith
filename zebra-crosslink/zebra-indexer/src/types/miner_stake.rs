@@ -28,11 +28,11 @@ pub struct CrosslinkMinerStakeEntry {
     pub rank: u64,
     /// Representative transparent address that originally funded these bonds.
     pub address: String,
-    /// Whether this source address has been observed mining a finalized block.
+    /// Whether this source address has been observed mining a canonical block.
     pub is_miner: bool,
     /// Best-effort mining pool attribution.
     pub pool: String,
-    /// Finalized blocks attributed to this source address; zero for non-miners.
+    /// Canonical blocks attributed to this source address; zero for non-miners.
     pub blocks_mined: String,
     /// Target finalizer public key.
     pub finalizer_public_key: String,
@@ -73,7 +73,7 @@ pub struct CrosslinkStakeSourceAmount {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkStakeSourceBreakdown {
     pub miners: CrosslinkStakeSourceGroup,
-    /// Transparent source addresses not observed mining a finalized block.
+    /// Transparent source addresses not observed mining a canonical block.
     pub others: CrosslinkStakeSourceGroup,
     pub shielded: CrosslinkStakeSourceAmount,
     /// Mixed, missing, or otherwise ambiguous transaction sources.
@@ -114,7 +114,7 @@ pub struct CrosslinkMinerStakePagination {
     pub prev_cursor: Option<String>,
 }
 
-/// Current transparent-attributed stake at one finalized explorer snapshot.
+/// Current transparent-attributed stake at one best-chain explorer snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkMinerStakeResponse {
     pub items: Vec<CrosslinkMinerStakeEntry>,

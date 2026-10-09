@@ -585,6 +585,12 @@ impl DiskWriteBatch {
 }
 
 impl DiskDb {
+    /// Pins a finalized-state view while explorer reads merge the best-chain suffix.
+    #[cfg(feature = "indexer")]
+    pub(crate) fn snapshot(&self) -> rocksdb::Snapshot<'_> {
+        self.db.snapshot()
+    }
+
     /// Prints rocksdb metrics for each column family along with total database disk size, live data disk size and database memory size.
     pub fn print_db_metrics(&self) {
         let mut total_size_on_disk = 0;

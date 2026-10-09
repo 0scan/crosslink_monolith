@@ -19,6 +19,7 @@ pub(crate) use columns::{
     EXPLORER_SHIELDED_TRANSACTION_BY_CLASS_LOC, EXPLORER_STAKE_HISTORY_BY_LOC,
     EXPLORER_TRANSACTION_BY_KIND_LOC, EXPLORER_TRANSACTION_META_BY_LOC,
 };
+pub(crate) use miner_stake::MinerStakeUpdates;
 pub(crate) use transactions::*;
 
 /// Explorer facts carried between the existing transparent and chain commit phases.

@@ -160,6 +160,68 @@ where
         self.db.zs_get(&self.cf, key)
     }
 
+    /// Reads one value from a fixed database snapshot.
+    #[cfg(feature = "indexer")]
+    pub(crate) fn zs_get_at(&self, snapshot: &rocksdb::Snapshot<'_>, key: &Key) -> Option<Value> {
+        snapshot
+            .get_cf(&self.cf, key.as_bytes())
+            .expect("unexpected database failure")
+            .map(Value::from_bytes)
+    }
+
+    /// Iterates a typed range in a fixed database snapshot.
+    #[cfg(feature = "indexer")]
+    pub(crate) fn zs_range_iter_at<'a, Range>(
+        &'a self,
+        snapshot: &'a rocksdb::Snapshot<'_>,
+        range: Range,
+        reverse: bool,
+    ) -> impl Iterator<Item = (Key, Value)> + 'a
+    where
+        Range: RangeBounds<Key>,
+    {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let bytes = |bound: std::ops::Bound<&Key>| match bound {
+            Included(key) => Included(key.as_bytes().as_ref().to_vec()),
+            Excluded(key) => Excluded(key.as_bytes().as_ref().to_vec()),
+            Unbounded => Unbounded,
+        };
+        let range = (bytes(range.start_bound()), bytes(range.end_bound()));
+        let mut options = rocksdb::ReadOptions::default();
+        if let Included(key) | Excluded(key) = range.start_bound() {
+            options.set_iterate_lower_bound(key.clone());
+        }
+        match range.end_bound() {
+            Included(key) => {
+                // Appending zero sorts immediately after the inclusive key, even at all-FF.
+                let mut upper = key.clone();
+                upper.push(0);
+                options.set_iterate_upper_bound(upper);
+            }
+            Excluded(key) => options.set_iterate_upper_bound(key.clone()),
+            Unbounded => {}
+        }
+        let mode = match (reverse, range.start_bound(), range.end_bound()) {
+            (false, Included(key) | Excluded(key), _) => {
+                rocksdb::IteratorMode::From(key, rocksdb::Direction::Forward)
+            }
+            (true, _, Included(key) | Excluded(key)) => {
+                rocksdb::IteratorMode::From(key, rocksdb::Direction::Reverse)
+            }
+            (false, _, _) => rocksdb::IteratorMode::Start,
+            (true, _, _) => rocksdb::IteratorMode::End,
+        };
+        snapshot
+            .iterator_cf_opt(&self.cf, options, mode)
+            .map(|entry| entry.expect("unexpected database failure"))
+            .skip_while({
+                let range = range.clone();
+                move |(key, _)| !range.contains(&key.to_vec())
+            })
+            .take_while(move |(key, _)| range.contains(&key.to_vec()))
+            .map(|(key, value)| (Key::from_bytes(key), Value::from_bytes(value)))
+    }
+
     /// Check if this rocksdb column family contains the serialized form of `key`.
     pub fn zs_contains(&self, key: &Key) -> bool {
         self.db.zs_contains(&self.cf, key)

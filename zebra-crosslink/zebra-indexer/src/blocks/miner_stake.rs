@@ -224,7 +224,7 @@ where
                     current_stake_zat: entry.record.current_stake_zat,
                     rank,
                     indexed_block_hash: indexed_block_hash
-                        .expect("a non-empty miner stake ranking has a finalized tip"),
+                        .expect("a non-empty miner stake ranking has a canonical tip"),
                 }
                 .encode()
             })

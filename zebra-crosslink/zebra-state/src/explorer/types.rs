@@ -99,7 +99,7 @@ pub enum ExplorerStakeAction {
     ConvertReward,
 }
 
-/// Validated filters for the finalized staking-action history.
+/// Validated filters for the canonical staking-action history.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ExplorerStakeHistoryFilter {
     /// Match a transparent address that originally funded the bond.
@@ -207,7 +207,7 @@ pub enum ExplorerReadRequest {
         /// Cursor traversal direction.
         direction: ExplorerPageDirection,
     },
-    /// Returns finalized Crosslink staking actions in reverse chain order.
+    /// Returns canonical Crosslink staking actions in reverse chain order.
     StakeHistoryPage {
         /// Staking-action filters.
         filter: ExplorerStakeHistoryFilter,
@@ -659,7 +659,7 @@ impl ExplorerStakeHistoryFilter {
     }
 }
 
-/// Stable cursor for finalized staking-action history.
+/// Stable cursor for canonical staking-action history.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExplorerStakeHistoryCursor {
@@ -678,7 +678,7 @@ pub struct ExplorerStakeHistoryEntry {
     pub record: ExplorerStakeHistoryRecord,
 }
 
-/// One finalized staking-action history page.
+/// One canonical staking-action history page.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExplorerStakeHistoryPage {
@@ -734,7 +734,7 @@ pub struct ExplorerMinerStakeRankCursor {
     pub block_hash: block::Hash,
 }
 
-/// One finalized current transparent-source stake ranking page.
+/// One best-chain current transparent-source stake ranking page.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExplorerMinerStakePage {

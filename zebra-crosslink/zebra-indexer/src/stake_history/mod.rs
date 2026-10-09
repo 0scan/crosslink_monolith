@@ -1,4 +1,4 @@
-//! Finalized Crosslink staking-action history queries.
+//! Canonical Crosslink staking-action history queries, including the best-chain suffix.
 
 mod cursor;
 
@@ -25,7 +25,7 @@ use self::cursor::StakeHistoryCursor;
 const DEFAULT_LIMIT: u32 = 30;
 const MAX_LIMIT: u32 = 100;
 
-/// Returns finalized staking actions, optionally filtered by source, finalizer, bond, and action.
+/// Returns staking actions through the best-chain tip, filtered by source, finalizer, bond, and action.
 pub async fn stake_history_from_state<State>(
     read_state: State,
     address: Option<Address>,

@@ -446,6 +446,9 @@ pub enum ReadResponse {
     CrosslinkFinalizerCandidates {
         /// Best-chain tip used for the candidate snapshot.
         tip: Option<(block::Height, block::Hash)>,
+        /// Transparent-source summaries at the same snapshot, parallel to candidates.
+        #[cfg(feature = "indexer")]
+        stake_summaries: Vec<crate::ExplorerFinalizerStakeSummary>,
         /// Aggregated candidates and their verified finalizer addresses.
         candidates: Option<
             Vec<(

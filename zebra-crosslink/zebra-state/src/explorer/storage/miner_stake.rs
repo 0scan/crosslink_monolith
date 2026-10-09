@@ -7,6 +7,7 @@ use std::{
 
 use zcash_primitives::transaction::StakingAction;
 use zebra_chain::{
+    block::{self, Block, Height},
     parameters::Network,
     transaction::{primary_value_endpoints, Transaction, TransactionValueEndpoint},
     transparent::{Address, OutPoint, Utxo},
@@ -16,8 +17,8 @@ use crate::{
     request::FinalizedBlock,
     service::finalized_state::{DiskWriteBatch, ZebraDb},
     ExplorerBondAttributionRecord, ExplorerFinalizerStakeSummary, ExplorerMinerFinalizerRecord,
-    ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals, ExplorerPageDirection,
-    ExplorerStakeSource,
+    ExplorerMinerRecord, ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals,
+    ExplorerPageDirection, ExplorerStakeSource,
 };
 
 use super::disk_format::{
@@ -331,14 +332,59 @@ impl DiskWriteBatch {
         self.prepare_explorer_stake_history_batch(db, network, finalized, spent_utxos);
 
         let mut updates = MinerStakeUpdates::new(db, current_block_miner);
-        let latest_timestamp = finalized.block.header.time.timestamp();
         if new_miner {
             updates.promote_transparent_source(
                 current_block_miner.expect("a new miner has a transparent payout address"),
             );
         }
 
-        for transaction in &finalized.block.transactions {
+        updates.apply_block(
+            network,
+            &finalized.block,
+            (finalized.height, finalized.hash),
+            spent_utxos,
+            &finalized.bond_rewards,
+            &finalized.bond_burns,
+        );
+
+        updates.write(self);
+    }
+}
+
+pub(crate) struct MinerStakeUpdates<'db> {
+    db: &'db ZebraDb,
+    snapshot: rocksdb::Snapshot<'db>,
+    miners: HashMap<Address, ExplorerMinerRecord>,
+    history: Vec<crate::ExplorerStakeHistoryEntry>,
+    addresses: HashMap<[u8; 32], zcash_primitives::bft::FinalizerAddress>,
+    bonds: HashMap<[u8; 32], Option<ExplorerBondAttributionRecord>>,
+    pairs: HashMap<ExplorerMinerFinalizerKey, Option<ExplorerMinerFinalizerRecord>>,
+    original_pairs: HashMap<ExplorerMinerFinalizerKey, Option<ExplorerMinerFinalizerRecord>>,
+    global_totals: ExplorerMinerStakeTotals,
+    finalizer_totals: HashMap<[u8; 32], ExplorerMinerStakeTotals>,
+    current_block_miner: Option<Address>,
+    changed: bool,
+}
+
+#[cfg(test)]
+#[path = "miner_stake/snapshot_tests.rs"]
+mod snapshot_tests;
+
+mod snapshot;
+
+impl<'db> MinerStakeUpdates<'db> {
+    fn apply_block(
+        &mut self,
+        network: &Network,
+        block: &Block,
+        tip: (Height, block::Hash),
+        spent_utxos: &HashMap<OutPoint, Utxo>,
+        bond_rewards: &[([u8; 32], u64)],
+        bond_burns: &[[u8; 32]],
+    ) {
+        let (height, hash) = tip;
+        let latest_timestamp = block.header.time.timestamp();
+        for transaction in &block.transactions {
             let Some(action) = transaction.staking_action() else {
                 continue;
             };
@@ -354,27 +400,27 @@ impl DiskWriteBatch {
                         current_finalizer: target_finalizer.pub_key.0,
                         current_stake_zat: *amount_zats,
                     };
-                    updates.set_bond(*unique_pubkey, Some(attribution));
-                    updates.add_attribution(attribution, finalized, latest_timestamp, true);
+                    self.set_bond(*unique_pubkey, Some(attribution));
+                    self.add_attribution(attribution, height, hash, latest_timestamp, true);
                 }
                 StakingAction::RetargetDelegationBond {
                     unique_pubkey,
                     to_finalizer,
                     ..
                 } => {
-                    let Some(mut attribution) = updates.bond(*unique_pubkey) else {
+                    let Some(mut attribution) = self.bond(*unique_pubkey) else {
                         continue;
                     };
-                    updates.remove_attribution(attribution);
+                    self.remove_attribution(attribution);
                     attribution.current_finalizer = to_finalizer.pub_key.0;
-                    updates.set_bond(*unique_pubkey, Some(attribution));
-                    updates.add_attribution(attribution, finalized, latest_timestamp, true);
+                    self.set_bond(*unique_pubkey, Some(attribution));
+                    self.add_attribution(attribution, height, hash, latest_timestamp, true);
                 }
                 StakingAction::BeginDelegationUnbonding { unique_pubkey, .. }
                 | StakingAction::WithdrawDelegationBond { unique_pubkey, .. } => {
-                    if let Some(attribution) = updates.bond(*unique_pubkey) {
-                        updates.remove_attribution(attribution);
-                        updates.set_bond(*unique_pubkey, None);
+                    if let Some(attribution) = self.bond(*unique_pubkey) {
+                        self.remove_attribution(attribution);
+                        self.set_bond(*unique_pubkey, None);
                     }
                 }
                 StakingAction::ConvertFinalizerRewardToDelegationBond {
@@ -388,54 +434,48 @@ impl DiskWriteBatch {
                         current_finalizer: *this_finalizer,
                         current_stake_zat: *amount_zats,
                     };
-                    updates.set_bond(*unique_pubkey, Some(attribution));
-                    updates.add_attribution(attribution, finalized, latest_timestamp, true);
+                    self.set_bond(*unique_pubkey, Some(attribution));
+                    self.add_attribution(attribution, height, hash, latest_timestamp, true);
                 }
             }
         }
 
-        for (bond_key, reward) in &finalized.bond_rewards {
-            let Some(mut attribution) = updates.bond(*bond_key) else {
+        for (bond_key, reward) in bond_rewards {
+            let Some(mut attribution) = self.bond(*bond_key) else {
                 continue;
             };
-            updates.add_reward(attribution, *reward);
+            self.add_reward(attribution, *reward);
             attribution.current_stake_zat = attribution
                 .current_stake_zat
                 .checked_add(*reward)
                 .expect("verified miner-attributed bond value fits in u64");
-            updates.set_bond(*bond_key, Some(attribution));
+            self.set_bond(*bond_key, Some(attribution));
         }
 
-        for bond_key in &finalized.bond_burns {
-            if let Some(attribution) = updates.bond(*bond_key) {
-                updates.remove_attribution(attribution);
-                updates.set_bond(*bond_key, None);
+        for bond_key in bond_burns {
+            if let Some(attribution) = self.bond(*bond_key) {
+                self.remove_attribution(attribution);
+                self.set_bond(*bond_key, None);
             }
         }
-
-        updates.write(self);
     }
-}
 
-struct MinerStakeUpdates<'db> {
-    db: &'db ZebraDb,
-    bonds: HashMap<[u8; 32], Option<ExplorerBondAttributionRecord>>,
-    pairs: HashMap<ExplorerMinerFinalizerKey, Option<ExplorerMinerFinalizerRecord>>,
-    original_pairs: HashMap<ExplorerMinerFinalizerKey, Option<ExplorerMinerFinalizerRecord>>,
-    global_totals: ExplorerMinerStakeTotals,
-    finalizer_totals: HashMap<[u8; 32], ExplorerMinerStakeTotals>,
-    current_block_miner: Option<Address>,
-    changed: bool,
-}
-
-impl<'db> MinerStakeUpdates<'db> {
     fn new(db: &'db ZebraDb, current_block_miner: Option<Address>) -> Self {
+        let snapshot = db.disk_db().snapshot();
+        let global_totals = db
+            .explorer_miner_stake_totals_cf()
+            .zs_get_at(&snapshot, &())
+            .unwrap_or_default();
         Self {
             db,
+            snapshot,
+            miners: HashMap::new(),
+            history: Vec::new(),
+            addresses: HashMap::new(),
             bonds: HashMap::new(),
             pairs: HashMap::new(),
             original_pairs: HashMap::new(),
-            global_totals: db.explorer_miner_stake_totals(None),
+            global_totals,
             finalizer_totals: HashMap::new(),
             current_block_miner,
             changed: false,
@@ -446,7 +486,10 @@ impl<'db> MinerStakeUpdates<'db> {
         if let Some(record) = self.bonds.get(&key) {
             return *record;
         }
-        let record = self.db.explorer_bond_attribution_cf().zs_get(&key);
+        let record = self
+            .db
+            .explorer_bond_attribution_cf()
+            .zs_get_at(&self.snapshot, &key);
         self.bonds.insert(key, record);
         record
     }
@@ -460,34 +503,50 @@ impl<'db> MinerStakeUpdates<'db> {
         if let Some(record) = self.pairs.get(&key) {
             return *record;
         }
-        let record = self.db.explorer_miner_finalizer_meta_cf().zs_get(&key);
+        let record = self
+            .db
+            .explorer_miner_finalizer_meta_cf()
+            .zs_get_at(&self.snapshot, &key);
         self.original_pairs.insert(key, record);
         self.pairs.insert(key, record);
         record
     }
 
     fn finalizer_totals(&mut self, finalizer: [u8; 32]) -> &mut ExplorerMinerStakeTotals {
-        self.finalizer_totals
-            .entry(finalizer)
-            .or_insert_with(|| self.db.explorer_miner_stake_totals(Some(finalizer)))
+        self.finalizer_totals.entry(finalizer).or_insert_with(|| {
+            self.db
+                .explorer_finalizer_miner_totals_cf()
+                .zs_get_at(&self.snapshot, &finalizer)
+                .unwrap_or_default()
+        })
     }
 
     fn is_miner(&self, address: Address) -> bool {
-        self.current_block_miner == Some(address)
-            || self.db.explorer_miner_record(address).is_some()
+        self.current_block_miner == Some(address) || self.miner_record(address).is_some()
     }
 
     fn promote_transparent_source(&mut self, address: Address) {
         let minimum = ExplorerMinerFinalizerKey::min_for_address(address);
         let maximum = ExplorerMinerFinalizerKey::max_for_address(address);
-        let records = self
+        let mut records = self
             .db
             .explorer_miner_finalizer_meta_cf()
-            .zs_forward_range_iter(minimum..=maximum)
-            .filter(|(_, record)| record.active_bond_count > 0)
-            .collect::<Vec<_>>();
+            .zs_range_iter_at(&self.snapshot, minimum..=maximum, false)
+            .collect::<HashMap<_, _>>();
+        for (key, record) in &self.pairs {
+            if key.address() == address {
+                if let Some(record) = record {
+                    records.insert(*key, *record);
+                } else {
+                    records.remove(key);
+                }
+            }
+        }
 
-        for (key, record) in records {
+        for (key, record) in records
+            .into_iter()
+            .filter(|(_, record)| record.active_bond_count > 0)
+        {
             self.original_pairs.entry(key).or_insert(Some(record));
             self.pairs.insert(key, Some(record));
             move_transparent_totals(
@@ -509,7 +568,8 @@ impl<'db> MinerStakeUpdates<'db> {
     fn add_attribution(
         &mut self,
         attribution: ExplorerBondAttributionRecord,
-        finalized: &FinalizedBlock,
+        height: Height,
+        hash: block::Hash,
         latest_timestamp: i64,
         count_action: bool,
     ) {
@@ -517,7 +577,8 @@ impl<'db> MinerStakeUpdates<'db> {
             ExplorerStakeSource::Transparent(address) => self.add_pair(
                 address,
                 attribution,
-                finalized,
+                height,
+                hash,
                 latest_timestamp,
                 count_action,
             ),
@@ -534,7 +595,8 @@ impl<'db> MinerStakeUpdates<'db> {
         &mut self,
         address: Address,
         attribution: ExplorerBondAttributionRecord,
-        finalized: &FinalizedBlock,
+        height: Height,
+        hash: block::Hash,
         latest_timestamp: i64,
         count_action: bool,
     ) {
@@ -544,8 +606,8 @@ impl<'db> MinerStakeUpdates<'db> {
             current_stake_zat: 0,
             active_bond_count: 0,
             stake_action_count: 0,
-            latest_height: finalized.height.0,
-            latest_block_hash: finalized.hash,
+            latest_height: height.0,
+            latest_block_hash: hash,
             latest_timestamp,
         });
         let new_pair = record.active_bond_count == 0;
@@ -562,8 +624,8 @@ impl<'db> MinerStakeUpdates<'db> {
                 .stake_action_count
                 .checked_add(1)
                 .expect("transparent stake action count fits in u64");
-            record.latest_height = finalized.height.0;
-            record.latest_block_hash = finalized.hash;
+            record.latest_height = height.0;
+            record.latest_block_hash = hash;
             record.latest_timestamp = latest_timestamp;
         }
         self.pairs.insert(key, Some(record));

@@ -1109,17 +1109,41 @@ impl Service<ReadRequest> for ReadStateService {
                 // Take the non-finalized snapshot before database reads so a block being
                 // committed remains visible through at least one of the two views.
                 let non_finalized_state = state.latest_non_finalized_state();
+                #[cfg(feature = "indexer")]
+                let snapshot = crate::explorer::read::stake_snapshot(
+                    &state.db,
+                    non_finalized_state.best_chain().map(AsRef::as_ref),
+                );
+                #[cfg(feature = "indexer")]
+                let tip = snapshot.best_tip(non_finalized_state.best_chain().map(AsRef::as_ref));
+                #[cfg(not(feature = "indexer"))]
                 let tip = read::best_tip(&non_finalized_state, &state.db);
-                let candidates = tip.and_then(|(_, hash)| {
+                #[cfg(feature = "indexer")]
+                let mut stake_summaries = Vec::new();
+                let candidates = tip.and_then(|(_, _hash)| {
+                    #[cfg(feature = "indexer")]
+                    let stakes = snapshot
+                        .aggregated_stakes(non_finalized_state.best_chain().map(AsRef::as_ref))?;
+                    #[cfg(not(feature = "indexer"))]
                     let stakes = non_finalized_state
-                        .aggregated_stakes_at(hash)
-                        .or_else(|| state.db.aggregated_stakes(&hash))?;
+                        .aggregated_stakes_at(_hash)
+                        .or_else(|| state.db.aggregated_stakes(&_hash))?;
                     let keys: Vec<[u8; 32]> = stakes.iter().map(|(key, _)| *key).collect();
-                    let addresses = read::delegation::finalizer_addresses(
-                        &non_finalized_state,
-                        &state.db,
-                        &keys,
-                    );
+                    #[cfg(feature = "indexer")]
+                    let addresses = keys
+                        .iter()
+                        .map(|key| snapshot.finalizer_address(*key))
+                        .collect::<Vec<_>>();
+                    #[cfg(feature = "indexer")]
+                    {
+                        stake_summaries = keys
+                            .iter()
+                            .map(|key| snapshot.finalizer_summary(*key))
+                            .collect();
+                    }
+                    #[cfg(not(feature = "indexer"))]
+                    let addresses =
+                        read::delegation::finalizer_addresses(&non_finalized_state, &state.db, &keys);
                     Some(
                         stakes
                             .into_iter()
@@ -1139,7 +1163,12 @@ impl Service<ReadRequest> for ReadStateService {
                     )
                 });
 
-                Ok(ReadResponse::CrosslinkFinalizerCandidates { tip, candidates })
+                Ok(ReadResponse::CrosslinkFinalizerCandidates {
+                    tip,
+                    candidates,
+                    #[cfg(feature = "indexer")]
+                    stake_summaries,
+                })
             }
 
             // Used by crosslink's BFT validation (Linearity) and its block-template context
