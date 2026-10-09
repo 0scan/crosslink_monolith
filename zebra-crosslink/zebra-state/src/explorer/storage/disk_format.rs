@@ -24,7 +24,7 @@ use crate::{
 pub(crate) struct ExplorerSchemaVersion(pub(crate) u32);
 
 impl ExplorerSchemaVersion {
-    pub(crate) const CURRENT: Self = Self(4);
+    pub(crate) const CURRENT: Self = Self(5);
 }
 
 impl IntoDisk for ExplorerSchemaVersion {

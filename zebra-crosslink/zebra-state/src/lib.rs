@@ -58,7 +58,7 @@ pub use explorer::{
     ExplorerAddressPage, ExplorerAddressRecord, ExplorerAmountFilter, ExplorerBalanceRankCursor,
     ExplorerBalanceRankEntry, ExplorerBalanceRankPage, ExplorerBlockStats, ExplorerBlockSummary,
     ExplorerBondAttributionRecord, ExplorerChainStats, ExplorerDailyStats,
-    ExplorerFinalizerMinerSummary, ExplorerIntervalStats, ExplorerMiner,
+    ExplorerFinalizerStakeSummary, ExplorerIntervalStats, ExplorerMiner,
     ExplorerMinerFinalizerRecord, ExplorerMinerPage, ExplorerMinerRankCursor,
     ExplorerMinerRankEntry, ExplorerMinerRecord, ExplorerMinerStakePage,
     ExplorerMinerStakeRankCursor, ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals,

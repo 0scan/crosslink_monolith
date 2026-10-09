@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Changed
 
+- `getcrosslinkminerstake` and `getcrosslinkfinalizerstakesources` now list all
+  transparent stake sources, accept optional `address` and `is_miner` filters, and
+  expose `address` and `is_miner`. The old `miner_address` response field was removed. Pair counts
+  include non-miners, and `unattributed_stake_zat` excludes all transparent-attributed
+  stake. Explorer schema 4 stake rankings are upgraded from existing metadata on
+  writable startup without resync; previous stake cursors must be restarted.
+- Finalizer entries now expose `primary_stake_address` and
+  `transparent_address_count` across every transparent stake source. The miner-only
+  `primary_miner_address` and `miner_address_count` fields were removed.
 - Chain synchronization now downloads a peer's only unknown block hash from a short
   `FindBlocks` response, allowing nodes near the chain tip to continue advancing
   ([#11165](https://github.com/ZcashFoundation/zebra/pull/11165)).
@@ -46,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- Staking history retrieves an unbonding bond's source and current amount from
+  canonical bond state when available, and creating a new bond no longer scans
+  existing stake history for its identity.
 - Crosslink node shutdown now stops new work, drains in-flight database writes, and
   joins node, wallet, lightwallet server, and GUI workers before exiting. Ctrl-C and
   window close share this path in native and APE builds.

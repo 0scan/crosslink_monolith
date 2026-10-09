@@ -192,10 +192,14 @@ pub enum ExplorerReadRequest {
         /// Transparent coinbase payout address.
         address: transparent::Address,
     },
-    /// Returns current miner-attributed stake pairs in descending stake order.
+    /// Returns current transparent-attributed stake pairs in descending stake order.
     MinerStakePage {
-        /// Restrict rows to one finalizer, or return every miner-finalizer pair.
+        /// Restrict rows to one finalizer, or return every address-finalizer pair.
         finalizer: Option<[u8; 32]>,
+        /// Restrict rows to one representative transparent funding address.
+        address: Option<transparent::Address>,
+        /// Select miner or non-miner rows; omitted includes both.
+        is_miner: Option<bool>,
         /// Maximum number of ranked pairs to return, clamped by state.
         limit: u32,
         /// Exclusive stable ranking cursor.
@@ -216,8 +220,8 @@ pub enum ExplorerReadRequest {
         /// Inclusive block-height bounds.
         height_range: RangeInclusive<block::Height>,
     },
-    /// Returns compact miner-source summaries for finalizers in request order.
-    FinalizerMinerSummaries(Arc<[[u8; 32]]>),
+    /// Returns compact transparent-source summaries for finalizers in request order.
+    FinalizerStakeSummaries(Arc<[[u8; 32]]>),
 }
 
 impl ExplorerReadRequest {
@@ -238,7 +242,7 @@ impl ExplorerReadRequest {
             Self::Miner { .. } => "explorer_miner",
             Self::MinerStakePage { .. } => "explorer_miner_stake_page",
             Self::StakeHistoryPage { .. } => "explorer_stake_history_page",
-            Self::FinalizerMinerSummaries(_) => "explorer_finalizer_miner_summaries",
+            Self::FinalizerStakeSummaries(_) => "explorer_finalizer_stake_summaries",
         }
     }
 }
@@ -274,8 +278,8 @@ pub enum ExplorerReadResponse {
     MinerStakePage(ExplorerMinerStakePage),
     /// Finalized Crosslink staking-action history.
     StakeHistoryPage(ExplorerStakeHistoryPage),
-    /// Compact miner-source summaries parallel to the requested finalizer keys.
-    FinalizerMinerSummaries(Vec<ExplorerFinalizerMinerSummary>),
+    /// Compact transparent-source summaries parallel to the requested finalizer keys.
+    FinalizerStakeSummaries(Vec<ExplorerFinalizerStakeSummary>),
 }
 
 impl ExplorerTransactionQuery {
@@ -700,37 +704,37 @@ pub struct ExplorerMinerStakeTotals {
     pub reward_bond_count: u64,
 }
 
-/// Compact current miner attribution for one finalizer.
+/// Compact current transparent-source attribution for one finalizer.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ExplorerFinalizerMinerSummary {
-    pub primary_miner_address: Option<transparent::Address>,
-    pub miner_address_count: u64,
+pub struct ExplorerFinalizerStakeSummary {
+    pub primary_stake_address: Option<transparent::Address>,
+    pub transparent_address_count: u64,
 }
 
-/// One current miner-finalizer stake pair in ranking order.
+/// One current transparent address-finalizer stake pair in ranking order.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExplorerMinerStakeRankEntry {
-    pub miner_address: transparent::Address,
-    pub miner_record: ExplorerMinerRecord,
+    pub address: transparent::Address,
+    pub miner_record: Option<ExplorerMinerRecord>,
     pub finalizer: [u8; 32],
     pub finalizer_address: Option<FinalizerAddress>,
     pub record: ExplorerMinerFinalizerRecord,
 }
 
-/// Stable cursor for current miner-attributed stake rankings.
+/// Stable cursor for current transparent-source stake rankings.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExplorerMinerStakeRankCursor {
-    pub miner_address: transparent::Address,
+    pub address: transparent::Address,
     pub finalizer: [u8; 32],
     pub current_stake_zat: u64,
     pub rank: u64,
     pub block_hash: block::Hash,
 }
 
-/// One finalized current miner-attributed stake ranking page.
+/// One finalized current transparent-source stake ranking page.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExplorerMinerStakePage {
@@ -738,6 +742,8 @@ pub struct ExplorerMinerStakePage {
     pub cursor_valid: bool,
     pub total_current_stake_zat: u64,
     pub totals: ExplorerMinerStakeTotals,
+    /// Number of address-finalizer pairs matching the row filters before pagination.
+    pub pair_count: u64,
     pub entries: Vec<ExplorerMinerStakeRankEntry>,
     pub has_more: bool,
 }

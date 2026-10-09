@@ -30,7 +30,7 @@ pub enum CrosslinkStakeHistorySource {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct CrosslinkStakeHistoryRequest {
-    /// Transparent address that originally funded the bond.
+    /// Representative transparent address selected from the original bond-funding transaction.
     pub address: Option<String>,
     /// Match actions entering or leaving this finalizer public key.
     pub finalizer_public_key: Option<String>,
@@ -56,7 +56,7 @@ pub struct CrosslinkStakeHistoryEntry {
     pub txid: String,
     pub action: CrosslinkStakeAction,
     pub bond_key: String,
-    /// Present only when the original bond source is one unambiguous transparent address.
+    /// Present when the original transaction's primary value source is a transparent address.
     pub address: Option<String>,
     pub source_type: CrosslinkStakeHistorySource,
     pub from_finalizer_public_key: Option<String>,

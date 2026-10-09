@@ -87,6 +87,18 @@ impl ZebraDb {
             });
         }
 
+        if let Some((bond, status)) = self.delegation_bond_with_status(&bond_key) {
+            if status.is_withdrawn() || status.is_burned() {
+                return None;
+            }
+            let creation = self.explorer_stake_history_record(bond.created_at)?;
+            return Some(BondIdentity {
+                source: creation.source,
+                finalizer: Some(bond.target_finalizer),
+                amount_zat: Some(u64::from(bond.amount)),
+            });
+        }
+
         self.explorer_stake_history_cf()
             .zs_reverse_range_iter(..)
             .find_map(|(_, record)| {
@@ -141,9 +153,13 @@ fn prepare_stake_history_batch<F>(
         };
         let location = TransactionLocation::from_usize(height, transaction_index);
         let bond_key = action.bond_key();
-        let existing = *identities
-            .entry(bond_key)
-            .or_insert_with(|| db.latest_stake_bond_identity(bond_key));
+        let existing = match action {
+            StakingAction::CreateNewDelegationBond { .. }
+            | StakingAction::ConvertFinalizerRewardToDelegationBond { .. } => None,
+            _ => *identities
+                .entry(bond_key)
+                .or_insert_with(|| db.latest_stake_bond_identity(bond_key)),
+        };
 
         let (record, next_identity) = match action {
             StakingAction::CreateNewDelegationBond {
@@ -370,5 +386,183 @@ mod tests {
         );
         assert_eq!(finalizer_rows.len(), 1);
         assert_eq!(finalizer_rows[0].0.height, Height(30));
+    }
+
+    #[test]
+    fn regular_source_survives_retarget_unbond_and_withdraw_in_history() {
+        use std::sync::Arc;
+        use zcash_primitives::bft::{finalizer_key_from_seed, FinalizerAddress};
+        use zebra_chain::{parameters::NetworkUpgrade, transaction::LockTime};
+        let db = ZebraDb::new(
+            &Config::ephemeral(),
+            STATE_DATABASE_KIND,
+            &state_database_format_version_in_code(),
+            &Network::Mainnet,
+            true,
+            STATE_COLUMN_FAMILIES_IN_CODE
+                .iter()
+                .map(ToString::to_string),
+            false,
+        )
+        .unwrap();
+        let address = Address::from_pub_key_hash(NetworkKind::Mainnet, [7; 20]);
+        let (_, key_a, _) = finalizer_key_from_seed(b"history-a");
+        let (_, key_b, _) = finalizer_key_from_seed(b"history-b");
+        let (a, b) = (
+            FinalizerAddress::create(&key_a),
+            FinalizerAddress::create(&key_b),
+        );
+        let bond_key = [1; 32];
+        let transaction = |action| {
+            Arc::new(Transaction::VCrosslink {
+                network_upgrade: NetworkUpgrade::Nu6,
+                lock_time: LockTime::unlocked(),
+                expiry_height: Height(0),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                sapling_shielded_data: None,
+                orchard_shielded_data: None,
+                ironwood_shielded_data: None,
+                staking_action: Some(action),
+            })
+        };
+        let actions = [
+            transaction(StakingAction::CreateNewDelegationBond {
+                amount_zats: 100,
+                unique_pubkey: bond_key,
+                bond_salt: [0; 32],
+                target_finalizer: a,
+                signature: [0; 64],
+            }),
+            transaction(StakingAction::RetargetDelegationBond {
+                unique_pubkey: bond_key,
+                signature: [0; 64],
+                from_finalizer: a,
+                to_finalizer: b,
+            }),
+            transaction(StakingAction::BeginDelegationUnbonding {
+                unique_pubkey: bond_key,
+                signature: [0; 64],
+            }),
+        ];
+        let mut batch = DiskWriteBatch::new();
+        let mut classifications = 0;
+        prepare_stake_history_batch(&mut batch, &db, Height(10), &actions, |_, _| {
+            classifications += 1;
+            ExplorerStakeSource::Transparent(address)
+        });
+        db.write_batch(batch).unwrap();
+        assert_eq!(classifications, 1);
+        let mut batch = DiskWriteBatch::new();
+        prepare_stake_history_batch(
+            &mut batch,
+            &db,
+            Height(20),
+            &[transaction(StakingAction::WithdrawDelegationBond {
+                amount_zats: 100,
+                unique_pubkey: bond_key,
+                signature: [0; 64],
+            })],
+            |_, _| panic!("withdrawal fees must not replace the original bond source"),
+        );
+        db.write_batch(batch).unwrap();
+        let rows = db.explorer_stake_history_records(
+            ExplorerStakeHistoryFilter {
+                address: Some(address),
+                finalizer: Some(b.pub_key.0),
+                ..Default::default()
+            },
+            None,
+            ExplorerPageDirection::Older,
+            Height(0),
+            Height(100),
+            10,
+        );
+        assert_eq!(
+            rows.iter().map(|(_, row)| row.action).collect::<Vec<_>>(),
+            vec![
+                ExplorerStakeAction::Withdraw,
+                ExplorerStakeAction::BeginUnbonding,
+                ExplorerStakeAction::Retarget
+            ]
+        );
+        assert!(rows
+            .iter()
+            .all(|(_, row)| row.source == ExplorerStakeSource::Transparent(address)));
+        assert!(rows.iter().all(|(_, row)| row.amount_zat == Some(100)));
+        assert!(db.explorer_miner_record(address).is_none());
+    }
+
+    #[test]
+    fn unbonding_identity_uses_original_source_and_rewarded_canonical_amount() {
+        use crate::service::finalized_state::disk_format::delegation::{
+            BondStatus, DelegationBond,
+        };
+        let db = ZebraDb::new(
+            &Config::ephemeral(),
+            STATE_DATABASE_KIND,
+            &state_database_format_version_in_code(),
+            &Network::Mainnet,
+            true,
+            STATE_COLUMN_FAMILIES_IN_CODE
+                .iter()
+                .map(ToString::to_string),
+            false,
+        )
+        .unwrap();
+        let address = Address::from_pub_key_hash(NetworkKind::Mainnet, [7; 20]);
+        let bond_key = [1; 32];
+        let creation = TransactionLocation::from_index(Height(10), 1);
+        let unbonding = TransactionLocation::from_index(Height(20), 1);
+        let mut batch = DiskWriteBatch::new();
+        let _ = db
+            .explorer_stake_history_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &creation,
+                &ExplorerStakeHistoryRecord {
+                    action: ExplorerStakeAction::Create,
+                    bond_key,
+                    source: ExplorerStakeSource::Transparent(address),
+                    from_finalizer: None,
+                    to_finalizer: Some([2; 32]),
+                    amount_zat: Some(100),
+                },
+            );
+        let _ = db
+            .explorer_stake_history_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &unbonding,
+                &ExplorerStakeHistoryRecord {
+                    action: ExplorerStakeAction::BeginUnbonding,
+                    bond_key,
+                    source: ExplorerStakeSource::Transparent(address),
+                    from_finalizer: Some([3; 32]),
+                    to_finalizer: None,
+                    amount_zat: Some(100),
+                },
+            );
+        let _ = db
+            .delegation_bond_by_key_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &bond_key,
+                &DelegationBond::new(125.try_into().unwrap(), [3; 32], creation),
+            );
+        let _ = db
+            .bond_status_by_key_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &bond_key,
+                &BondStatus::Unbonding {
+                    unbonded_at: unbonding,
+                },
+            );
+        db.write_batch(batch).unwrap();
+        let identity = db.latest_stake_bond_identity(bond_key).unwrap();
+        assert_eq!(identity.source, ExplorerStakeSource::Transparent(address));
+        assert_eq!(identity.finalizer, Some([3; 32]));
+        assert_eq!(identity.amount_zat, Some(125));
     }
 }

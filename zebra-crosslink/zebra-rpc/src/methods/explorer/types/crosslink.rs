@@ -164,10 +164,10 @@ pub struct CrosslinkFinalizerEntry {
     pub public_key: String,
     /// Self-authenticating finalizer address, when one has been revealed on chain.
     pub finalizer_address: Option<String>,
-    /// Recognized miner address contributing the most current stake to this finalizer.
-    pub primary_miner_address: Option<String>,
-    /// Number of distinct recognized miner addresses currently contributing stake.
-    pub miner_address_count: String,
+    /// Transparent address contributing the most current stake to this finalizer.
+    pub primary_stake_address: Option<String>,
+    /// Number of transparent addresses currently contributing stake.
+    pub transparent_address_count: String,
     /// Current aggregated voting power in zatoshis.
     pub voting_power_zat: String,
     /// Percentage of all candidate stake, formatted with one decimal place.
@@ -213,13 +213,19 @@ pub struct CrosslinkFinalizerRequest {
     pub public_key: String,
 }
 
-/// Parameters for one finalizer's current miner-source page.
+/// Parameters for one finalizer's current transparent-source page.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CrosslinkFinalizerStakeSourcesRequest {
     /// Finalizer public key in the display byte order used by list responses.
     pub public_key: String,
-    /// Maximum number of miner sources to return, from 1 through 100.
+    /// Restrict rows to one representative transparent funding address.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// Select miner or non-miner source rows; omitted includes both.
+    #[serde(default)]
+    pub is_miner: Option<bool>,
+    /// Maximum number of transparent sources to return, from 1 through 100.
     pub limit: Option<u32>,
     /// Opaque cursor returned by a previous page.
     pub cursor: Option<String>,

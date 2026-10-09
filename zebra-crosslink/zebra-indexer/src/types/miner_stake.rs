@@ -1,4 +1,4 @@
-//! Explorer-facing current miner-to-finalizer stake contracts.
+//! Explorer-facing current transparent-address-to-finalizer stake contracts.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,11 @@ use super::PageDirection;
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct CrosslinkMinerStakeRequest {
-    /// Maximum number of current miner-finalizer pairs to return, from 1 through 100.
+    /// Restrict rows to this representative transparent funding address.
+    pub address: Option<String>,
+    /// Select miner sources with true, non-miners with false, or all sources when omitted.
+    pub is_miner: Option<bool>,
+    /// Maximum number of current address-finalizer pairs to return, from 1 through 100.
     pub limit: Option<u32>,
     /// Opaque cursor returned by a previous page.
     pub cursor: Option<String>,
@@ -17,16 +21,18 @@ pub struct CrosslinkMinerStakeRequest {
     pub direction: PageDirection,
 }
 
-/// One current miner-funded bond aggregate targeting one finalizer.
+/// One current transparent-funded bond aggregate targeting one finalizer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkMinerStakeEntry {
     /// One-based position in the selected ranking.
     pub rank: u64,
-    /// Transparent payout address already recognized by the miner index.
-    pub miner_address: String,
+    /// Representative transparent address that originally funded these bonds.
+    pub address: String,
+    /// Whether this source address has been observed mining a finalized block.
+    pub is_miner: bool,
     /// Best-effort mining pool attribution.
     pub pool: String,
-    /// Finalized blocks attributed to this miner address.
+    /// Finalized blocks attributed to this source address; zero for non-miners.
     pub blocks_mined: String,
     /// Target finalizer public key.
     pub finalizer_public_key: String,
@@ -34,7 +40,7 @@ pub struct CrosslinkMinerStakeEntry {
     pub finalizer_address: Option<String>,
     /// Current value of active bonds attributed to this pair, including bond rewards.
     pub current_stake_zat: String,
-    /// This address's share of the target finalizer's current stake.
+    /// This pair's share of current stake in the selected network or finalizer scope.
     pub stake_share_percent: String,
     /// Active attributed bonds represented by this pair.
     pub active_bond_count: String,
@@ -85,9 +91,13 @@ pub struct CrosslinkMinerStakeSummary {
     pub miner_attributed_stake_zat: String,
     /// Attributed share of current stake, formatted with one decimal place.
     pub miner_attributed_percent: String,
-    /// Current stake that is shielded, mixed, non-miner-funded, or otherwise unattributed.
+    /// Current stake attributed to transparent sources, including non-miners.
+    pub transparent_attributed_stake_zat: String,
+    /// Transparent-attributed share, formatted with one decimal place.
+    pub transparent_attributed_percent: String,
+    /// Current stake without an attributable transparent source address.
     pub unattributed_stake_zat: String,
-    /// Distinct nonzero miner-finalizer pairs before pagination.
+    /// Distinct nonzero transparent address-finalizer pairs before pagination.
     pub pair_count: String,
     /// Current stake grouped by its observable funding source.
     pub sources: CrosslinkStakeSourceBreakdown,
@@ -104,7 +114,7 @@ pub struct CrosslinkMinerStakePagination {
     pub prev_cursor: Option<String>,
 }
 
-/// Current miner-attributed stake at one finalized explorer snapshot.
+/// Current transparent-attributed stake at one finalized explorer snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkMinerStakeResponse {
     pub items: Vec<CrosslinkMinerStakeEntry>,
