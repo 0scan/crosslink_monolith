@@ -33,7 +33,7 @@ use zebra_node_services::mempool::{self as node_mempool, MempoolService};
 use zebra_state::crosslink::{TFLServiceRequest, TFLServiceResponse};
 #[cfg(feature = "indexer")]
 use zebra_state::{
-    ExplorerFinalizerMinerSummary, ExplorerReadRequest, ExplorerReadResponse, HashOrHeight,
+    ExplorerFinalizerStakeSummary, ExplorerReadRequest, ExplorerReadResponse, HashOrHeight,
     ReadRequest, ReadResponse,
 };
 use zebra_state::{ReadState as ReadStateService, State as StateService};
@@ -684,16 +684,16 @@ where
                 .collect::<Vec<_>>();
             let summaries_response = call_service(
                 self.read_state.clone(),
-                ReadRequest::Explorer(ExplorerReadRequest::FinalizerMinerSummaries(
+                ReadRequest::Explorer(ExplorerReadRequest::FinalizerStakeSummaries(
                     finalizer_keys.clone().into(),
                 )),
             )
             .await?;
             let summaries = match summaries_response {
-                ReadResponse::Explorer(ExplorerReadResponse::FinalizerMinerSummaries(
+                ReadResponse::Explorer(ExplorerReadResponse::FinalizerStakeSummaries(
                     summaries,
                 )) => finalizer_keys.into_iter().zip(summaries).collect(),
-                _ => unreachable!("unmatched response to FinalizerMinerSummaries"),
+                _ => unreachable!("unmatched response to FinalizerStakeSummaries"),
             };
 
             Ok(crosslink_finalizers_response(
@@ -746,11 +746,19 @@ where
         }
         #[cfg(feature = "indexer")]
         {
+            let request = request.unwrap_or_default();
+            let address = request
+                .address
+                .as_deref()
+                .map(|address| explorer_transparent_address(&self.network, address))
+                .transpose()
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
             match miner_stake_from_state(
                 self.read_state.clone(),
                 &self.network,
                 None,
-                request.unwrap_or_default(),
+                address,
+                request,
             )
             .await
             {
@@ -885,14 +893,23 @@ where
             }
 
             let source_request = CrosslinkMinerStakeRequest {
+                address: request.address,
+                is_miner: request.is_miner,
                 limit: request.limit,
                 cursor: request.cursor,
                 direction: request.direction,
             };
+            let address = source_request
+                .address
+                .as_deref()
+                .map(|address| explorer_transparent_address(&self.network, address))
+                .transpose()
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
             match miner_stake_from_state(
                 self.read_state.clone(),
                 &self.network,
                 Some(public_key),
+                address,
                 source_request,
             )
             .await
@@ -1030,7 +1047,7 @@ fn crosslink_finalizer_set_status(
 fn crosslink_finalizers_response(
     tip: Option<(Height, block::Hash)>,
     mut candidates: Vec<(RosterMember, Option<FinalizerAddress>)>,
-    miner_summaries: HashMap<[u8; 32], ExplorerFinalizerMinerSummary>,
+    stake_summaries: HashMap<[u8; 32], ExplorerFinalizerStakeSummary>,
     selection_height: Option<u32>,
     activation_height: Option<u32>,
     activated: bool,
@@ -1052,7 +1069,7 @@ fn crosslink_finalizers_response(
         .enumerate()
         .map(|(index, (member, finalizer_address))| {
             let active = index < active_count;
-            let miner_summary = miner_summaries
+            let stake_summary = stake_summaries
                 .get(&member.pub_key)
                 .copied()
                 .unwrap_or_default();
@@ -1062,10 +1079,10 @@ fn crosslink_finalizers_response(
                 finalizer_address: finalizer_address
                     .filter(|address| address.pub_key.0 == member.pub_key && address.verify())
                     .map(|address| address.encode()),
-                primary_miner_address: miner_summary
-                    .primary_miner_address
+                primary_stake_address: stake_summary
+                    .primary_stake_address
                     .map(|address| address.to_string()),
-                miner_address_count: miner_summary.miner_address_count.to_string(),
+                transparent_address_count: stake_summary.transparent_address_count.to_string(),
                 voting_power_zat: member.voting_power.to_string(),
                 total_stake_share_percent: percentage_one_decimal(
                     member.voting_power,
@@ -1501,7 +1518,7 @@ mod tests {
         crosslink_activation_overview, crosslink_finalizer_liveness_response,
         crosslink_finalizers_response, crosslink_staking_overview, indexer_status,
         parse_finalizer_public_key, CrosslinkBftStep, CrosslinkFinalizerSetStatus, CrosslinkPhase,
-        CrosslinkStakingChange, CrosslinkStakingStatus, ExplorerFinalizerMinerSummary,
+        CrosslinkStakingChange, CrosslinkStakingStatus, ExplorerFinalizerStakeSummary,
     };
 
     fn finalizer(byte: u8, voting_power: u64) -> (RosterMember, Option<FinalizerAddress>) {
@@ -1598,18 +1615,18 @@ mod tests {
         let candidates = (1_u8..=13)
             .map(|value| finalizer(value, u64::from(value)))
             .collect();
-        let primary_miner_address = Address::from_pub_key_hash(NetworkKind::Testnet, [0x71; 20]);
-        let miner_summaries = HashMap::from([(
+        let primary_stake_address = Address::from_pub_key_hash(NetworkKind::Testnet, [0x71; 20]);
+        let stake_summaries = HashMap::from([(
             [13; 32],
-            ExplorerFinalizerMinerSummary {
-                primary_miner_address: Some(primary_miner_address),
-                miner_address_count: 3,
+            ExplorerFinalizerStakeSummary {
+                primary_stake_address: Some(primary_stake_address),
+                transparent_address_count: 3,
             },
         )]);
         let response = crosslink_finalizers_response(
             Some((Height(10), Hash([0x51; 32]))),
             candidates,
-            miner_summaries,
+            stake_summaries,
             Some(20),
             Some(30),
             false,
@@ -1622,14 +1639,14 @@ mod tests {
         assert_eq!(response.active_stake_zat, "90");
         assert_eq!(response.items.len(), 13);
         assert_eq!(response.items[0].voting_power_zat, "13");
-        let primary_miner_address = primary_miner_address.to_string();
+        let primary_stake_address = primary_stake_address.to_string();
         assert_eq!(
-            response.items[0].primary_miner_address.as_deref(),
-            Some(primary_miner_address.as_str())
+            response.items[0].primary_stake_address.as_deref(),
+            Some(primary_stake_address.as_str())
         );
-        assert_eq!(response.items[0].miner_address_count, "3");
-        assert_eq!(response.items[1].primary_miner_address, None);
-        assert_eq!(response.items[1].miner_address_count, "0");
+        assert_eq!(response.items[0].transparent_address_count, "3");
+        assert_eq!(response.items[1].primary_stake_address, None);
+        assert_eq!(response.items[1].transparent_address_count, "0");
         assert_eq!(
             response.items[0].active_stake_share_percent.as_deref(),
             Some("14.4")

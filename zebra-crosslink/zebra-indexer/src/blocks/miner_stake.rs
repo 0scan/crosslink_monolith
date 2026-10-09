@@ -1,7 +1,9 @@
-//! Current miner-to-finalizer stake ranking.
+//! Current transparent-address-to-finalizer stake ranking.
+
+use std::collections::HashMap;
 
 use tower::ServiceExt;
-use zebra_chain::block::Height;
+use zebra_chain::{block::Height, transparent::Address};
 use zebra_state::{
     ExplorerMinerStakeRankCursor, ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse,
     ReadRequest, ReadResponse, ReadState,
@@ -21,11 +23,14 @@ use super::miner_stake_cursor::MinerStakeCursor;
 const DEFAULT_LIMIT: u32 = 30;
 const MAX_LIMIT: u32 = 100;
 
-/// Returns current miner-attributed stake globally or for one finalizer.
+/// Returns current transparent-attributed stake globally or for one finalizer.
+///
+/// `address` restricts rows; coverage totals remain scoped to the network or finalizer.
 pub async fn miner_stake_from_state<State>(
     read_state: State,
     network: &zebra_chain::parameters::Network,
     finalizer: Option<[u8; 32]>,
+    address: Option<Address>,
     request: CrosslinkMinerStakeRequest,
 ) -> Result<CrosslinkMinerStakeResponse, Error>
 where
@@ -42,7 +47,11 @@ where
         .as_deref()
         .map(MinerStakeCursor::decode)
         .transpose()?;
-    if cursor.is_some_and(|cursor| cursor.scope_finalizer != finalizer) {
+    if cursor.is_some_and(|cursor| {
+        cursor.scope_finalizer != finalizer
+            || cursor.source_address != address
+            || cursor.is_miner != request.is_miner
+    }) {
         return Err(Error::InvalidCursor(
             "miner-stake cursor belongs to a different ranking".to_string(),
         ));
@@ -53,7 +62,7 @@ where
         ));
     }
     let state_cursor = cursor.map(|cursor| ExplorerMinerStakeRankCursor {
-        miner_address: cursor.miner_address,
+        address: cursor.address,
         finalizer: cursor.finalizer,
         current_stake_zat: cursor.current_stake_zat,
         rank: cursor.rank,
@@ -67,6 +76,8 @@ where
         .clone()
         .oneshot(ReadRequest::Explorer(ExplorerReadRequest::MinerStakePage {
             finalizer,
+            address,
+            is_miner: request.is_miner,
             limit,
             cursor: state_cursor,
             direction: state_direction,
@@ -109,44 +120,67 @@ where
     let latest_heights = page
         .entries
         .iter()
-        .map(|entry| Height(entry.miner_record.latest_height))
+        .filter_map(|entry| {
+            entry
+                .miner_record
+                .map(|record| Height(record.latest_height))
+        })
         .collect::<Vec<_>>();
-    let response = read_state
-        .oneshot(ReadRequest::Explorer(ExplorerReadRequest::BlockSummaries(
-            latest_heights.into(),
-        )))
-        .await
-        .map_err(|error| Error::StateRequest(error.to_string()))?;
-    let ReadResponse::Explorer(ExplorerReadResponse::BlockSummaries(latest_blocks)) = response
-    else {
-        return Err(Error::StateResponse(
-            "state returned the wrong response for miner stake blocks".to_string(),
-        ));
+    let latest_blocks = if latest_heights.is_empty() {
+        HashMap::new()
+    } else {
+        let response = read_state
+            .oneshot(ReadRequest::Explorer(ExplorerReadRequest::BlockSummaries(
+                latest_heights.clone().into(),
+            )))
+            .await
+            .map_err(|error| Error::StateRequest(error.to_string()))?;
+        let ReadResponse::Explorer(ExplorerReadResponse::BlockSummaries(blocks)) = response else {
+            return Err(Error::StateResponse(
+                "state returned the wrong response for miner stake blocks".to_string(),
+            ));
+        };
+        if blocks.len() != latest_heights.len() {
+            return Err(Error::StateResponse(
+                "state returned incomplete miner stake blocks".to_string(),
+            ));
+        }
+        latest_heights
+            .into_iter()
+            .zip(blocks)
+            .collect::<HashMap<_, _>>()
     };
 
     let items = page
         .entries
         .iter()
-        .zip(latest_blocks)
         .enumerate()
-        .map(|(offset, (entry, block))| {
-            let block = block.ok_or_else(|| {
-                Error::StateResponse(
-                    "a miner stake row's latest miner block is missing".to_string(),
-                )
-            })?;
-            let coinbase = block.block.transactions.first().ok_or_else(|| {
-                Error::CorruptData("a canonical miner block has no coinbase".to_string())
-            })?;
-            let address = entry.miner_address.to_string();
-            let (identified_address, identified_pool) =
-                super::miner_attribution::identify_miner(coinbase, network);
-            let pool = if identified_address.as_deref() == Some(address.as_str()) {
-                identified_pool
-            } else {
-                super::miner_attribution::pool_from_address(&address)
-                    .unwrap_or("Unknown")
-                    .to_string()
+        .map(|(offset, entry)| {
+            let address = entry.address.to_string();
+            let pool = match entry.miner_record {
+                Some(record) => {
+                    let block = latest_blocks
+                        .get(&Height(record.latest_height))
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| {
+                            Error::StateResponse(
+                                "a miner stake row's latest miner block is missing".to_string(),
+                            )
+                        })?;
+                    let coinbase = block.block.transactions.first().ok_or_else(|| {
+                        Error::CorruptData("a canonical miner block has no coinbase".to_string())
+                    })?;
+                    let (identified_address, identified_pool) =
+                        super::miner_attribution::identify_miner(coinbase, network);
+                    if identified_address.as_deref() == Some(address.as_str()) {
+                        identified_pool
+                    } else {
+                        super::miner_attribution::pool_from_address(&address)
+                            .unwrap_or("Unknown")
+                            .to_string()
+                    }
+                }
+                None => "Unknown".to_string(),
             };
             Ok(CrosslinkMinerStakeEntry {
                 rank: first_rank
@@ -154,9 +188,13 @@ where
                     .ok_or_else(|| {
                         Error::InvalidCursor("miner-stake cursor rank overflow".to_string())
                     })?,
-                miner_address: address,
+                address,
+                is_miner: entry.miner_record.is_some(),
                 pool,
-                blocks_mined: entry.miner_record.block_count.to_string(),
+                blocks_mined: entry
+                    .miner_record
+                    .map_or(0, |record| record.block_count)
+                    .to_string(),
                 finalizer_public_key: hex::encode(entry.finalizer),
                 finalizer_address: entry.finalizer_address.map(|address| address.encode()),
                 current_stake_zat: entry.record.current_stake_zat.to_string(),
@@ -179,7 +217,9 @@ where
             enabled.then(|| {
                 MinerStakeCursor {
                     scope_finalizer: finalizer,
-                    miner_address: entry.miner_address,
+                    source_address: address,
+                    is_miner: request.is_miner,
+                    address: entry.address,
                     finalizer: entry.finalizer,
                     current_stake_zat: entry.record.current_stake_zat,
                     rank,
@@ -212,9 +252,12 @@ where
     let rewards_stake_zat = totals
         .reward_bond_stake_zat
         .saturating_add(reward_bank_stake_zat);
+    let transparent_attributed_stake_zat = totals
+        .miner_stake_zat
+        .saturating_add(totals.other_transparent_stake_zat);
     let unattributed_stake_zat = page
         .total_current_stake_zat
-        .saturating_sub(totals.miner_stake_zat);
+        .saturating_sub(transparent_attributed_stake_zat);
     let source_amount = |stake_zat: u64| CrosslinkStakeSourceAmount {
         stake_zat: stake_zat.to_string(),
         share_percent: percentage_two_decimals(stake_zat, page.total_current_stake_zat),
@@ -229,8 +272,13 @@ where
                 totals.miner_stake_zat,
                 page.total_current_stake_zat,
             ),
+            transparent_attributed_stake_zat: transparent_attributed_stake_zat.to_string(),
+            transparent_attributed_percent: percentage_one_decimal(
+                transparent_attributed_stake_zat,
+                page.total_current_stake_zat,
+            ),
             unattributed_stake_zat: unattributed_stake_zat.to_string(),
-            pair_count: totals.miner_address_count.to_string(),
+            pair_count: page.pair_count.to_string(),
             sources: CrosslinkStakeSourceBreakdown {
                 miners: CrosslinkStakeSourceGroup {
                     stake_zat: totals.miner_stake_zat.to_string(),
@@ -256,7 +304,7 @@ where
         },
         pagination: CrosslinkMinerStakePagination {
             limit,
-            total: totals.miner_address_count.to_string(),
+            total: page.pair_count.to_string(),
             has_next,
             has_prev,
             next_cursor,
@@ -301,5 +349,127 @@ mod tests {
         assert_eq!(percentage_one_decimal(1, 1), "100.0");
         assert_eq!(percentage_two_decimals(0, 0), "0.00");
         assert_eq!(percentage_two_decimals(3_445_03, 16_194_95), "21.27");
+    }
+
+    #[tokio::test]
+    async fn regular_address_response_has_stake_coverage_without_miner_block_reads() {
+        use super::*;
+        use zebra_chain::{
+            block::{Hash, Height},
+            parameters::{Network, NetworkKind},
+        };
+        use zebra_state::{
+            ExplorerMinerFinalizerRecord, ExplorerMinerStakePage, ExplorerMinerStakeRankEntry,
+            ExplorerMinerStakeTotals,
+        };
+
+        let address = Address::from_pub_key_hash(NetworkKind::Mainnet, [7; 20]);
+        let page = ExplorerMinerStakePage {
+            best_tip: Some((Height(20), Hash([9; 32]))),
+            cursor_valid: true,
+            total_current_stake_zat: 400,
+            totals: ExplorerMinerStakeTotals {
+                other_transparent_stake_zat: 300,
+                other_transparent_address_count: 1,
+                shielded_stake_zat: 100,
+                shielded_bond_count: 1,
+                ..Default::default()
+            },
+            pair_count: 1,
+            entries: vec![ExplorerMinerStakeRankEntry {
+                address,
+                miner_record: None,
+                finalizer: [4; 32],
+                finalizer_address: None,
+                record: ExplorerMinerFinalizerRecord {
+                    current_stake_zat: 300,
+                    active_bond_count: 2,
+                    stake_action_count: 3,
+                    latest_height: 10,
+                    latest_block_hash: Hash([5; 32]),
+                    latest_timestamp: 1000,
+                },
+            }],
+            has_more: false,
+        };
+        let state = tower::service_fn(move |request| {
+            let page = page.clone();
+            async move {
+                let ReadRequest::Explorer(ExplorerReadRequest::MinerStakePage {
+                    address: filter,
+                    ..
+                }) = request
+                else {
+                    panic!("a regular source must not require miner block data");
+                };
+                assert_eq!(filter, Some(address));
+                Ok::<_, zebra_state::BoxError>(ReadResponse::Explorer(
+                    ExplorerReadResponse::MinerStakePage(page),
+                ))
+            }
+        });
+        let response = miner_stake_from_state(
+            state,
+            &Network::Mainnet,
+            None,
+            Some(address),
+            CrosslinkMinerStakeRequest {
+                address: Some(address.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].address, address.to_string());
+        let json = serde_json::to_value(&response.items[0]).unwrap();
+        assert!(json.get("miner_address").is_none());
+        assert!(!response.items[0].is_miner);
+        assert_eq!(response.items[0].blocks_mined, "0");
+        assert_eq!(response.items[0].pool, "Unknown");
+        assert_eq!(response.items[0].stake_share_percent, "75.00");
+        assert_eq!(response.summary.transparent_attributed_stake_zat, "300");
+        assert_eq!(response.summary.transparent_attributed_percent, "75.0");
+        assert_eq!(response.summary.miner_attributed_stake_zat, "0");
+        assert_eq!(response.summary.unattributed_stake_zat, "100");
+        assert_eq!(response.pagination.total, "1");
+        assert_eq!(response.summary.pair_count, "1");
+    }
+
+    #[tokio::test]
+    async fn cursor_cannot_be_reused_with_another_miner_filter() {
+        use super::*;
+        use zebra_chain::{
+            block::Hash,
+            parameters::{Network, NetworkKind},
+        };
+        let address = Address::from_pub_key_hash(NetworkKind::Mainnet, [7; 20]);
+        let cursor = MinerStakeCursor {
+            scope_finalizer: None,
+            source_address: None,
+            is_miner: Some(true),
+            address: address,
+            finalizer: [4; 32],
+            current_stake_zat: 42,
+            rank: 1,
+            indexed_block_hash: Hash([9; 32]),
+        };
+        let state = tower::service_fn(|_| async {
+            Err::<ReadResponse, zebra_state::BoxError>("unexpected state request".into())
+        });
+        let error = miner_stake_from_state(
+            state,
+            &Network::Mainnet,
+            None,
+            None,
+            CrosslinkMinerStakeRequest {
+                cursor: Some(cursor.encode()),
+                is_miner: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Error::InvalidCursor(_)));
     }
 }

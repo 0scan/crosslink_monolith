@@ -1,4 +1,4 @@
-//! Current stake publicly attributable to known transparent miner addresses.
+//! Current stake publicly attributable to transparent source addresses.
 
 use std::{
     collections::HashMap,
@@ -15,7 +15,7 @@ use zebra_chain::{
 use crate::{
     request::FinalizedBlock,
     service::finalized_state::{DiskWriteBatch, ZebraDb},
-    ExplorerBondAttributionRecord, ExplorerFinalizerMinerSummary, ExplorerMinerFinalizerRecord,
+    ExplorerBondAttributionRecord, ExplorerFinalizerStakeSummary, ExplorerMinerFinalizerRecord,
     ExplorerMinerStakeRankEntry, ExplorerMinerStakeTotals, ExplorerPageDirection,
     ExplorerStakeSource,
 };
@@ -50,25 +50,26 @@ impl ZebraDb {
             })
     }
 
-    /// Returns the highest-stake recognized miner address and distinct miner count for a finalizer.
-    pub fn explorer_finalizer_miner_summary(
+    /// Returns the highest-stake transparent source and total transparent source count for a finalizer.
+    pub fn explorer_finalizer_stake_summary(
         &self,
         finalizer: [u8; 32],
-    ) -> ExplorerFinalizerMinerSummary {
+    ) -> ExplorerFinalizerStakeSummary {
         let minimum = ExplorerFinalizerMinerRankKey::min_for_finalizer(finalizer);
         let maximum = ExplorerFinalizerMinerRankKey::max_for_finalizer(finalizer);
-        let primary_miner_address = self
+        let primary_stake_address = self
             .explorer_finalizer_miner_order_cf()
             .zs_forward_range_iter(minimum..=maximum)
             .next()
             .map(|(key, ())| key.address());
-        let miner_address_count = self
-            .explorer_miner_stake_totals(Some(finalizer))
-            .miner_address_count;
+        let totals = self.explorer_miner_stake_totals(Some(finalizer));
+        let transparent_address_count = totals
+            .miner_address_count
+            .saturating_add(totals.other_transparent_address_count);
 
-        ExplorerFinalizerMinerSummary {
-            primary_miner_address,
-            miner_address_count,
+        ExplorerFinalizerStakeSummary {
+            primary_stake_address,
+            transparent_address_count,
         }
     }
 
@@ -85,14 +86,21 @@ impl ZebraDb {
             .unwrap_or_default()
     }
 
-    /// Returns whether an exact current miner-finalizer ranking key exists.
+    /// Returns whether an exact current address-finalizer ranking key exists.
     pub fn explorer_contains_miner_stake_entry(
         &self,
         finalizer_filter: Option<[u8; 32]>,
+        address_filter: Option<Address>,
+        is_miner_filter: Option<bool>,
         address: Address,
         finalizer: [u8; 32],
         current_stake_zat: u64,
     ) -> bool {
+        if address_filter.is_some_and(|filter| filter != address)
+            || !self.matches_stake_miner_filter(address, is_miner_filter)
+        {
+            return false;
+        }
         match finalizer_filter {
             Some(filter) if filter == finalizer => {
                 self.explorer_finalizer_miner_order_cf().zs_contains(
@@ -106,14 +114,63 @@ impl ZebraDb {
         }
     }
 
-    /// Returns one cursor-adjacent current miner-attributed stake page.
+    /// Returns one cursor-adjacent current transparent-attributed stake page.
     pub fn explorer_miner_stake_entries(
         &self,
         finalizer_filter: Option<[u8; 32]>,
+        address_filter: Option<Address>,
+        is_miner_filter: Option<bool>,
         cursor: Option<(Address, [u8; 32], u64)>,
         direction: ExplorerPageDirection,
         limit: usize,
     ) -> Vec<ExplorerMinerStakeRankEntry> {
+        if let Some(address) = address_filter {
+            if !self.matches_stake_miner_filter(address, is_miner_filter) {
+                return Vec::new();
+            }
+            let mut pairs = self.address_stake_pairs(address, finalizer_filter);
+            pairs.sort_by_key(|(key, record)| {
+                ExplorerMinerFinalizerRankKey::new(
+                    key.address(),
+                    key.finalizer(),
+                    record.current_stake_zat,
+                )
+            });
+            if let Some((cursor_address, finalizer, stake)) = cursor {
+                let cursor_key =
+                    ExplorerMinerFinalizerRankKey::new(cursor_address, finalizer, stake);
+                pairs.retain(|(key, record)| {
+                    let key = ExplorerMinerFinalizerRankKey::new(
+                        key.address(),
+                        key.finalizer(),
+                        record.current_stake_zat,
+                    );
+                    match direction {
+                        ExplorerPageDirection::Older => key > cursor_key,
+                        ExplorerPageDirection::Newer => key < cursor_key,
+                    }
+                });
+            } else if direction == ExplorerPageDirection::Newer {
+                return Vec::new();
+            }
+            if direction == ExplorerPageDirection::Newer {
+                pairs.reverse();
+            }
+            pairs.truncate(limit);
+            if direction == ExplorerPageDirection::Newer {
+                pairs.reverse();
+            }
+            return pairs
+                .into_iter()
+                .map(|(key, record)| ExplorerMinerStakeRankEntry {
+                    address: address,
+                    miner_record: self.explorer_miner_record(address),
+                    finalizer: key.finalizer(),
+                    finalizer_address: self.finalizer_address(&key.finalizer()),
+                    record,
+                })
+                .collect();
+        }
         let pairs = match finalizer_filter {
             None => {
                 let cf = self.explorer_miner_finalizer_order_cf();
@@ -125,11 +182,17 @@ impl ZebraDb {
                             )),
                             Unbounded,
                         ))
+                        .filter(|(key, ())| {
+                            self.matches_stake_miner_filter(key.address(), is_miner_filter)
+                        })
                         .take(limit)
                         .map(|(key, ())| key)
                         .collect::<Vec<_>>(),
                     (ExplorerPageDirection::Older, None) => cf
                         .zs_forward_range_iter(..)
+                        .filter(|(key, ())| {
+                            self.matches_stake_miner_filter(key.address(), is_miner_filter)
+                        })
                         .take(limit)
                         .map(|(key, ())| key)
                         .collect::<Vec<_>>(),
@@ -137,6 +200,9 @@ impl ZebraDb {
                         .zs_reverse_range_iter(
                             ..ExplorerMinerFinalizerRankKey::new(address, finalizer, stake),
                         )
+                        .filter(|(key, ())| {
+                            self.matches_stake_miner_filter(key.address(), is_miner_filter)
+                        })
                         .take(limit)
                         .map(|(key, ())| key)
                         .collect::<Vec<_>>(),
@@ -161,11 +227,17 @@ impl ZebraDb {
                             )),
                             Included(maximum),
                         ))
+                        .filter(|(key, ())| {
+                            self.matches_stake_miner_filter(key.address(), is_miner_filter)
+                        })
                         .take(limit)
                         .map(|(key, ())| key)
                         .collect::<Vec<_>>(),
                     (ExplorerPageDirection::Older, None) => cf
                         .zs_forward_range_iter(minimum..=maximum)
+                        .filter(|(key, ())| {
+                            self.matches_stake_miner_filter(key.address(), is_miner_filter)
+                        })
                         .take(limit)
                         .map(|(key, ())| key)
                         .collect::<Vec<_>>(),
@@ -173,6 +245,9 @@ impl ZebraDb {
                         .zs_reverse_range_iter(
                             minimum..ExplorerFinalizerMinerRankKey::new(finalizer, address, stake),
                         )
+                        .filter(|(key, ())| {
+                            self.matches_stake_miner_filter(key.address(), is_miner_filter)
+                        })
                         .take(limit)
                         .map(|(key, ())| key)
                         .collect::<Vec<_>>(),
@@ -189,21 +264,54 @@ impl ZebraDb {
 
         pairs
             .into_iter()
-            .map(|(miner_address, finalizer)| {
+            .map(|(address, finalizer)| {
                 let record = self
                     .explorer_miner_finalizer_meta_cf()
-                    .zs_get(&ExplorerMinerFinalizerKey::new(miner_address, finalizer))
+                    .zs_get(&ExplorerMinerFinalizerKey::new(address, finalizer))
                     .expect("ranked miner-finalizer pairs have metadata");
-                let miner_record = self
-                    .explorer_miner_record(miner_address)
-                    .expect("attributed stake addresses are indexed miners");
+                let miner_record = self.explorer_miner_record(address);
                 ExplorerMinerStakeRankEntry {
-                    miner_address,
+                    address,
                     miner_record,
                     finalizer,
                     finalizer_address: self.finalizer_address(&finalizer),
                     record,
                 }
+            })
+            .collect()
+    }
+
+    /// Returns the number of active, nonzero pairs matching an address and finalizer filter.
+    pub fn explorer_address_stake_pair_count(
+        &self,
+        address: Address,
+        finalizer: Option<[u8; 32]>,
+        is_miner_filter: Option<bool>,
+    ) -> u64 {
+        if !self.matches_stake_miner_filter(address, is_miner_filter) {
+            return 0;
+        }
+        u64::try_from(self.address_stake_pairs(address, finalizer).len())
+            .expect("address-finalizer pair count fits in u64")
+    }
+
+    fn matches_stake_miner_filter(&self, address: Address, filter: Option<bool>) -> bool {
+        filter.is_none_or(|is_miner| self.explorer_miner_record(address).is_some() == is_miner)
+    }
+
+    fn address_stake_pairs(
+        &self,
+        address: Address,
+        finalizer: Option<[u8; 32]>,
+    ) -> Vec<(ExplorerMinerFinalizerKey, ExplorerMinerFinalizerRecord)> {
+        let minimum = ExplorerMinerFinalizerKey::min_for_address(address);
+        let maximum = ExplorerMinerFinalizerKey::max_for_address(address);
+        self.explorer_miner_finalizer_meta_cf()
+            .zs_forward_range_iter(minimum..=maximum)
+            .filter(|(key, record)| {
+                record.active_bond_count > 0
+                    && record.current_stake_zat > 0
+                    && finalizer.is_none_or(|finalizer| key.finalizer() == finalizer)
             })
             .collect()
     }
@@ -316,7 +424,6 @@ struct MinerStakeUpdates<'db> {
     original_pairs: HashMap<ExplorerMinerFinalizerKey, Option<ExplorerMinerFinalizerRecord>>,
     global_totals: ExplorerMinerStakeTotals,
     finalizer_totals: HashMap<[u8; 32], ExplorerMinerStakeTotals>,
-    ranked_pairs: HashMap<ExplorerMinerFinalizerKey, bool>,
     current_block_miner: Option<Address>,
     changed: bool,
 }
@@ -330,7 +437,6 @@ impl<'db> MinerStakeUpdates<'db> {
             original_pairs: HashMap::new(),
             global_totals: db.explorer_miner_stake_totals(None),
             finalizer_totals: HashMap::new(),
-            ranked_pairs: HashMap::new(),
             current_block_miner,
             changed: false,
         }
@@ -384,7 +490,6 @@ impl<'db> MinerStakeUpdates<'db> {
         for (key, record) in records {
             self.original_pairs.entry(key).or_insert(Some(record));
             self.pairs.insert(key, Some(record));
-            self.ranked_pairs.insert(key, true);
             move_transparent_totals(
                 &mut self.global_totals,
                 record.current_stake_zat,
@@ -463,7 +568,6 @@ impl<'db> MinerStakeUpdates<'db> {
         }
         self.pairs.insert(key, Some(record));
         let is_miner = self.is_miner(address);
-        self.ranked_pairs.insert(key, is_miner);
         self.add_transparent_totals(
             attribution.current_finalizer,
             attribution.current_stake_zat,
@@ -485,7 +589,6 @@ impl<'db> MinerStakeUpdates<'db> {
                     .expect("rewarded transparent stake fits in u64");
                 self.pairs.insert(key, Some(record));
                 let is_miner = self.is_miner(address);
-                self.ranked_pairs.insert(key, is_miner);
                 self.add_transparent_totals(attribution.current_finalizer, reward, false, is_miner);
             }
             source => {
@@ -522,7 +625,6 @@ impl<'db> MinerStakeUpdates<'db> {
         }
         self.pairs.insert(key, Some(record));
         let is_miner = self.is_miner(address);
-        self.ranked_pairs.insert(key, is_miner && !pair_removed);
         self.remove_transparent_totals(
             attribution.current_finalizer,
             attribution.current_stake_zat,
@@ -634,13 +736,7 @@ impl<'db> MinerStakeUpdates<'db> {
                     .explorer_miner_finalizer_meta_cf()
                     .with_batch_for_writing(batch)
                     .zs_insert(&key, &record);
-                if record.current_stake_zat > 0
-                    && self
-                        .ranked_pairs
-                        .get(&key)
-                        .copied()
-                        .unwrap_or_else(|| self.db.explorer_miner_record(key.address()).is_some())
-                {
+                if record.current_stake_zat > 0 && record.active_bond_count > 0 {
                     let _ = self
                         .db
                         .explorer_miner_finalizer_order_cf()
@@ -878,7 +974,7 @@ mod tests {
     };
 
     #[test]
-    fn finalizer_miner_summary_uses_highest_stake_address_and_total_count() {
+    fn finalizer_stake_summary_uses_highest_stake_address_and_total_count() {
         let db = ZebraDb::new(
             &Config::ephemeral(),
             STATE_DATABASE_KIND,
@@ -897,6 +993,13 @@ mod tests {
         let unrelated = Address::from_pub_key_hash(NetworkKind::Mainnet, [9; 20]);
 
         let mut batch = DiskWriteBatch::new();
+        let _ = db
+            .explorer_finalizer_miner_order_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(
+                &ExplorerFinalizerMinerRankKey::new(finalizer, unrelated, 999),
+                &(),
+            );
         let _ = db
             .explorer_finalizer_miner_order_cf()
             .with_batch_for_writing(&mut batch)
@@ -924,16 +1027,17 @@ mod tests {
             .zs_insert(
                 &finalizer,
                 &ExplorerMinerStakeTotals {
-                    miner_address_count: 2,
+                    miner_address_count: 1,
+                    other_transparent_address_count: 2,
                     ..Default::default()
                 },
             );
         db.write_batch(batch)
             .expect("writing finalizer miner summary fixtures should succeed");
 
-        let summary = db.explorer_finalizer_miner_summary(finalizer);
-        assert_eq!(summary.primary_miner_address, Some(primary));
-        assert_eq!(summary.miner_address_count, 2);
+        let summary = db.explorer_finalizer_stake_summary(finalizer);
+        assert_eq!(summary.primary_stake_address, Some(unrelated));
+        assert_eq!(summary.transparent_address_count, 3);
     }
 
     #[test]
@@ -1040,5 +1144,149 @@ mod tests {
         remove_non_transparent(&mut totals, ExplorerStakeSource::Shielded, 200, true);
         remove_transparent_totals(&mut totals, 100, true, true);
         assert_eq!(totals, ExplorerMinerStakeTotals::default());
+    }
+
+    #[test]
+    fn non_miner_stake_is_ranked_and_tracks_rewards_retarget_and_unbonding() {
+        use crate::request::{FinalizedBlock, Treestate};
+        use std::sync::Arc;
+        use zcash_primitives::{
+            bft::{finalizer_key_from_seed, FinalizerAddress},
+            transaction::StakingAction,
+        };
+        use zebra_chain::{
+            amount::DeferredPoolBalanceChange,
+            block::{Block, Hash, Height},
+            parameters::NetworkUpgrade,
+            serialization::ZcashDeserializeInto,
+            transaction::{LockTime, Transaction},
+        };
+
+        let db = ZebraDb::new(
+            &Config::ephemeral(),
+            STATE_DATABASE_KIND,
+            &state_database_format_version_in_code(),
+            &Network::Mainnet,
+            true,
+            STATE_COLUMN_FAMILIES_IN_CODE
+                .iter()
+                .map(ToString::to_string),
+            false,
+        )
+        .unwrap();
+        let address = Address::from_pub_key_hash(NetworkKind::Mainnet, [7; 20]);
+        let (_, key_a, _) = finalizer_key_from_seed(b"source-a");
+        let (_, key_b, _) = finalizer_key_from_seed(b"source-b");
+        let (a, b) = (
+            FinalizerAddress::create(&key_a),
+            FinalizerAddress::create(&key_b),
+        );
+        let bond_key = [9; 32];
+        let actions = [
+            StakingAction::CreateNewDelegationBond {
+                amount_zats: 100,
+                unique_pubkey: bond_key,
+                bond_salt: [0; 32],
+                target_finalizer: a,
+                signature: [0; 64],
+            },
+            StakingAction::RetargetDelegationBond {
+                unique_pubkey: bond_key,
+                signature: [0; 64],
+                from_finalizer: a,
+                to_finalizer: b,
+            },
+            StakingAction::BeginDelegationUnbonding {
+                unique_pubkey: bond_key,
+                signature: [0; 64],
+            },
+        ];
+        for (index, action) in actions.into_iter().enumerate() {
+            let mut block: Block = zebra_test::vectors::BLOCK_MAINNET_419200_BYTES
+                .zcash_deserialize_into()
+                .unwrap();
+            let mut spent_utxos = std::collections::HashMap::new();
+            let outpoint = zebra_chain::transparent::OutPoint {
+                hash: zebra_chain::transaction::Hash([1; 32]),
+                index: 0,
+            };
+            let output = zebra_chain::transparent::Output {
+                value: 1000.try_into().unwrap(),
+                lock_script: address.script(),
+            };
+            spent_utxos.insert(
+                outpoint,
+                zebra_chain::transparent::Utxo::from_location(output, Height(1), 1),
+            );
+            block.transactions = vec![Arc::new(Transaction::VCrosslink {
+                network_upgrade: NetworkUpgrade::Nu6,
+                lock_time: LockTime::unlocked(),
+                expiry_height: Height(0),
+                inputs: vec![zebra_chain::transparent::Input::PrevOut {
+                    outpoint,
+                    unlock_script: zebra_chain::transparent::Script::new(&[]),
+                    sequence: 0,
+                }],
+                outputs: Vec::new(),
+                sapling_shielded_data: None,
+                orchard_shielded_data: None,
+                ironwood_shielded_data: None,
+                staking_action: Some(action),
+            })];
+            let finalized = FinalizedBlock {
+                block: Arc::new(block),
+                hash: Hash([2; 32]),
+                height: Height(u32::try_from(index + 10).unwrap()),
+                new_outputs: Default::default(),
+                transaction_hashes: Arc::from([]),
+                treestate: Treestate::default(),
+                deferred_pool_balance_change: DeferredPoolBalanceChange::zero(),
+                bond_rewards: if index == 0 {
+                    vec![(bond_key, 25)]
+                } else {
+                    Vec::new()
+                },
+                finalizer_rewards: Vec::new(),
+                bond_burns: Vec::new(),
+                unbonding_amounts: Vec::new(),
+            };
+            let mut batch = DiskWriteBatch::new();
+            batch.prepare_explorer_miner_stake_batch(
+                &db,
+                &Network::Mainnet,
+                &finalized,
+                &spent_utxos,
+                None,
+                false,
+            );
+            db.write_batch(batch).unwrap();
+            let rows = db.explorer_miner_stake_entries(
+                None,
+                None,
+                None,
+                None,
+                crate::ExplorerPageDirection::Older,
+                10,
+            );
+            if index == 2 {
+                assert!(rows.is_empty());
+            } else {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].address, address);
+                assert!(rows[0].miner_record.is_none());
+                assert_eq!(rows[0].record.current_stake_zat, 125);
+                assert_eq!(
+                    rows[0].finalizer,
+                    if index == 0 { a.pub_key.0 } else { b.pub_key.0 }
+                );
+                assert_eq!(db.explorer_address_stake_pair_count(address, None, None), 1);
+            }
+        }
+        assert_eq!(
+            db.explorer_miner_stake_totals(None)
+                .other_transparent_stake_zat,
+            0
+        );
+        assert_eq!(db.explorer_address_stake_pair_count(address, None, None), 0);
     }
 }

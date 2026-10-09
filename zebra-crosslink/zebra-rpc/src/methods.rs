@@ -940,7 +940,7 @@ pub trait Rpc {
     #[method(name = "getcrosslinkfinalizerliveness")]
     async fn get_crosslink_finalizer_liveness(&self) -> Result<CrosslinkFinalizerLivenessResponse>;
 
-    /// Returns current stake in active bonds directly attributable to known miner addresses.
+    /// Returns current stake in active bonds attributed to transparent addresses, including non-miners.
     #[method(name = "getcrosslinkminerstake")]
     async fn get_crosslink_miner_stake(
         &self,
@@ -961,7 +961,7 @@ pub trait Rpc {
         request: CrosslinkFinalizerRequest,
     ) -> Result<Option<CrosslinkFinalizerResponse>>;
 
-    /// Returns current miner-attributed stake sources for one finalizer candidate.
+    /// Returns current transparent stake sources for one finalizer candidate, including non-miners.
     #[method(name = "getcrosslinkfinalizerstakesources")]
     async fn get_crosslink_finalizer_stake_sources(
         &self,

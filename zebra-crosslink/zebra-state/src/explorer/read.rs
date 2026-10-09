@@ -115,11 +115,13 @@ pub fn handle(
         }
         ExplorerReadRequest::MinerStakePage {
             finalizer,
+            address,
+            is_miner,
             limit,
             cursor,
             direction,
         } => ExplorerReadResponse::MinerStakePage(explorer_miner_stake_page(
-            db, finalizer, limit, cursor, direction,
+            db, finalizer, address, is_miner, limit, cursor, direction,
         )),
         ExplorerReadRequest::StakeHistoryPage {
             filter,
@@ -135,11 +137,11 @@ pub fn handle(
             direction,
             height_range,
         )),
-        ExplorerReadRequest::FinalizerMinerSummaries(finalizers) => {
-            ExplorerReadResponse::FinalizerMinerSummaries(
+        ExplorerReadRequest::FinalizerStakeSummaries(finalizers) => {
+            ExplorerReadResponse::FinalizerStakeSummaries(
                 finalizers
                     .iter()
-                    .map(|finalizer| db.explorer_finalizer_miner_summary(*finalizer))
+                    .map(|finalizer| db.explorer_finalizer_stake_summary(*finalizer))
                     .collect(),
             )
         }
@@ -273,10 +275,12 @@ pub fn explorer_miner(
     }
 }
 
-/// Returns current miner-attributed stake without scanning blocks or all bonds.
+/// Returns current transparent-attributed stake without scanning blocks or all bonds.
 pub fn explorer_miner_stake_page(
     db: &ZebraDb,
     finalizer: Option<[u8; 32]>,
+    address: Option<transparent::Address>,
+    is_miner: Option<bool>,
     limit: u32,
     cursor: Option<crate::ExplorerMinerStakeRankCursor>,
     direction: ExplorerPageDirection,
@@ -286,7 +290,9 @@ pub fn explorer_miner_stake_page(
         best_tip.is_some_and(|(_, hash)| hash == cursor.block_hash)
             && db.explorer_contains_miner_stake_entry(
                 finalizer,
-                cursor.miner_address,
+                address,
+                is_miner,
+                cursor.address,
                 cursor.finalizer,
                 cursor.current_stake_zat,
             )
@@ -303,13 +309,9 @@ pub fn explorer_miner_stake_page(
         .expect("explorer miner stake page limit fits in usize");
     let mut entries = db.explorer_miner_stake_entries(
         finalizer,
-        cursor.map(|cursor| {
-            (
-                cursor.miner_address,
-                cursor.finalizer,
-                cursor.current_stake_zat,
-            )
-        }),
+        address,
+        is_miner,
+        cursor.map(|cursor| (cursor.address, cursor.finalizer, cursor.current_stake_zat)),
         direction,
         requested.saturating_add(1),
     );
@@ -321,6 +323,16 @@ pub fn explorer_miner_stake_page(
     }
 
     let totals = db.explorer_miner_stake_totals(finalizer);
+    let pair_count = address.map_or_else(
+        || match is_miner {
+            Some(true) => totals.miner_address_count,
+            Some(false) => totals.other_transparent_address_count,
+            None => totals
+                .miner_address_count
+                .saturating_add(totals.other_transparent_address_count),
+        },
+        |address| db.explorer_address_stake_pair_count(address, finalizer, is_miner),
+    );
     let total_current_stake_zat = best_tip
         .and_then(|(_, hash)| db.aggregated_stakes(&hash))
         .map(|stakes| {
@@ -339,6 +351,7 @@ pub fn explorer_miner_stake_page(
         cursor_valid,
         total_current_stake_zat,
         totals,
+        pair_count,
         entries,
         has_more,
     }
