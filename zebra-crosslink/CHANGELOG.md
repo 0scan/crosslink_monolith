@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- Finalizer source addresses, stake-source rankings, staking history, and address stake
+  summaries now include the best-chain suffix before finalization. Finalizer voting
+  power and source summaries share one state snapshot. Reads pin the finalized DB
+  view and replay only newer blocks, including rewards, retargets, unbonding, and burns,
+  so newly mined transparent bonds appear immediately without a resync.
+
 - Staking history retrieves an unbonding bond's source and current amount from
   canonical bond state when available, and creating a new bond no longer scans
   existing stake history for its identity.

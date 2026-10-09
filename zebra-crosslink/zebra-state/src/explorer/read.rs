@@ -11,9 +11,8 @@ use crate::{
     explorer::{
         ExplorerAddressPage, ExplorerAddressRecord, ExplorerBlockSummary, ExplorerMinerPage,
         ExplorerMinerStakePage, ExplorerPageDirection, ExplorerReadRequest, ExplorerReadResponse,
-        ExplorerStakeHistoryCursor, ExplorerStakeHistoryEntry, ExplorerStakeHistoryFilter,
-        ExplorerStakeHistoryPage, ExplorerTransactionPage, ExplorerTransactionQuery,
-        ExplorerTransactionSummary,
+        ExplorerStakeHistoryCursor, ExplorerStakeHistoryFilter, ExplorerStakeHistoryPage,
+        ExplorerTransactionPage, ExplorerTransactionQuery, ExplorerTransactionSummary,
     },
     request::Spend,
     service::{
@@ -24,11 +23,19 @@ use crate::{
     TransactionLocation,
 };
 
-use super::storage::explorer_transaction_record_with_ordered_utxos;
+use super::storage::{explorer_transaction_record_with_ordered_utxos, MinerStakeUpdates};
 
 const EXPLORER_ROLLING_SCAN_LIMIT: u32 = 10_000;
 const ROLLING_WINDOW_SECONDS: i64 = 86_400;
 const MAX_EXPLORER_PAGE_SIZE: u32 = 100;
+
+/// Builds one read-only stake view from a pinned finalized snapshot and the best-chain suffix.
+pub(crate) fn stake_snapshot<'db>(
+    db: &'db ZebraDb,
+    chain: Option<&Chain>,
+) -> MinerStakeUpdates<'db> {
+    MinerStakeUpdates::for_chain(db, chain)
+}
 
 /// Handles every explorer read behind the state service's single extension point.
 pub fn handle(
@@ -111,7 +118,7 @@ pub fn handle(
             direction,
         } => ExplorerReadResponse::MinerPage(explorer_miner_page(db, limit, cursor, direction)),
         ExplorerReadRequest::Miner { address } => {
-            ExplorerReadResponse::Miner(explorer_miner(db, address))
+            ExplorerReadResponse::Miner(explorer_miner(chain, db, address))
         }
         ExplorerReadRequest::MinerStakePage {
             finalizer,
@@ -121,7 +128,7 @@ pub fn handle(
             cursor,
             direction,
         } => ExplorerReadResponse::MinerStakePage(explorer_miner_stake_page(
-            db, finalizer, address, is_miner, limit, cursor, direction,
+            chain, db, finalizer, address, is_miner, limit, cursor, direction,
         )),
         ExplorerReadRequest::StakeHistoryPage {
             filter,
@@ -130,6 +137,7 @@ pub fn handle(
             direction,
             height_range,
         } => ExplorerReadResponse::StakeHistoryPage(explorer_stake_history_page(
+            chain,
             db,
             filter,
             limit,
@@ -138,18 +146,20 @@ pub fn handle(
             height_range,
         )),
         ExplorerReadRequest::FinalizerStakeSummaries(finalizers) => {
+            let snapshot = MinerStakeUpdates::for_chain(db, chain.as_deref());
             ExplorerReadResponse::FinalizerStakeSummaries(
                 finalizers
                     .iter()
-                    .map(|finalizer| db.explorer_finalizer_stake_summary(*finalizer))
+                    .map(|finalizer| snapshot.finalizer_summary(*finalizer))
                     .collect(),
             )
         }
     })
 }
 
-/// Returns one finalized staking-action history page.
+/// Returns one canonical staking-action history page including the best-chain suffix.
 pub fn explorer_stake_history_page(
+    chain: Option<Arc<Chain>>,
     db: &ZebraDb,
     filter: ExplorerStakeHistoryFilter,
     limit: u32,
@@ -157,14 +167,15 @@ pub fn explorer_stake_history_page(
     direction: ExplorerPageDirection,
     height_range: std::ops::RangeInclusive<zebra_chain::block::Height>,
 ) -> ExplorerStakeHistoryPage {
-    let best_tip = db.tip();
+    let snapshot = MinerStakeUpdates::for_chain(db, chain.as_deref());
+    let best_tip = snapshot.best_tip(chain.as_deref());
     let from_height = *height_range.start();
     let to_height = *height_range.end();
     let cursor_valid = cursor.is_none_or(|cursor| {
-        db.hash(cursor.location.height) == Some(cursor.block_hash)
+        snapshot.block_hash(chain.as_deref(), cursor.location.height) == Some(cursor.block_hash)
             && (from_height..=to_height).contains(&cursor.location.height)
-            && db
-                .explorer_stake_history_record(cursor.location)
+            && snapshot
+                .history_record(cursor.location)
                 .is_some_and(|record| filter.matches(record))
     });
     if !cursor_valid || from_height > to_height {
@@ -175,8 +186,9 @@ pub fn explorer_stake_history_page(
         };
     }
 
-    let limit = limit.clamp(1, MAX_EXPLORER_PAGE_SIZE) as usize;
-    let mut records = db.explorer_stake_history_records(
+    let limit = usize::try_from(limit.clamp(1, MAX_EXPLORER_PAGE_SIZE))
+        .expect("explorer stake history page limit fits in usize");
+    let mut entries = snapshot.history_entries(
         filter,
         cursor.map(|cursor| cursor.location),
         direction,
@@ -184,26 +196,12 @@ pub fn explorer_stake_history_page(
         to_height,
         limit.saturating_add(1),
     );
-    let has_more = records.len() > limit;
-    records.truncate(limit);
-    let entries = records
-        .into_iter()
-        .map(|(location, record)| ExplorerStakeHistoryEntry {
-            location,
-            txid: db
-                .transaction_hash(location)
-                .expect("stake history location has a transaction hash"),
-            block_hash: db
-                .hash(location.height)
-                .expect("stake history location has a block hash"),
-            block_time: db
-                .block_header(location.height.into())
-                .expect("stake history location has a block header")
-                .time
-                .timestamp(),
-            record,
-        })
-        .collect();
+    let has_more = entries.len() > limit;
+    if direction == ExplorerPageDirection::Newer && has_more {
+        entries.remove(0);
+    } else {
+        entries.truncate(limit);
+    }
 
     ExplorerStakeHistoryPage {
         best_tip,
@@ -259,24 +257,42 @@ pub fn explorer_miner_page(
     }
 }
 
-/// Returns persisted all-time totals for one payout address in constant time.
+/// Returns mining and stake totals for one payout address at the best-chain tip.
 pub fn explorer_miner(
+    chain: Option<Arc<Chain>>,
     db: &ZebraDb,
     address: zebra_chain::transparent::Address,
 ) -> crate::ExplorerMiner {
-    let (staked_zat, finalizer_count) = db.explorer_miner_stake_summary(address);
-
+    let snapshot = MinerStakeUpdates::for_chain(db, chain.as_deref());
+    let entries = snapshot.entries(
+        None,
+        Some(address),
+        None,
+        None,
+        ExplorerPageDirection::Older,
+        usize::MAX,
+    );
+    let staked_zat = entries.iter().fold(0_u64, |total, entry| {
+        total
+            .checked_add(entry.record.current_stake_zat)
+            .expect("verified address stake fits in u64")
+    });
+    let finalizer_count =
+        u64::try_from(entries.len()).expect("address finalizer count fits in u64");
+    let best_tip = snapshot.best_tip(chain.as_deref());
     crate::ExplorerMiner {
-        best_tip: db.tip(),
-        chain_block_count: db.explorer_chain_stats().block_count,
-        record: db.explorer_miner_record(address),
+        best_tip,
+        chain_block_count: best_tip.map_or(0, |(height, _)| u64::from(height.0) + 1),
+        record: snapshot.miner_record(address),
         staked_zat,
         finalizer_count,
     }
 }
 
-/// Returns current transparent-attributed stake without scanning blocks or all bonds.
+/// Returns current transparent-attributed stake at the best-chain snapshot.
+#[allow(clippy::too_many_arguments)]
 pub fn explorer_miner_stake_page(
+    chain: Option<Arc<Chain>>,
     db: &ZebraDb,
     finalizer: Option<[u8; 32]>,
     address: Option<transparent::Address>,
@@ -285,17 +301,11 @@ pub fn explorer_miner_stake_page(
     cursor: Option<crate::ExplorerMinerStakeRankCursor>,
     direction: ExplorerPageDirection,
 ) -> ExplorerMinerStakePage {
-    let best_tip = db.tip();
+    let snapshot = MinerStakeUpdates::for_chain(db, chain.as_deref());
+    let best_tip = snapshot.best_tip(chain.as_deref());
     let cursor_valid = cursor.is_none_or(|cursor| {
         best_tip.is_some_and(|(_, hash)| hash == cursor.block_hash)
-            && db.explorer_contains_miner_stake_entry(
-                finalizer,
-                address,
-                is_miner,
-                cursor.address,
-                cursor.finalizer,
-                cursor.current_stake_zat,
-            )
+            && snapshot.contains_entry(finalizer, address, is_miner, cursor)
     });
     if !cursor_valid {
         return ExplorerMinerStakePage {
@@ -307,7 +317,7 @@ pub fn explorer_miner_stake_page(
 
     let requested = usize::try_from(limit.clamp(1, MAX_EXPLORER_PAGE_SIZE))
         .expect("explorer miner stake page limit fits in usize");
-    let mut entries = db.explorer_miner_stake_entries(
+    let mut entries = snapshot.entries(
         finalizer,
         address,
         is_miner,
@@ -322,7 +332,7 @@ pub fn explorer_miner_stake_page(
         entries.truncate(requested);
     }
 
-    let totals = db.explorer_miner_stake_totals(finalizer);
+    let totals = snapshot.totals(finalizer);
     let pair_count = address.map_or_else(
         || match is_miner {
             Some(true) => totals.miner_address_count,
@@ -331,10 +341,24 @@ pub fn explorer_miner_stake_page(
                 .miner_address_count
                 .saturating_add(totals.other_transparent_address_count),
         },
-        |address| db.explorer_address_stake_pair_count(address, finalizer, is_miner),
+        |address| {
+            u64::try_from(
+                snapshot
+                    .entries(
+                        finalizer,
+                        Some(address),
+                        is_miner,
+                        None,
+                        ExplorerPageDirection::Older,
+                        usize::MAX,
+                    )
+                    .len(),
+            )
+            .expect("address-finalizer pair count fits in u64")
+        },
     );
-    let total_current_stake_zat = best_tip
-        .and_then(|(_, hash)| db.aggregated_stakes(&hash))
+    let total_current_stake_zat = snapshot
+        .aggregated_stakes(chain.as_deref())
         .map(|stakes| {
             stakes.into_iter().fold(0_u64, |total, (key, stake)| {
                 if finalizer.is_none_or(|finalizer| finalizer == key) {

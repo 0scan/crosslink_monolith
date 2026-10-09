@@ -947,7 +947,7 @@ pub trait Rpc {
         request: Option<CrosslinkMinerStakeRequest>,
     ) -> Result<CrosslinkMinerStakeResponse>;
 
-    /// Returns finalized Crosslink staking actions, with optional source and identity filters.
+    /// Returns canonical Crosslink staking actions, with optional source and identity filters.
     #[method(name = "getcrosslinkstakehistory")]
     async fn get_crosslink_stake_history(
         &self,

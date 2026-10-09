@@ -21,10 +21,10 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug)]
-struct BondIdentity {
-    source: ExplorerStakeSource,
-    finalizer: Option<[u8; 32]>,
-    amount_zat: Option<u64>,
+pub(super) struct BondIdentity {
+    pub(super) source: ExplorerStakeSource,
+    pub(super) finalizer: Option<[u8; 32]>,
+    pub(super) amount_zat: Option<u64>,
 }
 
 impl ZebraDb {
@@ -145,7 +145,33 @@ fn prepare_stake_history_batch<F>(
 ) where
     F: FnMut(TransactionLocation, &Transaction) -> ExplorerStakeSource,
 {
-    let mut identities = HashMap::<[u8; 32], Option<BondIdentity>>::new();
+    let records = stake_history_records(
+        height,
+        transactions,
+        &mut HashMap::new(),
+        |key| db.latest_stake_bond_identity(key),
+        &mut create_source,
+    );
+    for (location, record) in records {
+        let _ = db
+            .explorer_stake_history_cf()
+            .with_batch_for_writing(batch)
+            .zs_insert(&location, &record);
+    }
+}
+
+pub(super) fn stake_history_records<F, G>(
+    height: block::Height,
+    transactions: &[std::sync::Arc<Transaction>],
+    identities: &mut HashMap<[u8; 32], Option<BondIdentity>>,
+    mut load_identity: G,
+    mut create_source: F,
+) -> Vec<(TransactionLocation, ExplorerStakeHistoryRecord)>
+where
+    F: FnMut(TransactionLocation, &Transaction) -> ExplorerStakeSource,
+    G: FnMut([u8; 32]) -> Option<BondIdentity>,
+{
+    let mut records = Vec::new();
 
     for (transaction_index, transaction) in transactions.iter().enumerate() {
         let Some(action) = transaction.staking_action() else {
@@ -158,7 +184,7 @@ fn prepare_stake_history_batch<F>(
             | StakingAction::ConvertFinalizerRewardToDelegationBond { .. } => None,
             _ => *identities
                 .entry(bond_key)
-                .or_insert_with(|| db.latest_stake_bond_identity(bond_key)),
+                .or_insert_with(|| load_identity(bond_key)),
         };
 
         let (record, next_identity) = match action {
@@ -270,11 +296,9 @@ fn prepare_stake_history_batch<F>(
         };
 
         identities.insert(bond_key, next_identity);
-        let _ = db
-            .explorer_stake_history_cf()
-            .with_batch_for_writing(batch)
-            .zs_insert(&location, &record);
+        records.push((location, record));
     }
+    records
 }
 
 #[cfg(test)]

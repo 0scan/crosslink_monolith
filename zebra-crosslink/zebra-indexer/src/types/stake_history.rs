@@ -50,7 +50,7 @@ pub struct CrosslinkStakeHistoryRequest {
     pub direction: PageDirection,
 }
 
-/// One finalized Crosslink staking action.
+/// One canonical Crosslink staking action.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkStakeHistoryEntry {
     pub txid: String,
@@ -79,11 +79,13 @@ pub struct CrosslinkStakeHistoryPagination {
     pub prev_cursor: Option<String>,
 }
 
-/// A newest-first page of finalized Crosslink staking actions.
+/// A newest-first page of canonical Crosslink staking actions.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct CrosslinkStakeHistoryResponse {
     pub items: Vec<CrosslinkStakeHistoryEntry>,
     pub pagination: CrosslinkStakeHistoryPagination,
+    /// Best-chain height covered by this page, including non-finalized staking actions.
     pub indexed_height: Option<String>,
+    /// Best-chain block hash corresponding to `indexed_height`.
     pub indexed_block_hash: Option<String>,
 }
