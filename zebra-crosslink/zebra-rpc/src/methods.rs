@@ -650,10 +650,12 @@ pub trait Rpc {
     #[method(name = "wallet_spendable_funds")]
     async fn wallet_spendable_funds(&self) -> Result<serde_json::Value>;
 
-    /// Send `value_zats` zatoshis from the wallet to a unified address, returning the txid.
+    /// Send `value_zats` zatoshis to a transparent or unified address on the wallet's network.
     ///
-    /// Unlike the GUI's send buttons the value is not quantized; it is an exact zatoshi amount.
-    /// Blocks until the transaction is built and submitted.
+    /// The recipient receives the exact amount; the network fee is paid in addition.
+    /// Unified addresses prefer their Ironwood receiver. Transparent payments expose the
+    /// recipient and amount. Blocks until the transaction is built and submitted, returning
+    /// the txid. Sapling and TEX destinations are unsupported.
     ///
     /// ## Example Usage
     /// ```shell

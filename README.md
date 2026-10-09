@@ -14,6 +14,31 @@ In the future, we would like to receive thorough reviews by bug-hunting teams, b
 
 A subtree'd monorepo for all crosslink code/dependencies
 
+## Send wallet funds to a transparent address
+
+In the Crosslink Visualizer, open **Your Wallet → Send**, paste or enter your
+Crosslink testnet transparent address, enter an amount in cTAZ (up to eight decimal
+places), and select **Send Payment**. The recipient receives that amount; the
+network fee is paid in addition, and change returns to your shielded wallet.
+For example, with 5 cTAZ available, sending 4.99 cTAZ leaves room for the fee.
+Only spendable funds are used; shielded receipts need three confirmations.
+The dialog shows submission errors or the submitted transaction ID.
+
+The same feature is available through `wallet_basic_send`, with the amount in
+zatoshis (100,000,000 zatoshis = 1 cTAZ):
+
+```sh
+curl -sS http://127.0.0.1:8232 \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"wallet_basic_send","params":[499000000,"YOUR_CROSSLINK_TESTNET_TRANSPARENT_ADDRESS"]}'
+```
+
+Transparent payments publish the recipient address and amount. Both P2PKH and
+P2SH transparent addresses are supported. Unified addresses retain their shielded
+receiver preference. Mainnet addresses, Sapling addresses, and TEX addresses are
+not accepted by this testnet wallet. cTAZ remains on the Crosslink network; sending
+to a transparent address does not convert it into mainnet ZEC.
+
 ## Run the Crosslink Zebra RPC node with Docker
 
 From the repository root, build and start the single Zebra node container:

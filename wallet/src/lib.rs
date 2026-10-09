@@ -113,7 +113,8 @@ use zcash_client_backend::{
 // @TODO (Giovanni): Move to better location
 pub mod scanner;
 
-use zcash_protocol::consensus::{NetworkType, Parameters, MAIN_NETWORK, TEST_NETWORK};
+use zcash_protocol::consensus::{NetworkType, Parameters, MAIN_NETWORK};
+pub use zcash_protocol::consensus::TEST_NETWORK;
 
 #[derive(Clone)]
 pub struct FaucetRequestClosure(pub Arc<dyn Fn(String) -> Result<u64, String> + Sync + Send + 'static>);
@@ -123,7 +124,7 @@ pub static GUI_ENABLE_MINE: Mutex<bool> = Mutex::new(true);
 
 pub static STAKING_STAGE: Mutex<Option<(StakingActionRequest, tokio::sync::oneshot::Sender<Result<String, String>>)>> = Mutex::new(None);
 
-/// Staged basic send requested over RPC: (value in zatoshis, unified address string, result channel).
+/// Staged basic send requested over RPC: (value in zatoshis, recipient address, result channel).
 pub static BASIC_SEND_STAGE: Mutex<Option<(u64, String, tokio::sync::oneshot::Sender<Result<String, String>>)>> = Mutex::new(None);
 
 pub static STAKING_POSITIONS: Mutex<zcash_primitives::bft::WalletStakingPositions> = Mutex::new((BTreeMap::new(), Vec::new()));
@@ -531,7 +532,7 @@ enum WalletAction {
     UnstakeFromFinalizer(TxId),
     RetargetBond(TxId, bft::FinalizerAddress),
     ClaimBond(TxId),
-    SendToAddress(UnifiedAddress, Zatoshis),
+    SendToAddress(SendRecipient, Zatoshis),
     /// Convert this node's own finalizer commission into a bond.
     ConvertFinalizerReward(Zatoshis),
 }
@@ -771,6 +772,16 @@ impl TxStatus {
             TxStatus::OnBc => true,
             _ => false,
         }
+    }
+}
+
+fn send_result(tx: &WalletTx) -> Option<Result<String, String>> {
+    match tx.status {
+        TxStatus::HardFail(_, err) => Some(Err(err.to_string().trim_end_matches('\0').to_string())),
+        TxStatus::SoftFail(_) => Some(Err("Could not submit transaction to the node. Check the connection and retry.".to_string())),
+        TxStatus::OnBc if tx.h == BlockHeight::SENT => Some(Ok(tx.txid.to_string())),
+        TxStatus::OnBc if tx.h == BlockHeight::INVALID => Some(Err("Failed to build send transaction.".to_string())),
+        _ => None,
     }
 }
 
@@ -1056,6 +1067,8 @@ pub struct WalletState {
     pub waiting_for_faucet: bool,
     pub waiting_for_stake_to_finalizer: bool,
     pub waiting_for_send: bool,
+    pub send_error: Option<String>,
+    pub last_send_txid: Option<String>,
 
     pub wallets_sync_h: u64,
     pub wallets_tip_h: u64,
@@ -1081,6 +1094,7 @@ impl WalletState {
 
     pub fn user_balance(&self)          -> u64 { self.user_unshielded_funds + self.user_shielded_spendable_funds + self.user_shielded_pending_funds }
     pub fn user_pending_balance(&self)  -> u64 { self.user_shielded_pending_funds }
+    pub fn user_spendable_balance(&self) -> u64 { self.user_unshielded_funds + self.user_shielded_spendable_funds }
     pub fn miner_balance(&self)         -> u64 { self.miner_unshielded_funds + self.miner_shielded_spendable_funds + self.miner_shielded_pending_funds }
     pub fn miner_pending_balance(&self) -> u64 { self.miner_shielded_pending_funds }
 
@@ -1138,21 +1152,71 @@ impl WalletState {
         self.actions_in_flight.push_back(WalletAction::ClaimBond(txid));
     }
 
-    pub fn send_to_address(&mut self, address: String, amount: u64) {
-        let Ok(address) = UnifiedAddress::decode(&TEST_NETWORK /* @todo */, &address) else {
-            println!("Invalid address for send: {}", address);
-            return;
-        };
-
-        if self.actions_in_flight.iter().filter(|a| match a {
-            WalletAction::SendToAddress(addr, amt) if amt.into_u64() == amount && addr.eq(&address) => true,
-            _ => false
-        }).count() != 0 {
-            return;
+    pub fn send_to_address(&mut self, address: String, amount: u64) -> Result<(), String> {
+        if self.waiting_for_send {
+            return Err("A send is already in progress.".to_string());
         }
-
+        let request = (|| {
+            let recipient = SendRecipient::decode(&TEST_NETWORK, &address)?;
+            let amount = validate_send_amount(amount)?;
+            if amount.into_u64() + minimum_send_fee() > self.user_spendable_balance() {
+                return Err("Insufficient spendable funds for the amount and network fee.".to_string());
+            }
+            Ok(WalletAction::SendToAddress(recipient, amount))
+        })();
+        let action = request.map_err(|err: String| {
+            self.send_error = Some(err.clone());
+            err
+        })?;
+        self.send_error = None;
+        self.last_send_txid = None;
         self.waiting_for_send = true;
-        self.actions_in_flight.push_back(WalletAction::SendToAddress(address, Zatoshis::from_u64(amount).expect("Invalid amount given to stake_to_finalizer")));
+        self.actions_in_flight.push_back(action);
+        Ok(())
+    }
+}
+
+pub fn minimum_send_fee() -> u64 { zip317::MINIMUM_FEE.into_u64() }
+
+pub fn validate_send_amount(amount: u64) -> Result<Zatoshis, String> {
+    let zats = Zatoshis::from_u64(amount).map_err(|_| "Amount exceeds the monetary limit.".to_string())?;
+    if amount == 0 {
+        return Err("Enter an amount greater than zero.".to_string());
+    }
+    Ok(zats)
+}
+
+/// Supported payment destinations. Unified addresses retain their shielded preference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendRecipient {
+    Transparent(TransparentAddress),
+    Ironwood(orchard::Address),
+}
+
+impl SendRecipient {
+    pub fn decode<P: Parameters>(network: &P, address: &str) -> Result<Self, String> {
+        use zcash_keys::address::Address;
+        match Address::decode(network, address.trim()) {
+            Some(Address::Transparent(dst)) => Ok(Self::Transparent(dst)),
+            Some(Address::Unified(ua)) => {
+                if let Some(dst) = ua.orchard() {
+                    Ok(Self::Ironwood(*dst))
+                } else if let Some(dst) = ua.transparent() {
+                    Ok(Self::Transparent(*dst))
+                } else {
+                    Err("Unified address has no supported receiver.".to_string())
+                }
+            }
+            Some(_) => Err("Use a transparent or unified address; Sapling and TEX sends are unsupported.".to_string()),
+            None => Err("Invalid address or wrong network. Use a Crosslink testnet address.".to_string()),
+        }
+    }
+
+    fn output(&self, zats: Zatoshis, ovk: Option<orchard::keys::OutgoingViewingKey>, memo: MemoBytes) -> TxOutput {
+        match self {
+            Self::Transparent(dst) => TxOutput::Transparent { dst: *dst, zats },
+            Self::Ironwood(dst) => TxOutput::Ironwood { ovk, dst: *dst, zats, memo },
+        }
     }
 }
 
@@ -2136,6 +2200,28 @@ impl ManualWallet {
         } else {
             None
         }
+    }
+
+    fn send_to_recipient<P: Parameters>(
+        &mut self, network: P, tx: &mut ProposedTx, client: &mut CompactTxStreamerClient<Channel>,
+        src_usk: &UnifiedSpendingKey, amount: u64, orchard_tree: &OrchardShardTree,
+        recipient: &SendRecipient, memo: MemoBytes,
+    ) -> Result<(), String> {
+        let zats = validate_send_amount(amount)?;
+        if self.txs.iter().any(|tx| tx.is_on_bc() && !tx.h.is_in_block() && tx.totals(true).spent_zats > Zatoshis::ZERO) {
+            return Err("A wallet spend is awaiting confirmation. Wait for it before sending again.".to_string());
+        }
+        if self.branch_mismatch.is_some() {
+            return Err("Wallet and node consensus branches differ. Update the wallet before sending.".to_string());
+        }
+        let keys = PreparedKeys::from_ufvk_all(&self.accounts[0].ufvk);
+        let outputs = [recipient.output(zats, keys.orchard_ovk, memo)];
+        let opts = TxOptions { src_pools: &[TxPool::Ironwood(orchard_tree), TxPool::Transparent], ..TxOptions::default() };
+        let mut proposed = ProposedTx::EMPTY;
+        self.send_zats(network, &mut proposed, client, &outputs, src_usk, &opts)
+            .ok_or_else(|| "Could not prepare send. Check confirmed funds, network fees, and wallet sync.".to_string())?;
+        *tx = proposed;
+        Ok(())
     }
 
 
@@ -4831,7 +4917,7 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
 
             // DO NOT DO ANY WORK AFTER THIS LOCK IS TAKEN
             let mut lock = wallet_state.lock().unwrap();
-            lock.waiting_for_send = waiting_for_send;
+            lock.waiting_for_send = waiting_for_send || rpc_send.is_some() || lock.actions_in_flight.iter().any(|a| matches!(a, WalletAction::SendToAddress(..)));
             lock.waiting_for_faucet = waiting_for_faucet;
             lock.waiting_for_stake_to_finalizer = waiting_for_stake_to_finalizer;
 
@@ -4946,24 +5032,21 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
             if let Some((value_zats, address, sender)) = staged_send {
                 // The address arrives as a string and is decoded here rather than at the RPC
                 // boundary because this loop is what knows the network the wallet was built for.
-                let ua  = UnifiedAddress::decode(network, &address);
-                let dst = if let Ok(ua) = &ua { ua.orchard().copied() } else { None };
-
-                if let Some(dst) = dst {
-                    let mut tx = ProposedTx::EMPTY;
-                    let ok = user_wallet.send_ironwood_to_ironwood_zats(network, &mut tx, &mut client, &user_usk,
-                                                                       value_zats, &orchard_tree, dst, MemoBytes::empty()).is_some();
-                    if ok {
+                let mut tx = ProposedTx::EMPTY;
+                let result = SendRecipient::decode(network, &address).and_then(|recipient| {
+                    if proposed_send.is_in_progress() || proposed_stake.is_in_progress() || rpc_stake.is_some() {
+                        return Err("Another wallet spend is in progress. Please try again after confirmation.".to_string());
+                    }
+                    user_wallet.send_to_recipient(network, &mut tx, &mut client, &user_usk,
+                                                  value_zats, &orchard_tree, &recipient, MemoBytes::empty())
+                });
+                match result {
+                    Ok(()) => {
                         println!("prepared notes for RPC-requested send of {value_zats} zats");
                         just_init_new_tx = true;
                         rpc_send = Some((tx, sender));
-                    } else {
-                        let _ = sender.send(Err("failed to create send transaction from notes".to_string()));
                     }
-                } else if ua.is_err() {
-                    let _ = sender.send(Err(format!("invalid unified address: {address}")));
-                } else {
-                    let _ = sender.send(Err(format!("unified address has no Ironwood receiver: {address}")));
+                    Err(err) => { let _ = sender.send(Err(err)); }
                 }
             }
         }
@@ -5032,14 +5115,21 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
                 }
 
                 WalletAction::SendToAddress(address, amount) => {
-                    if let Some(orchard_address) = address.orchard() {
-                        let memo = MemoBytes::from_bytes("send from user wallet".as_bytes()).unwrap();
-                        let ok = user_wallet.send_ironwood_to_ironwood_zats(network, &mut proposed_send, &mut client, &user_usk, amount.into_u64(), &orchard_tree, *orchard_address, memo).is_some();
-                        just_init_new_tx |= ok;
-                        if DUMP_ACTIONS { println!("Try user send: {ok:?}"); }
-                        true // ALT ok
+                    let memo = MemoBytes::from_bytes("send from user wallet".as_bytes()).unwrap();
+                    let result = if proposed_send.is_in_progress() || proposed_stake.is_in_progress() || rpc_send.is_some() || rpc_stake.is_some() {
+                        Err("Another wallet spend is in progress. Please try again after confirmation.".to_string())
                     } else {
-                        false
+                        user_wallet.send_to_recipient(network, &mut proposed_send, &mut client, &user_usk,
+                                                      amount.into_u64(), &orchard_tree, address, memo)
+                    };
+                    match result {
+                        Ok(()) => { just_init_new_tx = true; true }
+                        Err(err) => {
+                            let mut state = wallet_state.lock().unwrap();
+                            state.send_error = Some(err);
+                            state.waiting_for_send = false;
+                            false
+                        }
                     }
                 }
 
@@ -5182,7 +5272,16 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
 
             continue_proposed_tx(&mut miner_wallet, network, &mut proposed_miner_shield, &mut client, "miner shield", DUMP_TX_SEND && false).await;
             continue_proposed_tx(&mut user_wallet,  network, &mut proposed_stake,        &mut client, "stake",        DUMP_TX_SEND).await;
-            continue_proposed_tx(&mut user_wallet,  network, &mut proposed_send,         &mut client, "send",         DUMP_TX_SEND).await;
+            let sending = proposed_send.is_in_progress();
+            let send_progress = continue_proposed_tx(&mut user_wallet, network, &mut proposed_send, &mut client, "send", DUMP_TX_SEND).await;
+            if let Some(result) = sending.then(|| send_result(&send_progress)).flatten() {
+                let mut state = wallet_state.lock().unwrap();
+                state.waiting_for_send = false;
+                match result {
+                    Ok(txid) => { state.last_send_txid = Some(txid); }
+                    Err(err) => { state.send_error = Some(err); }
+                }
+            }
 
             if let Some((mut tx, sender)) = rpc_stake.take() {
                 let tx_progress = continue_proposed_tx(&mut user_wallet, network, &mut tx, &mut client, "rpc stake", DUMP_TX_SEND || true).await;
@@ -5210,15 +5309,11 @@ pub async fn wallet_main(wallet_state: Arc<Mutex<WalletState>>) {
 
             if let Some((mut tx, sender)) = rpc_send.take() {
                 let tx_progress = continue_proposed_tx(&mut user_wallet, network, &mut tx, &mut client, "rpc send", DUMP_TX_SEND).await;
-                match tx_progress.h {
-                    BlockHeight::INVALID => {
-                        let _ = sender.send(Err("failed to build send transaction".to_string()));
+                match send_result(&tx_progress) {
+                    Some(result) => {
+                        let _ = sender.send(result.map(|txid| format!("{{ \"txid\": \"{txid}\" }}")));
                     }
-                    BlockHeight::SENT => {
-                        let _ = sender.send(Ok(format!("{{ \"txid\": {} }}", tx_progress.txid)));
-                    }
-
-                    _ => {
+                    None => {
                         println!("RPC send progress: {}, {:?}", tx_progress.h, tx.tx_res);
                         rpc_send = Some((tx, sender))
                     }
@@ -5279,6 +5374,143 @@ impl ServerCertVerifier for DerVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn received_shielded_funds_can_pay_transparent_and_keep_shielded_change() {
+        let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &[9; 32], zip32::AccountId::ZERO).unwrap();
+        let ufvk = usk.to_unified_full_viewing_key();
+        let (_, _, ua) = addrs_from_ufvk(&ufvk, 0).unwrap();
+        let recipient = *ua.orchard().unwrap();
+        let rho = orchard::note::Rho::from_bytes(&[0; 32]).unwrap();
+        let rseed = orchard::note::RandomSeed::from_bytes([1; 32], &rho).unwrap();
+        let note = orchard::Note::from_parts(recipient, orchard::value::NoteValue::from_raw(500_000_000),
+                                             rho, rseed, orchard::note::NoteVersion::V3).unwrap();
+        let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+        let owned_note = OrchardNote {
+            recv_h: BlockHeight(8), spent_h: BlockHeight::INVALID,
+            nf: note.nullifier(ufvk.orchard().unwrap()), txid: TxId::from_bytes([9; 32]),
+            note, position: incrementalmerkletree::Position::from(0),
+        };
+        let mut tree = OrchardShardTree::new(shardtree::store::memory::MemoryShardStore::empty(), 10);
+        tree.checkpoint(BlockHeight(7)).unwrap();
+        tree.append(orchard::tree::MerkleHashOrchard::from_cmx(&cmx), incrementalmerkletree::Retention::Marked).unwrap();
+        tree.checkpoint(BlockHeight(8)).unwrap();
+        let account = ManualAccount {
+            ufvk, birthday: BlockHeight(0), fully_detected_h: BlockHeight(10), fully_decoded_h: BlockHeight(10),
+            balance_changes: vec![(BlockHeight(0), data_api::AccountBalance::ZERO)],
+            recv_txos: vec![], utxos: vec![], stxos: vec![],
+            recv_orchard_notes: vec![owned_note], unspent_orchard_notes: vec![owned_note], spent_orchard_notes: vec![],
+        };
+        let mut wallet = ManualWallet {
+            name: "test", accounts: vec![account], strms: vec![], chain_tip_h: BlockHeight(10), sync_h: BlockHeight(10),
+            branch_mismatch: None, txs: vec![], tx_h_map: HashMap::new(), seen_bond_values: HashMap::new(), care_about_bonds: vec![],
+        };
+        // Preparation uses no RPC; this client never connects to a node.
+        let mut client = CompactTxStreamerClient::new(Endpoint::from_static("http://127.0.0.1:1").connect_lazy());
+        for dst in [TransparentAddress::PublicKeyHash([4; 20]), TransparentAddress::ScriptHash([5; 20])] {
+            let mut tx = ProposedTx::EMPTY;
+            wallet.send_to_recipient(&TEST_NETWORK, &mut tx, &mut client, &usk, 499_000_000, &tree,
+                                     &SendRecipient::Transparent(dst), MemoBytes::empty()).unwrap();
+            let prep = tx.prep.as_ref().unwrap();
+            assert_eq!(prep.o_inputs.len(), 1);
+            assert!(prep.t_inputs.is_empty());
+            assert_eq!(prep.t_outputs.len(), 1);
+            assert_eq!(prep.t_outputs[0].dst, dst);
+            assert_eq!(prep.t_outputs[0].zats.into_u64(), 499_000_000);
+            assert_eq!(prep.o_outputs.len(), 1);
+            assert_eq!(prep.o_outputs[0].dst, recipient);
+            let fee = prep.fee_required().unwrap().into_u64();
+            assert!(fee >= minimum_send_fee());
+            assert_eq!(499_000_000 + fee + prep.o_outputs[0].zats.into_u64(), 500_000_000);
+            assert_eq!(tx.tx.fee().unwrap().into_u64(), fee);
+            assert_eq!(tx.tx.kind(), WalletTxKind::Send);
+            if matches!(dst, TransparentAddress::PublicKeyHash(_)) {
+                let built = ManualWallet::build_tx_from_prep(TEST_NETWORK, tx.prep.take().unwrap()).unwrap();
+                let transaction = built.transaction();
+                let transparent = transaction.transparent_bundle().unwrap();
+                assert!(transparent.vin.is_empty());
+                assert_eq!(transparent.vout.len(), 1);
+                assert_eq!(transparent.vout[0].value().into_u64(), 499_000_000);
+                assert_eq!(transparent.vout[0].recipient_address(), Some(dst));
+                assert!(transaction.orchard_bundle().is_none());
+                assert!(transaction.ironwood_bundle().is_some());
+                let mut bytes = Vec::new();
+                transaction.write(&mut bytes).unwrap();
+                let decoded = Transaction::read(&bytes[..], BranchId::for_height(&TEST_NETWORK, LRZBlockHeight::from_u32(11))).unwrap();
+                assert_eq!(decoded.txid(), transaction.txid());
+            }
+        }
+        // Notes with fewer than three confirmations cannot fund a payment.
+        wallet.sync_h = BlockHeight(9);
+        let mut tx = ProposedTx::EMPTY;
+        assert!(wallet.send_to_recipient(&TEST_NETWORK, &mut tx, &mut client, &usk, 499_000_000, &tree,
+                                        &SendRecipient::Transparent(TransparentAddress::PublicKeyHash([4; 20])), MemoBytes::empty()).is_err());
+        assert!(tx.prep.is_none());
+    }
+
+    #[test]
+    fn send_accepts_transparent_addresses_on_the_wallet_network() {
+        use zcash_keys::address::Address;
+        for dst in [TransparentAddress::PublicKeyHash([1; 20]), TransparentAddress::ScriptHash([2; 20])] {
+            let address = Address::Transparent(dst).encode(&TEST_NETWORK);
+            let recipient = SendRecipient::decode(&TEST_NETWORK, &format!(" {address}\n")).unwrap();
+            assert_eq!(recipient, SendRecipient::Transparent(dst));
+            let amount = Zatoshis::const_from_u64(123_456_789);
+            assert!(matches!(recipient.output(amount, None, MemoBytes::empty()), TxOutput::Transparent { dst: actual, zats } if actual == dst && zats == amount));
+            assert!(SendRecipient::decode(&TEST_NETWORK, &Address::Transparent(dst).encode(&MAIN_NETWORK)).is_err());
+        }
+        for invalid in ["", "not an address", "💰💰💰💰💰💰💰💰"] {
+            assert!(SendRecipient::decode(&TEST_NETWORK, invalid).is_err());
+        }
+        // TEX requires transparent-only inputs and must not silently unshield funds.
+        assert!(SendRecipient::decode(&TEST_NETWORK, &Address::Tex([3; 20]).encode(&TEST_NETWORK)).is_err());
+    }
+
+    #[test]
+    fn unified_sends_keep_the_shielded_receiver() {
+        let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &[7; 32], zip32::AccountId::ZERO).unwrap();
+        let (transparent, _, shielded) = addrs_from_ufvk(&usk.to_unified_full_viewing_key(), 0).unwrap();
+        let ua = UnifiedAddress::from_receivers(shielded.orchard().copied(), None, Some(transparent)).unwrap();
+        assert!(ua.transparent().is_some());
+        let recipient = SendRecipient::decode(&TEST_NETWORK, &ua.encode(&TEST_NETWORK)).unwrap();
+        assert_eq!(recipient, SendRecipient::Ironwood(*ua.orchard().unwrap()));
+        assert!(matches!(recipient.output(Zatoshis::const_from_u64(1), None, MemoBytes::empty()), TxOutput::Ironwood { .. }));
+    }
+
+    #[test]
+    fn send_requires_confirmed_funds_and_leaves_room_for_fees() {
+        let address = zcash_keys::address::Address::Transparent(TransparentAddress::PublicKeyHash([1; 20])).encode(&TEST_NETWORK);
+        let mut state = WalletState { user_shielded_pending_funds: 500_000_000, ..WalletState::default() };
+        assert!(state.send_to_address(address.clone(), 100_000_000).is_err());
+        state.user_shielded_spendable_funds = 500_000_000;
+        for invalid in [0, u64::MAX, 500_000_000] {
+            assert!(state.send_to_address(address.clone(), invalid).is_err());
+            assert!(state.actions_in_flight.is_empty());
+            assert!(!state.waiting_for_send);
+            assert!(state.send_error.is_some());
+        }
+        state.send_to_address(address.clone(), 499_000_000).unwrap();
+        assert!(state.waiting_for_send);
+        assert!(state.send_error.is_none());
+        assert!(state.send_to_address(address, 100_000_000).is_err());
+        assert_eq!(state.actions_in_flight.len(), 1);
+    }
+
+    #[test]
+    fn send_completion_reports_node_rejection_without_waiting_forever() {
+        let mut tx = WalletTx { h: BlockHeight::PROPOSED, status: TxStatus::OnBc, ..WalletTx::EMPTY };
+        assert!(send_result(&tx).is_none());
+        tx.h = BlockHeight::BUILT;
+        assert!(send_result(&tx).is_none());
+        tx.h = BlockHeight::SENT;
+        tx.txid = TxId::from_bytes([1; 32]);
+        assert_eq!(send_result(&tx).unwrap().unwrap(), tx.txid.to_string());
+        tx.h = BlockHeight(100);
+        tx.status = TxStatus::HardFail(BlockHeight::BUILT, ErrBuf::from_str("node rejected transaction"));
+        assert_eq!(send_result(&tx).unwrap().unwrap_err(), "node rejected transaction");
+        tx.status = TxStatus::SoftFail(BlockHeight::BUILT);
+        assert!(send_result(&tx).unwrap().is_err());
+    }
 
     #[test]
     fn wallet_proof_cancellation_does_not_wait_for_worker() {

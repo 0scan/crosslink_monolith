@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- Crosslink wallet sends now support transparent recipients through the GUI and
+  `wallet_basic_send`, with exact amounts, address validation, and send error feedback.
 - Added an opt-in `indexer` feature with in-process RocksDB-backed explorer indexes and RPCs for
   block, transaction, address, index status, network statistics, chart, and top-balance queries.
   Enabling it requires a fresh state database so the explorer indexes can be built from genesis.

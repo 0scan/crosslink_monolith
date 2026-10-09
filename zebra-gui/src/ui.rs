@@ -36,7 +36,7 @@ pub struct UiData {
     pub per_frame_strs: Vec<String>,
 
     pub send_address:  String,
-    pub send_amount_index: usize,
+    pub send_amount: String,
     pub stake_address: String,
     // ed25519-verify of the pasted address, cached so it doesn't rerun every frame
     pub stake_address_checked: String,
@@ -74,7 +74,7 @@ pub fn parse_ctaz(s: &str) -> Option<u64> {
         Some((w, f)) => (w, f),
         None => (s, ""),
     };
-    if frac.len() > 8 || !whole.chars().all(|c| c.is_ascii_digit()) || !frac.chars().all(|c| c.is_ascii_digit()) { return None; }
+    if (whole.is_empty() && frac.is_empty()) || frac.len() > 8 || !whole.chars().all(|c| c.is_ascii_digit()) || !frac.chars().all(|c| c.is_ascii_digit()) { return None; }
     let whole: u64 = if whole.is_empty() { 0 } else { whole.parse().ok()? };
     let frac: u64 = if frac.is_empty() { 0 } else { format!("{frac:0<8}").parse().ok()? };
     whole.checked_mul(ONE_cTAZ)?.checked_add(frac)
@@ -1898,158 +1898,92 @@ pub fn ui_left_pane(ui: &mut Context,
                 }
 
                 Modal::Send => {
-                    title_bar(ui, true, "Send",    id("Send Title Bar"));
+                    title_bar(ui, true, "Send", id("Send Title Bar"));
 
                     if let _ = elem().decl(Decl {
                         child_gap, radius,
                         id: id("Send Container"),
                         colour: MODAL_COL,
-                        width:  grow!(),
+                        width: grow!(),
                         height: grow!(),
                         align: Center,
                         direction: TopToBottom,
                         ..Decl
                     }) {
-                        // spacer
-                        if let _ = elem().decl(Decl { width: grow!(), height: fixed!(ui.scale(4.0)), ..Default::default() }) {}
+                        let (spendable, waiting, send_error, last_txid) = {
+                            let state = wallet_state.lock().unwrap();
+                            (state.user_spendable_balance(), state.waiting_for_send,
+                             state.send_error.clone(), state.last_send_txid.clone())
+                        };
+                        ui.text(frame_strf!(data, "Spendable: {}.{:08} cTAZ", spendable / ONE_cTAZ, spendable % ONE_cTAZ), TextDecl { h: ui.scale(18.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
+                        ui.text("Recipient address (Crosslink testnet)", TextDecl { h: ui.scale(16.0), colour: WHITE, ..TextDecl });
 
-                        if true {
-                            let mut send_address = "0000000000000000";
-                            if data.send_address.len() >= 16 {
-                                send_address = &data.send_address;
-                            }
+                        let address_id = id("Send Address Textbox");
+                        if let _ = elem().decl(Decl { width: grow!(), height: fit!(), ..Decl }) {
+                            data.send_address = ui.textbox(
+                                data, address_id, "Transparent or unified address...",
+                                TextDecl { font: Mono, h: ui.scale(14.0), colour: WHITE, align: AlignX::Left, wrap: Wrap::Chars, ..TextDecl },
+                            ).trim().to_string();
+                        }
+                        if button(ui, "Paste Address", !waiting) {
+                            data.send_address = ui.input().get_from_clipboard().trim().to_string();
+                            let textbox = data.textboxes.entry(address_id.id).or_default();
+                            textbox.text_buf = data.send_address.chars().collect();
+                            textbox.selection = (textbox.text_buf.len(), textbox.text_buf.len());
+                        }
 
-                            ui.text(frame_strf!(data, "[{}..{}]", &send_address[..8], &send_address[send_address.len() - 8..]), TextDecl { font: Mono, h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
-                            if button(ui, "Paste Address", true) {
-                                data.send_address = ui.input().get_from_clipboard().trim().to_string();
-                            }
-
-                        } else {
-                            // New version: TODO: finish
-                            let send_address_id = id("Send Address Textbox");
-                            if data.send_address.len() != 0 {
-                                let send_address_buf: Vec<char> = data.send_address.chars().collect();
-                                let textbox_state = data.textboxes.entry(send_address_id.id).or_default();
-                                if textbox_state.text_buf != send_address_buf {
-                                    textbox_state.text_buf = send_address_buf;
-                                    let len = textbox_state.text_buf.len();
-                                    textbox_state.selection.0 = textbox_state.selection.0.min(len);
-                                    textbox_state.selection.1 = textbox_state.selection.1.min(len);
+                        let recipient = wallet::SendRecipient::decode(&wallet::TEST_NETWORK, &data.send_address);
+                        if !data.send_address.is_empty() {
+                            match &recipient {
+                                Ok(wallet::SendRecipient::Transparent(_)) => {
+                                    ui.text("Transparent payment: the recipient and amount will be public.", TextDecl { h: ui.scale(14.0), colour: WHITE.mul(0.7), ..TextDecl });
                                 }
-                            }
-                            if let _ = elem().decl(Decl {
-                                width: grow!(),
-                                height: fit!(),
-                                ..Decl
-                            }) {
-                                data.send_address = ui.textbox(
-                                    data,
-                                    send_address_id,
-                                    "Enter recipient address...",
-                                    TextDecl { font: Mono, h: ui.scale(14.0), colour: WHITE, align: AlignX::Left, ..TextDecl },
-                                ).trim().to_string();
-                            }
-                            if button(ui, "Paste Address", true) {
-                                data.send_address = ui.input().get_from_clipboard().trim().to_string();
-                                let send_address_buf: Vec<char> = data.send_address.chars().collect();
-                                let textbox_state = data.textboxes.entry(send_address_id.id).or_default();
-                                textbox_state.text_buf = send_address_buf;
-                                let len = textbox_state.text_buf.len();
-                                textbox_state.selection.0 = len;
-                                textbox_state.selection.1 = len;
+                                Ok(wallet::SendRecipient::Ironwood(_)) => {
+                                    ui.text("Shielded payment", TextDecl { h: ui.scale(14.0), colour: WHITE.mul(0.7), ..TextDecl });
+                                }
+                                Err(err) => {
+                                    ui.text(data.frame_str(err), TextDecl { h: ui.scale(14.0), colour: (0xff, 0xaf, 0x0e, 0xff), ..TextDecl });
+                                }
                             }
                         }
 
-                        // spacer
-                        if let _ = elem().decl(Decl { width: grow!(), height: fixed!(ui.scale(16.0)), ..Default::default() }) {}
-
-                        if (balance as u64) < ONE_cTAZ / 100 {
-                            let colour = (0xff, 0xaf, 0x0e, 0xff);
-                            ui.text("Insufficient funds. Try the faucet!", TextDecl { h: ui.scale(20.0), colour, align: AlignX::Center, ..TextDecl });
+                        ui.text("Amount (cTAZ)", TextDecl { h: ui.scale(16.0), colour: WHITE, ..TextDecl });
+                        if let _ = elem().decl(Decl { width: grow!(), height: fit!(), ..Decl }) {
+                            data.send_amount = ui.textbox(
+                                data, id("Send Amount Textbox"), "e.g. 4.99",
+                                TextDecl { font: Mono, h: ui.scale(16.0), colour: WHITE, align: AlignX::Left, ..TextDecl },
+                            ).trim().to_string();
                         }
+                        ui.text("Network fee is added to this amount. Remaining funds stay in your wallet.", TextDecl { h: ui.scale(14.0), colour: WHITE.mul(0.6), ..TextDecl });
 
-                        if let _ = elem().decl(Decl {
-                            child_gap, radius,
-                            id: id("Send Buttons"),
-                            colour: MODAL_COL,
-                            width:  grow!(),
-                            height: grow!(),
-                            align: Center,
-                            direction: TopToBottom,
-                            ..Decl
-                        }) {
-                            let (
-                                balance,
-                                waiting_for_send
-                            ) = {
-                                let wallet_state = wallet_state.lock().unwrap();
-                                (
-                                    wallet_state.user_balance(),
-                                    wallet_state.waiting_for_send,
-                                )
-                            };
-
-                            let can = !waiting_for_send && data.send_address.len() != 0;
-                            let sends = [
-                                ("0.1", ONE_cTAZ/10),
-                                // ("0.2", 2*(ONE_cTAZ/10)),
-                                ("0.6", 6*(ONE_cTAZ/10)),
-                                ("1",   ONE_cTAZ),
-                                // ("2",   2*ONE_cTAZ),
-                                ("5",   5*ONE_cTAZ),
-                                // ("10",  10*ONE_cTAZ),
-                                ("31",  31*ONE_cTAZ),
-                                // ("75",  75*ONE_cTAZ),
-                                ("141", 141*ONE_cTAZ),
-                                // ("250", 250*ONE_cTAZ),
-                            ];
-
-                            if true {
-                                for send in sends {
-                                    if button(ui, send.0, can && (balance as u64) >= send.1) {
-                                        wallet_state.lock().unwrap().send_to_address(data.send_address.clone(), send.1);
-                                    }
-                                }
-
-                            } else {
-                                // new version: TODO: finish
-                                if data.send_amount_index >= sends.len() {
-                                    data.send_amount_index = 0;
-                                }
-                                if let _ = elem().decl(Decl {
-                                    direction: LeftToRight,
-                                    align: Center,
-                                    child_gap,
-                                    width: fit!(),
-                                    height: fit!(),
-                                    ..Decl
-                                }) {
-                                    if button_ex(ui, id("Send Amount Down"), "-", data.send_amount_index > 0) {
-                                        data.send_amount_index = data.send_amount_index.saturating_sub(1);
-                                    }
-                                    if let _ = elem().decl(Decl {
-                                        colour: BUTTON_GREY,
-                                        radius: ui.scale(18.0).dup4(),
-                                        padding: (ui.scale(8.0), ui.scale(18.0), ui.scale(8.0), ui.scale(18.0)),
-                                        width: fit!(),
-                                        height: fit!(),
-                                        align: Center,
-                                        ..Decl
-                                    }) {
-                                        ui.text(frame_strf!(data, "Amount: {}", sends[data.send_amount_index].0), TextDecl { font: Mono, h: ui.scale(20.0), colour: WHITE, align: AlignX::Center, ..TextDecl });
-                                    }
-                                    if button_ex(ui, id("Send Amount Up"), "+", data.send_amount_index + 1 < sends.len()) {
-                                        data.send_amount_index += 1;
-                                    }
-                                }
-                                let selected = sends[data.send_amount_index];
-                                if button(
-                                    ui,
-                                    frame_strf!(data, "Send {}", selected.0),
-                                    can && (balance as u64) >= selected.1,
-                                ) {
-                                    wallet_state.lock().unwrap().send_to_address(data.send_address.clone(), selected.1);
-                                }
+                        let amount = parse_ctaz(&data.send_amount);
+                        let amount_error = amount.map(wallet::validate_send_amount).and_then(Result::err);
+                        let affordable = amount.and_then(|z| z.checked_add(wallet::minimum_send_fee())).is_some_and(|total| total <= spendable);
+                        let can_send = !waiting && recipient.is_ok() && amount.is_some() && amount_error.is_none() && affordable;
+                        if !data.send_amount.is_empty() {
+                            let error = if amount.is_none() {
+                                Some("Enter a number with up to 8 decimal places.".to_string())
+                            } else if amount_error.is_some() {
+                                amount_error
+                            } else if !affordable {
+                                Some("Insufficient spendable funds for the amount and network fee.".to_string())
+                            } else { None };
+                            if let Some(error) = error {
+                                ui.text(data.frame_str(&error), TextDecl { h: ui.scale(14.0), colour: (0xff, 0xaf, 0x0e, 0xff), ..TextDecl });
+                            }
+                        }
+                        if button(ui, "Send Payment", can_send) {
+                            let _ = wallet_state.lock().unwrap().send_to_address(data.send_address.clone(), amount.unwrap());
+                        }
+                        if waiting {
+                            ui.text("Preparing and submitting transaction...", TextDecl { h: ui.scale(16.0), colour: WHITE.mul(0.7), ..TextDecl });
+                        } else if let Some(error) = send_error {
+                            ui.text(data.frame_str(&error), TextDecl { h: ui.scale(14.0), colour: (0xff, 0xaf, 0x0e, 0xff), ..TextDecl });
+                        } else if let Some(txid) = last_txid {
+                            ui.text("Transaction submitted", TextDecl { h: ui.scale(16.0), colour: (0x26, 0xc6, 0x42, 0xff), ..TextDecl });
+                            ui.text(data.frame_str(&txid), TextDecl { font: Mono, h: ui.scale(12.0), colour: WHITE, wrap: Wrap::Chars, ..TextDecl });
+                            if button(ui, "Copy Transaction ID", true) {
+                                ui.input().send_to_clipboard(&txid);
                             }
                         }
                     }
@@ -5326,6 +5260,16 @@ pub struct Font(u64);
 #[cfg(test)]
 mod roster_identity_tests {
     use super::*;
+
+    #[test]
+    fn payment_amounts_preserve_zatoshi_precision_and_reject_invalid_input() {
+        for (text, amount) in [("4.99", 499_000_000), ("0.00000001", 1), ("1.23456789", 123_456_789), (" 5 ", 500_000_000), (".1", 10_000_000)] {
+            assert_eq!(parse_ctaz(text), Some(amount));
+        }
+        for invalid in ["", ".", "-1", "NaN", "1e2", "0.000000001", "1.2.3", "💰", "18446744073709551615"] {
+            assert_eq!(parse_ctaz(invalid), None);
+        }
+    }
 
     #[test]
     fn roster_labels_and_copy_values_distinguish_verified_and_unknown_addresses() {
