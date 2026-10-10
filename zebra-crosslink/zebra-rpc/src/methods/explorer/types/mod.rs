@@ -21,6 +21,15 @@ pub(super) use crosslink::{
     CrosslinkPhase, CrosslinkStakingChange, CrosslinkStakingOverview, CrosslinkStakingStatus,
     CrosslinkVoteSummary,
 };
+#[cfg(feature = "indexer")]
+pub(super) use crosslink::{
+    CrosslinkParticipationBlock, CrosslinkParticipationEntry, CrosslinkSignedBlock,
+};
+pub use crosslink::{
+    CrosslinkParticipationRequest, CrosslinkParticipationResponse, CrosslinkSignedBlocksRequest,
+    CrosslinkSignedBlocksResponse,
+};
+
 pub use crosslink::{
     CrosslinkFinalizerLivenessResponse, CrosslinkFinalizerRequest, CrosslinkFinalizerResponse,
     CrosslinkFinalizerStakeSourcesRequest, CrosslinkFinalizersResponse, CrosslinkNetworkStats,

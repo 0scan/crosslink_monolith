@@ -171,6 +171,7 @@ pub const STATE_COLUMN_FAMILIES_IN_CODE: &[&str] = &[
     "bft_block_by_height",
     "bft_fat_pointer_by_height",
     "bft_proposal_sigs_by_height",
+    "bft_certificate_observed_at_by_height",
     // The node-local finalized marker.
     "crosslink_fin",
     // Legacy slash-index column families, empty and unused since Retarget actions

@@ -77,6 +77,8 @@ pub struct BftChain {
     /// necessarily on this node.s best chain and is never the node.s own `fin` (FINALITY.md §2).
     pub bft_final_snapshot: Option<(Height, Hash)>,
     pub peer_strings: Vec<String>,
+    #[cfg(feature = "indexer")]
+    pub participation: super::participation::ParticipationIndex,
 }
 
 static BFT_CHAIN: LazyLock<RwLock<BftChain>> = LazyLock::new(|| {
@@ -88,6 +90,8 @@ static BFT_CHAIN: LazyLock<RwLock<BftChain>> = LazyLock::new(|| {
         is_activated: false,
         bft_final_snapshot: None,
         peer_strings: Vec::new(),
+        #[cfg(feature = "indexer")]
+        participation: Default::default(),
     })
 });
 
@@ -587,6 +591,7 @@ struct DecidedBlock {
     block: BftBlock,
     fat_pointer: FatPointerToBftBlock,
     proposal_sigs: Vec<TMSig>,
+    certificate_observed_at: i64,
     reply: DecisionReply,
 }
 
@@ -1067,6 +1072,7 @@ impl BftRunner {
         block_writer: &mut WriteBlockWorkerTask,
     ) {
         let hardforks = self.hardforks.rules();
+        let certificate_observed_at = chrono::Utc::now().timestamp();
         if fat_pointer.points_at_block_hash() != new_block.blake3_hash() {
             panic!(
                 "Fat Pointer hash does not match block hash. fp: {} block: {}",
@@ -1114,6 +1120,28 @@ impl BftRunner {
         assert!(chain.blocks[insert_i].headers.is_empty(), "{:?}", chain.blocks[insert_i]);
         assert!(!new_block.headers.is_empty());
         chain.hash_to_height.insert(new_block.blake3_hash(), insert_i as u64);
+        #[cfg(feature = "indexer")]
+        {
+            let previous_height = chain
+                .bft_final_snapshot
+                .map(|(h, _)| u64::from(h.0))
+                .unwrap_or(0);
+            let terminated =
+                terminated_finalizers_at(hardforks, u64::from(new_block.height), previous_height);
+            let roster = tenderlink_roster_from_internal(&chain.roster, &terminated);
+            let time = read_state
+                .any_chain_block_header(new_final_hash.into())
+                .map(|h| h.time.timestamp());
+            chain.participation.record(
+                &new_block,
+                &fat_pointer,
+                &roster,
+                new_final_height,
+                new_final_hash,
+                time,
+                Some(certificate_observed_at),
+            );
+        }
         chain.blocks[insert_i] = new_block.clone();
         chain.fat_pointer_to_tip = fat_pointer.clone();
         chain.bft_final_snapshot = Some((new_final_height, new_final_hash));
@@ -1123,13 +1151,13 @@ impl BftRunner {
         // on a chain that is not `bc_best`; `fin` moves only where the best chain changes, and
         // only by the §3.2 rule (FINALITY.md §4.3).
         self.finish_decision(
-            DecidedBlock { new_final_hash, new_final_height, block: new_block, fat_pointer, proposal_sigs, reply },
+            DecidedBlock { new_final_hash, new_final_height, block: new_block, fat_pointer, proposal_sigs, certificate_observed_at, reply },
             block_writer,
         );
     }
 
     fn finish_decision(&mut self, decision: DecidedBlock, block_writer: &mut WriteBlockWorkerTask) {
-        let DecidedBlock { new_final_hash, new_final_height, block, fat_pointer, proposal_sigs, reply } = decision;
+        let DecidedBlock { new_final_hash, new_final_height, block, fat_pointer, proposal_sigs, certificate_observed_at, reply } = decision;
         let hardforks = self.hardforks.rules();
 
         // The roster the next height votes with is the stake at this block's snapshot, read from
@@ -1182,6 +1210,8 @@ impl BftRunner {
         let next_bft_height = chain.blocks.len() as u64;
         let terminated = terminated_finalizers_at(hardforks, next_bft_height, new_final_height.0 as u64);
         let roster = tenderlink_roster_from_internal(&chain.roster, &terminated);
+        #[cfg(feature = "indexer")]
+        chain.participation.set_roster(&roster);
         drop(chain);
 
         tracing::info!(
@@ -1197,6 +1227,7 @@ impl BftRunner {
             &block,
             &fat_pointer,
             &proposal_sigs,
+            certificate_observed_at,
         ) {
             tracing::error!("could not store BFT decision at height {}: {err}", block.height);
         }
@@ -1254,6 +1285,8 @@ impl BftRunner {
         // the nil validator set (see `build_bootstrap_genesis`), so replay starts empty; each
         // later height votes with the stakes at the previous height's snapshot.
         let mut unsorted_roster: Vec<RosterMember> = Vec::new();
+        #[cfg(feature = "indexer")]
+        let mut participation = super::participation::ParticipationIndex::default();
         // BC height finalized by the previous replayed block's cert; the roster voting on block
         // N was formed at N-1's decision, so N's replayed roster must use this. Using this
         // block's own height jailed and unjailed finalizers one cert early at a hardfork
@@ -1261,7 +1294,9 @@ impl BftRunner {
         let mut prev_finalized_bc_height: u64 = 0;
 
         for decision in stored {
-            let StoredDecision { block, fat_pointer, proposal_sigs } = decision;
+            #[cfg(feature = "indexer")]
+            let certificate_observed_at = decision.certificate_observed_at;
+            let StoredDecision { block, fat_pointer, proposal_sigs, .. } = decision;
             if block.previous_block_fat_ptr.points_at_block_hash() != fat_pointer_to_tip.points_at_block_hash() {
                 break;
             }
@@ -1271,6 +1306,17 @@ impl BftRunner {
             let this_bft_height = ingest.len() as u64;
             let this_terminated = terminated_finalizers_at(hardforks, this_bft_height, prev_finalized_bc_height);
             let roster = tenderlink_roster_from_internal(&unsorted_roster, &this_terminated);
+
+            #[cfg(feature = "indexer")]
+            if !block.headers.is_empty() {
+                let hash = Hash(block.snapshot_block_hash().0);
+                if let Some(known) = read_state.known_block(hash) {
+                    let time = read_state
+                        .any_chain_block_header(hash.into())
+                        .map(|h| h.time.timestamp());
+                    participation.record(&block, &fat_pointer, &roster, known.height, hash, time, certificate_observed_at);
+                }
+            }
 
             // The roster the next height votes with, and the watermark that filters it, both
             // come from this block's snapshot -- the same two reads `finish_decision` makes
@@ -1332,6 +1378,11 @@ impl BftRunner {
         {
             let mut chain = BFT_CHAIN.write().unwrap();
             chain.roster = unsorted_roster;
+            #[cfg(feature = "indexer")]
+            {
+                participation.set_roster(&roster);
+                chain.participation = participation;
+            }
             chain.hash_to_height = blocks.iter().enumerate().map(|(i, b)| (b.blake3_hash(), i as u64)).collect();
             chain.blocks = blocks;
             chain.fat_pointer_to_tip = fat_pointer_to_tip;
@@ -1465,7 +1516,12 @@ impl BftRunner {
         }
         let Some(launch) = self.launch.take() else { return; };
         tracing::info!("starting tenderlink at BFT height {} with {} finalizer(s)", ingest.len(), roster.len());
-        BFT_CHAIN.write().unwrap().is_activated = true;
+        {
+            let mut chain = BFT_CHAIN.write().unwrap();
+            chain.is_activated = true;
+            #[cfg(feature = "indexer")]
+            chain.participation.set_roster(&roster);
+        }
 
         let (static_keypair, endpoint) = addr_string_to_stuff(&launch.public_address);
         // `peer_addresses` is only a list of addresses to seed connections from. Keys are

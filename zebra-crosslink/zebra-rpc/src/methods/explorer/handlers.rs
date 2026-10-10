@@ -46,6 +46,15 @@ use super::types::{
     CrosslinkStakingStatus, CrosslinkVoteSummary, MempoolStats, MiningStats, NetworkStats,
     NodeSyncStats, SupplyPoolStats, SupplyStats,
 };
+#[cfg(feature = "indexer")]
+use super::types::{
+    CrosslinkParticipationBlock, CrosslinkParticipationEntry, CrosslinkSignedBlock,
+};
+use super::types::{
+    CrosslinkParticipationRequest, CrosslinkParticipationResponse, CrosslinkSignedBlocksRequest,
+    CrosslinkSignedBlocksResponse,
+};
+
 use super::{
     mempool,
     types::{
@@ -695,6 +704,259 @@ where
                 params.bootstrap.activation_height(),
                 activated,
             ))
+        }
+    }
+
+    pub(in crate::methods) async fn explorer_get_crosslink_participation(
+        &self,
+        request: Option<CrosslinkParticipationRequest>,
+    ) -> Result<CrosslinkParticipationResponse> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = request;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            let request = request.unwrap_or_default();
+            let window = request.window.unwrap_or(500);
+            if !(1..=10_000).contains(&window) {
+                return Err("window must be between 1 and 10000")
+                    .map_error(server::error::LegacyCode::InvalidParameter);
+            }
+            let keys = if let Some(key) = request.public_key.as_deref() {
+                vec![parse_finalizer_public_key(key)
+                    .map_error(server::error::LegacyCode::InvalidParameter)?]
+            } else {
+                self.explorer_get_crosslink_finalizers()
+                    .await?
+                    .items
+                    .iter()
+                    .map(|entry| parse_finalizer_public_key(&entry.public_key))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_misc_error()?
+            };
+            let (recency_response, pow_response) = tokio::join!(
+                call_service(self.read_state.clone(), ReadRequest::CrosslinkRecencyStatus),
+                call_service(
+                    self.read_state.clone(),
+                    ReadRequest::CrosslinkPowVotingWindow {
+                        window,
+                        to_height: request.to_height
+                    }
+                ),
+            );
+            let recency = match recency_response? {
+                ReadResponse::CrosslinkRecencyStatus(recency) => recency,
+                _ => unreachable!("unmatched response to CrosslinkRecencyStatus"),
+            };
+            let pow_window = match pow_response? {
+                ReadResponse::CrosslinkPowVotingWindow(Some(snapshot)) => snapshot,
+                ReadResponse::CrosslinkPowVotingWindow(None) => {
+                    return Err("to_height is above this node's PoW tip")
+                        .map_error(server::error::LegacyCode::InvalidParameter)
+                }
+                _ => unreachable!("unmatched response to CrosslinkPowVotingWindow"),
+            };
+            let (certificates, current_roster) = {
+                let chain = zebra_state::new_network::bft::bft_chain().read().unwrap();
+                let index = &chain.participation;
+                let certificates: HashMap<_, _> = index
+                    .window(&keys, 1)
+                    .items
+                    .into_iter()
+                    .map(|item| (item.public_key, item.last_signed))
+                    .collect();
+                (certificates, index.current_roster.clone())
+            };
+            let historical = certificates
+                .values()
+                .filter_map(Clone::clone)
+                .collect::<Vec<_>>();
+            let inclusions = self.explorer_certificate_inclusions(&historical).await?;
+            let observed_blocks = pow_window.blocks.len();
+            let from_block_height = pow_window
+                .blocks
+                .first()
+                .map(|block| block.height.0.to_string());
+            let to_block_height = pow_window
+                .blocks
+                .last()
+                .map(|block| block.height.0.to_string());
+            let total = current_roster
+                .iter()
+                .fold(0_u64, |sum, (_, power)| sum.saturating_add(*power));
+            let recent = recency.now_utc > 0
+                && Utc::now().timestamp().saturating_sub(recency.now_utc)
+                    <= FINALIZER_CONNECTION_WINDOW_SECONDS;
+            let items = pow_window
+                .summaries(&keys)
+                .into_iter()
+                .map(|item| {
+                    let power = current_roster
+                        .iter()
+                        .find(|(key, _)| key == &item.public_key)
+                        .map(|(_, power)| *power);
+                    let status = recency
+                        .finalizer_statuses
+                        .iter()
+                        .find(|(key, _)| key.0 == item.public_key)
+                        .map(|(_, status)| status);
+                    let last_connected = status.and_then(|s| s.last_direct_connection_utc);
+                    let connected = last_connected.is_some_and(|last| {
+                        last <= recency.now_utc
+                            && recency.now_utc.saturating_sub(last)
+                                <= FINALIZER_CONNECTION_WINDOW_SECONDS
+                    });
+                    CrosslinkParticipationEntry {
+                        public_key: hex::encode(item.public_key),
+                        active: power.is_some(),
+                        status: if power.is_none() {
+                            "inactive"
+                        } else if !recent || status.is_none() {
+                            "unknown"
+                        } else if connected {
+                            "online"
+                        } else {
+                            "offline"
+                        }
+                        .to_string(),
+                        last_connected_at: last_connected.map(|t| t.to_string()),
+                        voting_power_zat: power.unwrap_or(0).to_string(),
+                        voting_power_percent: (total > 0)
+                            .then(|| percentage_one_decimal(power.unwrap_or(0), total)),
+                        eligible_blocks: item.sampled.to_string(),
+                        sampled_blocks: item.sampled.to_string(),
+                        signed_blocks: item.signed.to_string(),
+                        missed_blocks: item.sampled.saturating_sub(item.signed).to_string(),
+                        participation_percent: (item.sampled > 0).then(|| {
+                            percentage_one_decimal(
+                                u64::try_from(item.signed).expect("bounded count fits u64"),
+                                u64::try_from(item.sampled).expect("bounded count fits u64"),
+                            )
+                        }),
+                        last_signed: certificates
+                            .get(&item.public_key)
+                            .cloned()
+                            .flatten()
+                            .map(|block| signed_block_response(block, &inclusions)),
+                        recent: item
+                            .recent
+                            .into_iter()
+                            .map(|(block, signed)| CrosslinkParticipationBlock {
+                                bft_height: block.bft_height.map(|height| height.to_string()),
+                                block_height: block.height.0.to_string(),
+                                block_hash: block.hash.to_string(),
+                                eligible: true,
+                                signed,
+                            })
+                            .collect(),
+                    }
+                })
+                .collect();
+            Ok(CrosslinkParticipationResponse {
+                scope: "local_node_certificates".to_string(),
+                basis: "pow_blocks".to_string(),
+                from_block_height,
+                to_block_height,
+                observed_at: (recency.now_utc > 0).then(|| recency.now_utc.to_string()),
+                connection_window_seconds: FINALIZER_CONNECTION_WINDOW_SECONDS.to_string(),
+                window: window.to_string(),
+                from_bft_height: None,
+                to_bft_height: None,
+                observed_blocks: observed_blocks.to_string(),
+                partial_window: observed_blocks
+                    < usize::try_from(window).expect("bounded window fits usize"),
+                items,
+            })
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    async fn explorer_certificate_inclusions(
+        &self,
+        blocks: &[zebra_state::new_network::participation::SignedBlock],
+    ) -> Result<HashMap<[u8; 32], zebra_state::new_network::pow_voting::CertificateInclusion>> {
+        let certificates = blocks
+            .iter()
+            .filter(|block| block.certificate_observed_at.is_none())
+            .map(|block| {
+                (
+                    block.certificate_hash,
+                    Height(block.block_height.0.saturating_add(1)),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut inclusions = HashMap::new();
+        for certificates in certificates.chunks(100) {
+            match call_service(
+                self.read_state.clone(),
+                ReadRequest::CrosslinkCertificateInclusions {
+                    certificates: certificates.to_vec(),
+                },
+            )
+            .await?
+            {
+                ReadResponse::CrosslinkCertificateInclusions(batch) => inclusions.extend(batch),
+                _ => unreachable!("unmatched response to CrosslinkCertificateInclusions"),
+            }
+        }
+        Ok(inclusions)
+    }
+
+    pub(in crate::methods) async fn explorer_get_crosslink_signed_blocks(
+        &self,
+        request: CrosslinkSignedBlocksRequest,
+    ) -> Result<CrosslinkSignedBlocksResponse> {
+        #[cfg(not(feature = "indexer"))]
+        {
+            let _ = request;
+            return explorer_index_disabled();
+        }
+        #[cfg(feature = "indexer")]
+        {
+            let key = parse_finalizer_public_key(&request.public_key)
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
+            let public_key = hex::encode(key);
+            let limit = request.limit.unwrap_or(20);
+            if !(1..=100).contains(&limit) {
+                return Err("limit must be between 1 and 100")
+                    .map_error(server::error::LegacyCode::InvalidParameter);
+            }
+            let before = request
+                .cursor
+                .as_deref()
+                .map(|cursor| parse_signed_cursor(cursor, &public_key))
+                .transpose()
+                .map_error(server::error::LegacyCode::InvalidParameter)?;
+            let (items, has_next) = {
+                let chain = zebra_state::new_network::bft::bft_chain().read().unwrap();
+                chain.participation.signed_blocks(
+                    key,
+                    before,
+                    usize::try_from(limit).expect("bounded page fits usize"),
+                )
+            };
+            let inclusions = self.explorer_certificate_inclusions(&items).await?;
+            let next_cursor = if has_next {
+                items
+                    .last()
+                    .map(|b| format!("signed-v1:{}:{}", public_key, b.bft_height))
+            } else {
+                None
+            };
+            Ok(CrosslinkSignedBlocksResponse {
+                public_key,
+                items: items
+                    .into_iter()
+                    .map(|block| signed_block_response(block, &inclusions))
+                    .collect(),
+                limit,
+                has_next,
+                next_cursor,
+            })
         }
     }
 
@@ -1699,5 +1961,57 @@ mod tests {
         assert_eq!(response.voted_stake_zat, "10");
         assert_eq!(response.silent_stake_zat, "20");
         assert_eq!(response.votes.prevote_yes_count, "1");
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn signed_block_response(
+    block: zebra_state::new_network::participation::SignedBlock,
+    inclusions: &HashMap<[u8; 32], zebra_state::new_network::pow_voting::CertificateInclusion>,
+) -> CrosslinkSignedBlock {
+    let inclusion = inclusions.get(&block.certificate_hash);
+    CrosslinkSignedBlock {
+        bft_height: block.bft_height.to_string(),
+        block_height: block.block_height.0.to_string(),
+        block_hash: block.block_hash.to_string(),
+        block_time: block.block_time.map(|t| t.to_string()),
+        certificate_observed_at: block.certificate_observed_at.map(|t| t.to_string()),
+        certificate_first_included_at: inclusion.map(|block| block.block_time.to_string()),
+        certificate_first_included_height: inclusion.map(|block| block.block_height.0.to_string()),
+        certificate_first_included_hash: inclusion.map(|block| block.block_hash.to_string()),
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn parse_signed_cursor(cursor: &str, public_key: &str) -> std::result::Result<u32, &'static str> {
+    if cursor.len() > 128 {
+        return Err("invalid signed-block cursor");
+    }
+    let prefix = format!("signed-v1:{}:", public_key);
+    let height = cursor
+        .strip_prefix(&prefix)
+        .ok_or("cursor belongs to a different finalizer or version")?;
+    if height.is_empty() || !height.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("invalid signed-block cursor");
+    }
+    height.parse().map_err(|_| "invalid signed-block cursor")
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod participation_cursor_tests {
+    #[test]
+    fn cursors_are_bound_to_the_finalizer_and_reject_invalid_bounds() {
+        let key = "aa".repeat(32);
+        assert_eq!(
+            super::parse_signed_cursor(&format!("signed-v1:{}:7", key), &key).unwrap(),
+            7
+        );
+        assert!(
+            super::parse_signed_cursor(&format!("signed-v1:{}:7", key), &"bb".repeat(32)).is_err()
+        );
+        assert!(
+            super::parse_signed_cursor(&format!("signed-v1:{}:4294967296", key), &key).is_err()
+        );
+        assert!(super::parse_signed_cursor(&format!("signed-v1:{}:-1", key), &key).is_err());
     }
 }

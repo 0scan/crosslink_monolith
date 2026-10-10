@@ -1,7 +1,7 @@
 //! Disk format for the decided BFT chain.
 //!
-//! One row per BFT height in each of three column families: the block, the fat pointer that
-//! names it, and the proposal signatures that came with it. The roster is deliberately not
+//! One row per BFT height for the block, its fat pointer, its proposal signatures,
+//! and the optional local certificate observation time. The roster is deliberately not
 //! stored: it is recomputed from the bonds at each block's snapshot, so a node can never load a
 //! validator set that disagrees with the votes, which travel by roster index (FINALITY.md §8.1).
 
@@ -101,5 +101,41 @@ impl FromDisk for ProposalSignatures {
             sigs.push(TMSig(bytes[offset..offset + 64].try_into().unwrap()));
         }
         ProposalSignatures(sigs)
+    }
+}
+
+/// Local time when this node accepted a certificate, not a consensus timestamp.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CertificateObservedAt(pub i64);
+
+impl IntoDisk for CertificateObservedAt {
+    type Bytes = [u8; 8];
+    fn as_bytes(&self) -> Self::Bytes {
+        self.0.to_be_bytes()
+    }
+}
+
+impl FromDisk for CertificateObservedAt {
+    fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+        Self(i64::from_be_bytes(
+            bytes
+                .as_ref()
+                .try_into()
+                .expect("certificate observation time is 8 bytes"),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod observation_time_tests {
+    use super::{CertificateObservedAt, FromDisk, IntoDisk};
+    #[test]
+    fn certificate_time_round_trips_independently_of_block_time() {
+        let observed = CertificateObservedAt(1_791_623_457);
+        assert_eq!(
+            CertificateObservedAt::from_bytes(observed.as_bytes()),
+            observed
+        );
+        assert_ne!(observed.0, 1_791_586_956);
     }
 }

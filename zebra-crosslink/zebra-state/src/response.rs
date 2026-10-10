@@ -477,6 +477,16 @@ pub enum ReadResponse {
     /// Response to [`ReadRequest::CrosslinkRecencyStatus`].
     CrosslinkRecencyStatus(zcash_primitives::bft::TFLRecencyStatus),
 
+    /// A hash-linked PoW header window, or `None` when its requested end is above tip.
+    #[cfg(feature = "indexer")]
+    CrosslinkPowVotingWindow(Option<crate::new_network::pow_voting::PowVotingWindow>),
+
+    /// Canonical inclusion evidence for historical certificates without local timestamps.
+    #[cfg(feature = "indexer")]
+    CrosslinkCertificateInclusions(
+        std::collections::HashMap<[u8; 32], crate::new_network::pow_voting::CertificateInclusion>,
+    ),
+
     /// Response to [`ReadRequest::CrosslinkFinalizedTip`]. `None` before the first `fin`.
     CrosslinkFinalizedTip(Option<(block::Height, block::Hash)>),
 
@@ -807,6 +817,9 @@ impl TryFrom<ReadResponse> for Response {
             | ReadResponse::ForkPoint(_) => {
                 Err("there is no corresponding Response for this ReadResponse")
             }
+
+            #[cfg(feature = "indexer")]
+            ReadResponse::CrosslinkPowVotingWindow(_) | ReadResponse::CrosslinkCertificateInclusions(_) => Err("there is no corresponding Response for this ReadResponse"),
 
             #[cfg(feature = "indexer")]
             ReadResponse::TransactionId(_) => Err("there is no corresponding Response for this ReadResponse"),

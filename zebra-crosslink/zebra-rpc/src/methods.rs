@@ -115,6 +115,11 @@ pub(crate) mod trees;
 pub mod types;
 
 use explorer::types::{
+    CrosslinkParticipationRequest, CrosslinkParticipationResponse,
+    CrosslinkSignedBlocksRequest, CrosslinkSignedBlocksResponse,
+};
+
+use explorer::types::{
     AddressSummary, AddressTransactionsResponse, AddressUtxosResponse, BlockDetails,
     BlocksResponse, ChartDataRequest, ChartDataResponse, CrosslinkFinalizerLivenessResponse,
     CrosslinkFinalizerRequest, CrosslinkFinalizerResponse, CrosslinkFinalizerStakeSourcesRequest,
@@ -935,6 +940,20 @@ pub trait Rpc {
     /// Returns every finalizer candidate ranked by current best-chain aggregated stake.
     #[method(name = "getcrosslinkfinalizers")]
     async fn get_crosslink_finalizers(&self) -> Result<CrosslinkFinalizersResponse>;
+
+    /// Returns certificate participation for current candidates or one public key.
+    #[method(name = "getcrosslinkparticipation")]
+    async fn get_crosslink_participation(
+        &self,
+        request: Option<CrosslinkParticipationRequest>,
+    ) -> Result<CrosslinkParticipationResponse>;
+
+    /// Returns newest-first distinct decisions signed by one finalizer.
+    #[method(name = "getcrosslinksignedblocks")]
+    async fn get_crosslink_signed_blocks(
+        &self,
+        request: CrosslinkSignedBlocksRequest,
+    ) -> Result<CrosslinkSignedBlocksResponse>;
 
     /// Returns node-local connection and voting observations for the active finalizer set.
     #[method(name = "getcrosslinkfinalizerliveness")]
@@ -3573,6 +3592,20 @@ where
 
     async fn get_crosslink_finalizers(&self) -> Result<CrosslinkFinalizersResponse> {
         self.explorer_get_crosslink_finalizers().await
+    }
+
+    async fn get_crosslink_participation(
+        &self,
+        request: Option<CrosslinkParticipationRequest>,
+    ) -> Result<CrosslinkParticipationResponse> {
+        self.explorer_get_crosslink_participation(request).await
+    }
+
+    async fn get_crosslink_signed_blocks(
+        &self,
+        request: CrosslinkSignedBlocksRequest,
+    ) -> Result<CrosslinkSignedBlocksResponse> {
+        self.explorer_get_crosslink_signed_blocks(request).await
     }
 
     async fn get_crosslink_finalizer_liveness(&self) -> Result<CrosslinkFinalizerLivenessResponse> {

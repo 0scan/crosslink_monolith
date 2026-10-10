@@ -23,6 +23,10 @@ use tenderlink::{dbg_panic, dbg_verify};
 
 mod checkpoint;
 pub mod bft;
+#[cfg(feature = "indexer")]
+pub mod participation;
+#[cfg(feature = "indexer")]
+pub mod pow_voting;
 pub mod fin;
 use checkpoint::Checkpoint;
 

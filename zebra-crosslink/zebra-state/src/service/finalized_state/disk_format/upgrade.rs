@@ -122,7 +122,11 @@ fn format_upgrades(
             "add explorer staking-action history column family",
             Version::new(31, 4, 0),
         )),
-    ] as [Box<dyn DiskFormatUpgrade>; 9])
+        Box::new(no_migration::NoMigration::new(
+            "add local BFT certificate observation timestamps",
+            Version::new(31, 5, 0),
+        )),
+    ] as [Box<dyn DiskFormatUpgrade>; 10])
         .into_iter()
         .filter(move |upgrade| upgrade.version() > min_version())
 }

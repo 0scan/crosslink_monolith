@@ -347,3 +347,94 @@ pub struct CrosslinkNetworkStats {
     /// Activation progress and milestones.
     pub activation: CrosslinkActivationOverview,
 }
+
+/// A window of canonical PoW blocks carrying BFT certificates (1..=10,000).
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CrosslinkParticipationRequest {
+    pub public_key: Option<String>,
+    pub window: Option<u32>,
+    pub to_height: Option<u32>,
+}
+
+/// An exclusive cursor bound to one finalizer's signed history.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CrosslinkSignedBlocksRequest {
+    pub public_key: String,
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
+
+/// A block certified by this finalizer. `block_time` is the PoW block's timestamp.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkSignedBlock {
+    pub bft_height: String,
+    pub block_height: String,
+    pub block_hash: String,
+    pub block_time: Option<String>,
+    /// Node-local certificate observation time; not the finalized PoW block timestamp.
+    pub certificate_observed_at: Option<String>,
+    /// Historical fallback: timestamp of the first canonical PoW header carrying this certificate.
+    pub certificate_first_included_at: Option<String>,
+    pub certificate_first_included_height: Option<String>,
+    pub certificate_first_included_hash: Option<String>,
+}
+
+/// One sampled PoW block and signer presence in its header certificate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkParticipationBlock {
+    pub bft_height: Option<String>,
+    pub block_height: String,
+    pub block_hash: String,
+    /// Legacy compatibility field, true for every sampled PoW block.
+    pub eligible: bool,
+    pub signed: bool,
+}
+
+/// Connection status is node-local; signing counts come from stored certificates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkParticipationEntry {
+    pub public_key: String,
+    pub active: bool,
+    pub status: String,
+    pub last_connected_at: Option<String>,
+    pub voting_power_zat: String,
+    pub voting_power_percent: Option<String>,
+    /// Legacy alias of sampled_blocks for clients using the previous field name.
+    pub eligible_blocks: String,
+    pub sampled_blocks: String,
+    pub signed_blocks: String,
+    pub missed_blocks: String,
+    pub participation_percent: Option<String>,
+    pub last_signed: Option<CrosslinkSignedBlock>,
+    /// At most 50 PoW blocks from the requested window, oldest first.
+    pub recent: Vec<CrosslinkParticipationBlock>,
+}
+
+/// Voting counts refer to signer presence in each sampled PoW header certificate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkParticipationResponse {
+    pub scope: String,
+    pub basis: String,
+    pub from_block_height: Option<String>,
+    pub to_block_height: Option<String>,
+    pub observed_at: Option<String>,
+    pub connection_window_seconds: String,
+    pub window: String,
+    pub from_bft_height: Option<String>,
+    pub to_bft_height: Option<String>,
+    pub observed_blocks: String,
+    pub partial_window: bool,
+    pub items: Vec<CrosslinkParticipationEntry>,
+}
+
+/// Newest-first signed decisions with a finalizer-bound continuation cursor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CrosslinkSignedBlocksResponse {
+    pub public_key: String,
+    pub items: Vec<CrosslinkSignedBlock>,
+    pub limit: u32,
+    pub has_next: bool,
+    pub next_cursor: Option<String>,
+}
