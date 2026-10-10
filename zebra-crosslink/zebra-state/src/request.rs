@@ -492,7 +492,14 @@ impl FinalizedBlock {
 
 impl FinalizableBlock {
     /// Create a new [`FinalizableBlock`] given a [`ContextuallyVerifiedBlock`], treestate, bond rewards, and unbonding amounts.
-    pub fn new(contextually_verified: ContextuallyVerifiedBlock, treestate: Treestate, bond_rewards: Vec<([u8; 32], u64)>, finalizer_rewards: Vec<([u8; 32], u64)>, bond_burns: Vec<[u8; 32]>, unbonding_amounts: Vec<([u8; 32], u64)>) -> Self {
+    pub fn new(
+        contextually_verified: ContextuallyVerifiedBlock,
+        treestate: Treestate,
+        bond_rewards: Vec<([u8; 32], u64)>,
+        finalizer_rewards: Vec<([u8; 32], u64)>,
+        bond_burns: Vec<[u8; 32]>,
+        unbonding_amounts: Vec<([u8; 32], u64)>,
+    ) -> Self {
         Self::Contextual {
             contextually_verified,
             treestate,
@@ -1559,6 +1566,22 @@ pub enum ReadRequest {
     /// at its current height.
     CrosslinkRecencyStatus,
 
+    /// Certificate signer presence over the latest bounded canonical PoW window.
+    #[cfg(feature = "indexer")]
+    CrosslinkPowVotingWindow {
+        /// Number of PoW blocks to sample, bounded to 1 through 10000.
+        window: u32,
+        /// Inclusive PoW window end, or the current best-chain tip.
+        to_height: Option<u32>,
+    },
+
+    /// Recover first certificate inclusion times from up to 10000 canonical PoW headers.
+    #[cfg(feature = "indexer")]
+    CrosslinkCertificateInclusions {
+        /// BFT decision hashes and lower bounds strictly above their certified PoW blocks.
+        certificates: Vec<([u8; 32], block::Height)>,
+    },
+
     /// The block this node has finalized (FINALITY.md §7.2), or `None` before the first one.
     CrosslinkFinalizedTip,
 
@@ -1694,10 +1717,18 @@ impl ReadRequest {
             ReadRequest::CrosslinkAggregatedStakes(_) => "crosslink_aggregated_stakes",
             ReadRequest::CrosslinkFinalizerCandidates => "crosslink_finalizer_candidates",
             ReadRequest::CrosslinkIsAncestor { .. } => "crosslink_is_ancestor",
-            ReadRequest::CrosslinkFatPointerToBftChainTip(_) => "crosslink_fat_pointer_to_bft_chain_tip",
+            ReadRequest::CrosslinkFatPointerToBftChainTip(_) => {
+                "crosslink_fat_pointer_to_bft_chain_tip"
+            }
             ReadRequest::CrosslinkRoster => "crosslink_roster",
             ReadRequest::CrosslinkRosterWithAddresses => "crosslink_roster_with_addresses",
             ReadRequest::CrosslinkRecencyStatus => "crosslink_recency_status",
+            #[cfg(feature = "indexer")]
+            ReadRequest::CrosslinkPowVotingWindow { .. } => "crosslink_pow_voting_window",
+            #[cfg(feature = "indexer")]
+            ReadRequest::CrosslinkCertificateInclusions { .. } => {
+                "crosslink_certificate_inclusions"
+            }
             ReadRequest::CrosslinkFinalizedTip => "crosslink_finalized_tip",
             ReadRequest::CrosslinkFinalizedTipChange => "crosslink_finalized_tip_change",
             ReadRequest::CrosslinkBlockFinality(_) => "crosslink_block_finality",
@@ -1815,8 +1846,12 @@ impl TryFrom<Request> for ReadRequest {
             ),
 
             Request::BondInfo(bond_key) => Ok(ReadRequest::BondInfo(bond_key)),
-            Request::BondInfoForBlock { bond_key, height } => Ok(ReadRequest::BondInfoForBlock { bond_key, height }),
-            Request::FinalizerRewardBalance(finalizer) => Ok(ReadRequest::FinalizerRewardBalance(finalizer)),
+            Request::BondInfoForBlock { bond_key, height } => {
+                Ok(ReadRequest::BondInfoForBlock { bond_key, height })
+            }
+            Request::FinalizerRewardBalance(finalizer) => {
+                Ok(ReadRequest::FinalizerRewardBalance(finalizer))
+            }
             Request::FinalizerRewardBalances => Ok(ReadRequest::FinalizerRewardBalances),
         }
     }

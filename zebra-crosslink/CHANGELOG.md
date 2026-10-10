@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- Crosslink participation and signed-history RPCs expose first canonical certificate inclusion
+  evidence for historical decisions without a persisted receipt time, without substituting
+  the certified PoW block timestamp or requiring a database resync.
+
+- Crosslink signed-block responses expose persisted local certificate observation time separately
+  from the finalized PoW block timestamp; timestamps absent in existing databases remain unknown.
+
+- Crosslink explorer participation RPCs count certificate signer presence in a bounded canonical
+  PoW block window, expose node connection status, and paginate distinct signed BFT decisions.
+  Certificate observation times are persisted from first receipt; historical unknown times stay null.
+
 - Added an opt-in `indexer` feature with in-process RocksDB-backed explorer indexes and RPCs for
   block, transaction, address, index status, network statistics, chart, and top-balance queries.
   Enabling it requires a fresh state database so the explorer indexes can be built from genesis.

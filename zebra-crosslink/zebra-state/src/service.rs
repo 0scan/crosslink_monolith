@@ -1213,6 +1213,114 @@ impl Service<ReadRequest> for ReadStateService {
                 ))
             }
 
+            #[cfg(feature = "indexer")]
+            ReadRequest::CrosslinkPowVotingWindow { window, to_height } => {
+                use crate::new_network::pow_voting::{PowVotingBlock, PowVotingWindow};
+                if !(1..=10_000).contains(&window) {
+                    return Err(BoxError::from(
+                        "PoW voting window must be between 1 and 10000",
+                    ));
+                }
+                let snapshot = state.latest_non_finalized_state();
+                let chain = snapshot.best_chain();
+                let Some((tip, _)) = read::best_tip(&snapshot, &state.db) else {
+                    return Ok(ReadResponse::CrosslinkPowVotingWindow(
+                        to_height.is_none().then(PowVotingWindow::default),
+                    ));
+                };
+                let end = to_height.unwrap_or(tip.0);
+                if end > tip.0 {
+                    return Ok(ReadResponse::CrosslinkPowVotingWindow(None));
+                }
+                let start = end.saturating_sub(window.saturating_sub(1));
+                let mut hash = chain
+                    .and_then(|chain| chain.block(block::Height(end).into()))
+                    .map(|block| block.hash)
+                    .or_else(|| state.db.hash(block::Height(end)))
+                    .ok_or_else(|| BoxError::from("PoW voting window end block is unavailable"))?;
+                let mut blocks = Vec::new();
+                for height in (start..=end).rev() {
+                    // Follow hashes from a pinned chain snapshot. Height-only lookups could
+                    // mix branches while a finalization or reorg lands during this read.
+                    let header = chain
+                        .and_then(|chain| chain.block(hash.into()))
+                        .map(|block| block.block.header.clone())
+                        .or_else(|| state.db.block_header(hash.into()))
+                        .ok_or_else(|| BoxError::from("PoW voting window header is unavailable"))?;
+                    let pointer = &header.fat_pointer_to_bft_block;
+                    let has_certificate = pointer.points_at_block_hash().0 != [0; 32];
+                    blocks.push(PowVotingBlock {
+                        height: block::Height(height),
+                        hash,
+                        bft_height: has_certificate.then(|| pointer.get_vote_template().height),
+                        signers: pointer
+                            .signatures
+                            .iter()
+                            .map(|signature| signature.pub_key.0)
+                            .collect(),
+                    });
+                    hash = header.previous_block_hash;
+                }
+                blocks.reverse();
+                Ok(ReadResponse::CrosslinkPowVotingWindow(Some(
+                    PowVotingWindow { blocks },
+                )))
+            }
+
+            #[cfg(feature = "indexer")]
+            ReadRequest::CrosslinkCertificateInclusions { certificates } => {
+                use crate::new_network::pow_voting::{CertificateInclusion, CertificateInclusions};
+                if certificates.len() > 100 {
+                    return Err(BoxError::from(
+                        "at most 100 historical certificates can be resolved",
+                    ));
+                }
+                let mut inclusions =
+                    CertificateInclusions::new(certificates.iter().map(|(hash, _)| *hash));
+                let snapshot = state.latest_non_finalized_state();
+                let chain = snapshot.best_chain();
+                let activation = state
+                    .network
+                    .crosslink_parameters()
+                    .bootstrap
+                    .activation_height();
+                if let (Some(start), Some(activation), Some((tip, _))) = (
+                    certificates.iter().map(|(_, height)| height.0).min(),
+                    activation,
+                    read::best_tip(&snapshot, &state.db),
+                ) {
+                    let start = start.max(activation);
+                    let end = tip.0.min(start.saturating_add(9_999));
+                    for height in start..=end {
+                        if inclusions.is_complete() {
+                            break;
+                        }
+                        // The pinned best chain owns every non-finalized height; earlier
+                        // disk heights form its immutable finalized prefix.
+                        let header = chain
+                            .and_then(|chain| chain.block(block::Height(height).into()))
+                            .map(|block| block.block.header.clone())
+                            .or_else(|| state.db.block_header(block::Height(height).into()))
+                            .ok_or_else(|| {
+                                BoxError::from("historical certificate header is unavailable")
+                            })?;
+                        let pointer = &header.fat_pointer_to_bft_block;
+                        inclusions.observe(
+                            pointer.points_at_block_hash().0,
+                            !pointer.signatures.is_empty(),
+                            CertificateInclusion {
+                                block_height: block::Height(height),
+                                block_hash: header.hash(),
+                                block_time: header.time.timestamp(),
+                            },
+                        );
+                    }
+                }
+                Ok(ReadResponse::CrosslinkCertificateInclusions(
+                    inclusions.items,
+                ))
+            }
+
             ReadRequest::CrosslinkRecencyStatus => Ok(ReadResponse::CrosslinkRecencyStatus(
                 crate::new_network::bft::bft_recency_status(),
             )),

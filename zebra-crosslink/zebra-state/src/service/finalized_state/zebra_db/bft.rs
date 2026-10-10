@@ -4,7 +4,9 @@ use zcash_primitives::bft::{BftBlock, FatPointerToBftBlock, TMSig};
 
 use crate::service::finalized_state::{
     disk_db::DiskWriteBatch,
-    disk_format::bft::{BftHeight, ProposalSignatures, StoredBftBlock, StoredFatPointer},
+    disk_format::bft::{
+        BftHeight, CertificateObservedAt, ProposalSignatures, StoredBftBlock, StoredFatPointer,
+    },
     zebra_db::ZebraDb,
     TypedColumnFamily,
 };
@@ -17,6 +19,9 @@ pub const BFT_FAT_POINTER_BY_HEIGHT: &str = "bft_fat_pointer_by_height";
 
 /// The name of the BFT proposal signatures by BFT height column family.
 pub const BFT_PROPOSAL_SIGS_BY_HEIGHT: &str = "bft_proposal_sigs_by_height";
+
+/// Optional local observation timestamps. Absent rows in old databases stay unknown.
+pub const BFT_CERTIFICATE_OBSERVED_AT_BY_HEIGHT: &str = "bft_certificate_observed_at_by_height";
 
 /// The type for reading decided BFT blocks from the database.
 pub type BftBlockByHeightCf<'cf> = TypedColumnFamily<'cf, BftHeight, StoredBftBlock>;
@@ -32,6 +37,7 @@ pub struct StoredDecision {
     pub block: BftBlock,
     pub fat_pointer: FatPointerToBftBlock,
     pub proposal_sigs: Vec<TMSig>,
+    pub certificate_observed_at: Option<i64>,
 }
 
 impl ZebraDb {
@@ -50,6 +56,13 @@ impl ZebraDb {
             .expect("column family was created when database was created")
     }
 
+    fn bft_certificate_observed_at_cf(
+        &self,
+    ) -> TypedColumnFamily<'_, BftHeight, CertificateObservedAt> {
+        TypedColumnFamily::new(&self.db, BFT_CERTIFICATE_OBSERVED_AT_BY_HEIGHT)
+            .expect("column family was created when database was created")
+    }
+
     /// The decided BFT chain, ascending from height 0. Stops at the first gap: a decision is
     /// written after its snapshot commits, so a crash in between leaves a short chain, which
     /// resumes by re-deciding that height rather than by loading past the hole.
@@ -65,6 +78,10 @@ impl ZebraDb {
             }
             let Some(fat_pointer) = fat_pointers.get(&height) else { break; };
             chain.push(StoredDecision {
+                certificate_observed_at: self
+                    .bft_certificate_observed_at_cf()
+                    .zs_get(&height)
+                    .map(|time| time.0),
                 block: block.0,
                 fat_pointer: fat_pointer.0.clone(),
                 proposal_sigs: sigs.get(&height).map(|s| s.0.clone()).unwrap_or_default(),
@@ -81,6 +98,7 @@ impl ZebraDb {
         block: &BftBlock,
         fat_pointer: &FatPointerToBftBlock,
         proposal_sigs: &[TMSig],
+        certificate_observed_at: i64,
     ) -> Result<(), rocksdb::Error> {
         let height = BftHeight(height);
         let mut batch = DiskWriteBatch::new();
@@ -94,6 +112,9 @@ impl ZebraDb {
         let _ = self.bft_proposal_sigs_by_height_cf()
             .with_batch_for_writing(&mut batch)
             .zs_insert(&height, &ProposalSignatures(proposal_sigs.to_vec()));
+        let _ = self.bft_certificate_observed_at_cf()
+            .with_batch_for_writing(&mut batch)
+            .zs_insert(&height, &CertificateObservedAt(certificate_observed_at));
         self.db.write(batch)
     }
 }
